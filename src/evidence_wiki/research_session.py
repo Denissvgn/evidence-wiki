@@ -558,6 +558,16 @@ class ResearchSession:
         return result
 
     @_boundary
+    def run_cycle(self, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
+        """Drive one immutable host request to a finite canonical outcome."""
+        self._check("run_cycle",write=True)
+        for grant in TERMINAL_GRANTS:
+            self.context.require_grant(grant)
+        from .research_cycle import drive
+        return drive(self,request_id=request_id,expected_basis_id=expected_basis_id,
+            max_steps=max_steps,planner_config_ref=planner_config_ref)
+
+    @_boundary
     @_serialized
     def host_job(self, *, request_id, operation, payload, original_text=None):
         """Retain an inert bounded job; execution and authentication stay in the host."""

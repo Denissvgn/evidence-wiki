@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "30"
+LIBRARY_API_VERSION = "31"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -103,11 +103,13 @@ LIBRARY_API_SURFACE = (
     "mutations.reconcile",
     "research.current",
     "research.next",
+    "research.run_cycle",
     "research.session",
     "research.session.current",
     "research.session.next",
     "research.session.advance",
     "research.session.run_until_terminal",
+    "research.session.run_cycle",
     "research.session.host_job",
     "research.session.pending",
     "research.session.reconcile_pending",
@@ -518,6 +520,9 @@ def contract() -> dict:
                         "research-session-current/v2", "research-session-next/v2",
                         "research-session-binding/v2", "research-session-step/v2"],
             "schema_accessor": "evidence_wiki.research_session_contracts.schema_document",
+            "work_cycle_result": "research-work-cycle-result/v1",
+            "work_cycle_result_schema_accessor": "evidence_wiki.cycle_result_contracts.schema_document",
+            "work_cycle": "one immutable host request composed over existing native run/effect owners; finite drive exhaustion closes canonically while unresolved external reservations remain unknown",
             "state_owner": "canonical run state and event journal",
             "advice": "inert current accounting and bounded next-work descriptions",
             "advance_profile": "legacy finite refusal; explicit ResearchExecution enables bounded canonical generation, admission, independent review and release",

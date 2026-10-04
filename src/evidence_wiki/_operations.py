@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "13"
+OPERATION_MATRIX_VERSION = "14"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -61,11 +61,13 @@ _ROWS = (
     ("research.requirements.prepare_revision", None, "private mutation-control gates only; inert exact-scope revision request", "native workspace gate and frozen envelope grant", "none"),
     ("research.requirements.revise", None, "owned append-only requirements, new question/coverage artifacts and historical mutation receipt; no acceptance", "existing native workspace/request gates, staged prior-byte checks and requirements published last", "none"),
     ("research.next", None, "none; inert typed next work", "bounded canonical observations", "none"),
+    ("research.run_cycle", None, "finite canonical research drive, current original accounting and terminal closure", "existing workspace/run/effect owners; gates released during host execution", "explicit scoped ResearchExecution only"),
     ("research.session", None, "none; binds immutable policy, scope and original accounting", "canonical run owner on later explicit steps", "none"),
     ("research.session.current", None, "none; verifies session binding and current accounting", "bounded canonical observations", "none"),
     ("research.session.next", None, "none; verifies session binding and returns inert work", "bounded canonical observations", "none"),
     ("research.session.advance", None, "canonical run transitions, reservations, authenticated observations and owning research effects", "native workspace/run gates released during bounded host work", "explicit scoped host executor only with ResearchExecution"),
     ("research.session.run_until_terminal", None, "bounded advancing steps and complete original accounting", "same canonical owners; persisted finite step/time/resource limits", "explicit scoped host executor only with ResearchExecution"),
+    ("research.session.run_cycle", None, "intent-bound finite canonical drive and durable terminal exhaustion", "existing run journal; exact request replay and unresolved reservation retention", "explicit scoped ResearchExecution only"),
     ("research.session.host_job", None, "retains an inert leased host job and immutable budget reservation", "selected native workspace gate then canonical run lock and event replay", "none; no default model executor"),
     ("research.session.pending", None, "none; observes retained lease without renewal", "bounded native run state and journal capture", "none"),
     ("research.session.reconcile_pending", None, "durable correlated pending/history observations or unknown fallback", "native gates released during bounded host polling", "explicit host poll; uncertain external completion stays unknown"),

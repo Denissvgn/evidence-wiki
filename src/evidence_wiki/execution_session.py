@@ -93,87 +93,16 @@ def _begin(session):
 
 
 def _sources(session, observed=None):
-    """Resolve authorized native extents to current complete source closures."""
+    """Resolve current permitted source packets through the retrieval owner."""
+    from .execution_evidence import sources
+
     own_observation = observed is None
     observed = ResearchObservation(session.root) if own_observation else observed
-    normalize, verifier = owner("normalize_sources"), owner("verify_quotes")
-    manifest, _normalized = normalize.source_paths(observed.config)
-    raw = observed.capture.files.get(manifest, b"")
-    if len(raw) > 1_048_576:
-        refuse("SOURCE_LIMIT")
-    records = {}
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        row = owner("_record_artifacts").json_document(line)
-        identifier = row.get("id")
-        if type(identifier) is not str or identifier in records or len(records) >= 64:
-            refuse("SOURCE_LIMIT")
-        records[identifier] = row
-    policy = session.policy.to_dict()
-    native = policy["scope"].get("source_scope_kind") == "native_extent"
-    scopes = []
-    if native:
-        declaration = (observed.requirements or {}).get("request", {}).get("payload", {}).get("authority", {})
-        original_scopes = declaration.get("source_scope", [])
-        for value in policy["scope"]["source_scope"]:
-            path = owner("_owner_paths").checked_path(session.root, Path(value), field="source_extent")
-            if (not path.is_relative_to(session.root)
-                    or not any(Path(item).is_absolute() and path.is_relative_to(Path(item)) for item in original_scopes)):
-                refuse("SOURCE_SCOPE_UNSUPPORTED")
-            if not path.exists():
-                continue
-            scopes.append((path, path.is_dir()))
-    packets, bindings = [], []
-    for identifier, record in records.items():
-        if not native and identifier not in policy["scope"]["source_scope"]:
-            continue
-        try:
-            path, _label = verifier.normalized_record_path(session.root, observed.config, identifier)
-            path = owner("_owner_paths").checked_path(session.root, path, field="normalized_source", kind="file")
-            session.context.require_path(path)
-            relative = path.relative_to(session.root).as_posix()
-            data = observed.capture.files.get(relative)
-            if data is None:
-                continue
-            metadata, body = verifier.normalized_record_content(path)
-            problems = owner("_normalized_contract").validate_document(path, metadata, body,
-                manifest_by_id=records, normalized_root=path.parent, project_root=session.root, config=observed.config)
-            if problems or metadata.get("evidence_usable") is False:
-                continue
-            extent = identifier
-            if native:
-                fingerprint_paths = [item.relative_to(session.root).as_posix()
-                    for item in owner("source_inventory").raw_fingerprint_paths(session.root, record)]
-                matches = []
-                for scope in scopes:
-                    matched = False
-                    try:
-                        owner("_draft_admission").original_source_paths(session.root, observed.capture, record,
-                            [scope], fingerprint_paths)
-                        matched = True
-                    except (Exception, SystemExit):
-                        matched = False
-                    if matched:
-                        matches.append(str(scope[0]))
-                if not matches:
-                    continue
-                extent = sorted(matches)[0]
-            if len(data) > 65_536:
-                refuse("SOURCE_LIMIT")
-            binding = {"source_id": identifier, "extent_ref": extent,
-                "closure_id": digest({"record": record, "normalized_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-                    "raw_fingerprint": owner("source_inventory").compute_raw_fingerprint(session.root, record)})}
-            bindings.append(binding)
-            packets.append({"source_id": identifier, "record_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
-                "metadata": metadata, "content": body, "source_binding": binding})
-        except (OSError, ValueError):
-            continue
+    result = sources(session, observed)
     if own_observation:
         observed.finish()
-    if len(canonical(packets)) > 196_608:
-        refuse("SOURCE_LIMIT")
-    return packets, bindings
+    return result
+
 
 
 def _qualifications(session, observed, *, originals=None, packets=None, records=None):
@@ -390,7 +319,7 @@ def _disagreement_refusal(session, view, error):
         "insufficient_evidence" if source_gap else "unsupported_claim" if unsupported else "untrusted_observation")
 
 
-def _action(session, view, records, *, resuming=False):
+def _owner_action(session, view, records, *, resuming=False):
     frozen = session.policy.to_dict()
     profile = session.execution.profile
     if getattr(profile, "role_scopes", None) is not None and profile.required_diversity:
@@ -592,6 +521,17 @@ def _action(session, view, records, *, resuming=False):
     return _terminal_action(session, view, "abstained", "current_outcomes")
 
 
+def _action(session, view, records, *, resuming=False):
+    from .execution_planning import proposed_action
+
+    action = _owner_action(session, view, records, resuming=resuming)
+    if action.get("retry_purpose") == "plan" and action["operation"] != "reconcile":
+        prior = _attempt_rows(records)[view["execution"]["pending"]["attempt_id"]]
+        return {**action, "operation": "plan", "owner_action": detached(prior["owner_action"]),
+            "selection_key": prior["selection_key"]}
+    return proposed_action(session, view, records, action)
+
+
 def next_work(session):
     view = current(session)
     action = _action(session, view, retained(session))
@@ -636,7 +576,7 @@ def reserve(session, request_id, action, view):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     registry = session.execution.profile.role_scopes
     scope = None if registry is None else registry.scope(config_ref)
-    if scope is not None and operation == "generate" and scope.task_role != ("repair" if purpose == "repair" else "researcher"):
+    if scope is not None and operation == "generate" and scope.task_role != ("planner" if purpose == "plan" else "repair" if purpose == "repair" else "researcher"):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     review_context = None
     original = next(row for row in view["accounting"]["original_outcomes"] if row["original_id"] == action["original_id"])
@@ -722,6 +662,13 @@ def reserve(session, request_id, action, view):
             "omit or return an empty list; no coverage changes allowed" if purpose == "repair"
             and getattr(session.execution.profile, "disagreement", None) is not None else "optional declared facet/source links"}
         payload = {"question": original["original_text"]}
+    if purpose == "plan":
+        from .execution_evidence import proposal_sources
+        from .execution_planning import packet as planner_packet
+        input_document = planner_packet(session, action, view, proposal_sources(packets, original["original_text"]))
+    elif operation == "generate":
+        from .execution_evidence import proposal_sources
+        input_document["sources"] = proposal_sources(input_document["sources"], original["original_text"])
     observed.finish()
     plan = session.execution.ledger(session)
     projection = accounting.projection(plan, limits=_limits(session))
@@ -753,7 +700,7 @@ def reserve(session, request_id, action, view):
         "input_id": session.binding["request_binding"], "basis_id": view["basis_id"], "policy_id": session.policy.policy_id,
         "policy_version": "2" if frozen["schema_version"] == POLICY_V2 else "1", "prompt_version": role.prompt_version,
         "revision_precondition": view["basis_id"], "original_text": original["original_text"], "scope": [original["original_id"]],
-        "required_capabilities": ["model"], "payload": payload, "issued_utc": now.isoformat(),
+        "required_capabilities": ["model", "plan.propose"] if purpose == "plan" else ["model"], "payload": payload, "issued_utc": now.isoformat(),
         "deadline_utc": (now + timedelta(seconds=timeout)).isoformat(), "timeout_seconds": timeout, "max_attempts": 1,
         "expected_result_schema": EXECUTION_OBSERVATION, "budgets": cap,
         "qualifications": {"assurance": frozen["assurance"], "status": "unknown", "evaluator_ref": None,
@@ -769,7 +716,9 @@ def reserve(session, request_id, action, view):
     if current(session)["basis_id"] != view["basis_id"]:
         refuse("BASIS_CHANGED")
     extras = {}
-    if getattr(session.execution.profile, "disagreement", None) is not None:
+    if purpose == "plan":
+        extras.update(owner_action=detached(action["owner_action"]), selection_key=action["selection_key"])
+    if purpose != "plan" and getattr(session.execution.profile, "disagreement", None) is not None:
         from .execution_disagreement import attempt_metadata, material_basis
         if operation == "evaluate":
             extras["review_material_basis"] = material_basis(prepared["snapshot"], prepared["rubric"],
@@ -785,6 +734,7 @@ def reserve(session, request_id, action, view):
     append(session, "execution_attempt", child_id(request_id, "intent"), {"attempt": attempt.document(),
         "reservation": reservation, "purpose": action.get("purpose", operation), "original_id": original["original_id"],
         "claim_id": action.get("claim_id"), **extras,
+        **({"retry_purpose": action["retry_purpose"]} if "retry_purpose" in action else {}),
         **({"review_context": review_context.binding()} if review_context is not None else {}), **({key: action[key] for key in
             ("predecessor_attempt_id", "predecessor_observation_ref", "retry_after_utc", "retry_purpose")}
             if "predecessor_attempt_id" in action else {})})
@@ -1189,6 +1139,13 @@ def _apply(session, attempt_id):
         from .calibration_probes import refresh
         refresh(session, child_id(attempt_id, "application_probe"))
     _validate_application(session, attempt, observation, application)
+    if row.get("retry_purpose", row.get("purpose")) == "plan":
+        from .execution_planning import apply as apply_plan
+        with gate(session):
+            if not any(record["kind"] == "execution_applied" and record["data"]["attempt_id"] == attempt_id
+                    for record in retained(session)):
+                apply_plan(session, row, attempt, observation, current(session))
+        return
     if application is None:
         with gate(session):
             view = current(session)
@@ -1492,7 +1449,7 @@ def advance(session, *, request_id, expected_basis_id):
             append(session, "execution_advance", child_id(request_id, "advance_intent"), {"advance_id": request_id,
                 "before_basis_id": expected_basis_id, "action": action,
                 "consumes_step": view["execution"]["steps_used"] < session.execution.profile.total_steps})
-        if action["operation"] in {"generate", "repair", "evaluate", "adjudicate"}:
+        if action["operation"] in {"generate", "repair", "evaluate", "adjudicate", "plan"}:
             try:
                 prior = next((row["data"] for row in records if row["kind"] == "execution_attempt"
                     and row["data"]["attempt"]["job"]["id"] == request_id), None)
@@ -1622,6 +1579,45 @@ def run_until_terminal(session, *, request_id, expected_basis_id, max_steps):
                 time.sleep(min(0.02, remaining))
     return result
 
+
+
+def close_drive_bound(session, *, request_id):
+    """Stop a bounded drive durably; unknown outstanding effects stay reserved."""
+    request_id = validate_request_id(request_id)
+    with gate(session):
+        prior = next((record for record in retained(session) if record["kind"] == "execution_step"
+            and record["data"]["step"]["request_id"] == request_id), None)
+        if prior is not None:
+            step = detached(prior["data"]["step"])
+            if not step["terminal"] or step["reason"] != "budget_exhausted":
+                refuse("REQUEST_CONFLICT")
+            document = _finish(session,step["decision"])
+            step["canonical_run_state"] = document["state"]["current"]
+            _close(session,step)
+            step.update(historical=True,event_ref=prior["event_ref"])
+            return checked(STEP_V2,step)
+    work = pending(session)
+    if work and work["reservation_occupied"]:
+        if "research_session.cancel_pending" in session.context.grants:
+            control_pending(session,request_id=child_id(request_id,"settle"),cancel=True)
+        elif "research_session.reconcile_pending" in session.context.grants:
+            control_pending(session,request_id=child_id(request_id,"settle"))
+        else:
+            with gate(session):
+                append(session,"execution_cleanup_unavailable",child_id(request_id,"cleanup_unavailable"),
+                    {"attempt_id":work["attempt_id"],"reason":"authority_unavailable","reservation_retained":True})
+    with gate(session):
+        view = current(session)
+        action = _terminal_action(session,view,"stop_budget","budget_exhausted")
+        append(session,"execution_drive_bound",child_id(request_id,"intent"),
+            {"reason":"budget_exhausted","pending":view["execution"]["pending"],"steps_used":view["execution"]["steps_used"]})
+        step = _step(session,request_id,view["basis_id"],"terminal",decision=action["decision"],terminal=True)
+        event = append(session,"execution_step",child_id(request_id,"step"),{"step":step,"decision_input":action["decision_input"]})
+        document = _finish(session,action["decision"])
+        step["canonical_run_state"] = document["state"]["current"]
+        _close(session,step)
+        step["event_ref"] = event["event_id"]
+        return checked(STEP_V2,step)
 
 def control_pending(session, *, request_id, cancel=False):
     request_id = validate_request_id(request_id)

@@ -189,6 +189,12 @@ def fixture(tmp_path, monkeypatch, request=None):
         disagreement = DisagreementPlan()
         roles += (ExecutionRole("repairer", "host_worker", "runner", "controlled-repair-process", "generate/v1"),)
         registry = ExecutionRoleRegistry((*registry.scopes, ExecutionRoleScope("repairer", "repair", ("model",))))
+    if options.get("planner"):
+        roles += (ExecutionRole("planner", "host_worker", "planner-controller", "controlled-planning-process", "plan/v1"),)
+        registry = ExecutionRoleRegistry((*(() if registry is None else registry.scopes),
+            *(() if registry is not None else (ExecutionRoleScope("researcher", "researcher", ("model",)),
+                ExecutionRoleScope("profile-a", "evaluator", ("model",)))),
+            ExecutionRoleScope("planner", "planner", ("model", "plan.propose"))))
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
         roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
@@ -223,6 +229,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     if options.get("worker_failover"):
         commands["backup-researcher"] = (sys.executable, "-c", generator)
         commands["researcher"] = (sys.executable, "-c", "raise SystemExit(1)")
+    if options.get("planner"):
+        planner = "import json,sys; d=json.load(sys.stdin)['input']; a=d['owner_actions'][0]; print(json.dumps({'schema_version':'research-work-proposal/v1','basis_id':d['basis_id'],'candidates':[dict(a,candidate_id='next',rationale='Exact permitted action')]}))"
+        commands["planner"] = (sys.executable, "-c", planner)
     executor = BoundedSubprocessExecutor(profile, commands=commands,
         cwd=worker, receipt_key=b"e" * 32, meter=LocalMeter())
     calibration_commands = {config: (sys.executable, "-c", generator if config == "researcher" else evaluator)

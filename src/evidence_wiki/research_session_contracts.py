@@ -88,7 +88,7 @@ def schemas():
     next_v2["properties"]["current"] = current_v2
     next_v2["properties"]["decision"] = _nullable(opaque)
     next_v2["properties"]["actions"]["items"]["properties"]["operation"] = {
-        "enum": ["terminal", "normalize", "prepare", "generate", "evaluate", "repair", "reconcile", "admit", "resolve", "release"]}
+        "enum": ["terminal", "normalize", "prepare", "plan", "generate", "evaluate", "repair", "reconcile", "admit", "resolve", "release"]}
     binding_v2 = json.loads(json.dumps(binding))
     binding_v2["properties"]["schema_version"] = {"const": BINDING_V2}
     for key in ("execution_profile_id", "qualification_id", "signer_id", "observer_id"):

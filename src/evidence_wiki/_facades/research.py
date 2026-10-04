@@ -33,6 +33,12 @@ class ResearchNamespace(Namespace):
     def next(self, policy, *, run_id=None, execution=None):
         return self._invoke("next_work", policy, run_id=run_id, execution=execution)
 
+    def run_cycle(self, policy, *, run_id, execution, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
+        """One host invocation over existing session and authenticated effect owners."""
+        with self.session(policy,run_id=run_id,execution=execution) as selected:
+            return selected.run_cycle(request_id=request_id,expected_basis_id=expected_basis_id,
+                max_steps=max_steps,planner_config_ref=planner_config_ref)
+
     def session(self, policy, *, run_id, execution=None):
         session = self._invoke("session", policy, run_id=run_id, execution=execution)
         session._owner_workspace = self._workspace

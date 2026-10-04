@@ -126,6 +126,12 @@ and full current material identity; stale or unsupported caches return an
 explicit lexical fallback. The shared schema matcher accepts finite native
 numeric ranking scores without boolean or string coercion.
 
+Version `31` adds `research.run_cycle` and `session.run_cycle`, with operation
+matrix `14`. One immutable host request drives the existing authenticated run,
+owned mutations and review/release gates to a finite terminal outcome. Optional
+scoped planner proposals select only actions permitted by the deterministic
+owner; planner output carries no effect authority.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -731,10 +737,12 @@ closed schema documents for host negotiation.
 | --- | --- |
 | `research.current` | `ws.research.current(policy, *, run_id=None, execution=None)` |
 | `research.next` | `ws.research.next(policy, *, run_id=None, execution=None)` |
+| `research.run_cycle` | `ws.research.run_cycle(policy, *, run_id, execution, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None)` |
 | `research.session` | `ws.research.session(policy, *, run_id, execution=None)` |
 | session observation | `session.current()` and `session.next()` |
 | session advance | `session.advance(*, request_id, expected_basis_id)` |
 | bounded terminal route | `session.run_until_terminal(*, request_id, expected_basis_id, max_steps=1)` |
+| host work cycle | `session.run_cycle(*, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None)` |
 | inert host job | `session.host_job(*, request_id, operation, payload, original_text=None)` |
 | retained pending work | `session.pending() -> dict \| None` |
 | finite reconciliation | `session.reconcile_pending(*, request_id)` |
@@ -797,6 +805,49 @@ with host_context.activate(), Workspace.open(workspace_path) as workspace:
 ```
 
 All services and permissions in this example come from trusted host provisioning.
+
+A host can compose the same journey in one call:
+
+```python
+result = workspace.research.run_cycle(
+    frozen_policy, run_id="research-run", execution=execution,
+    request_id="research-drive", max_steps=64,
+    planner_config_ref="configured-planner",  # omit for deterministic selection
+)
+```
+
+The host grants `research_session.run_cycle` plus the existing session,
+current-view, advancement, intake and native lifecycle/effect grants. A selected
+planner requires an exact `planner` role scope with `model` and `plan.propose`,
+its configured native host-worker controller and actual authenticated execution.
+It receives bounded permitted evidence and exact references; proposals are
+intersected with current canonical actions, policy and source bindings before
+use. Claim-specific planning retains only its declared evidence dependencies.
+Planner empirical semantic qualification remains unknown; it cannot review,
+accept, sign or release claims.
+
+Current source packets pass the retrieval owner's usability, path and native
+permission checks before worker content is exposed. Generation receives exact
+bounded normalized-body excerpts and explicit missing context. Independent
+review retains its complete-context requirement. Material closure identity
+remains separate from current native usage authority.
+
+`research-work-cycle-result/v1` is available through
+`evidence_wiki.cycle_result_contracts.schema_document()`. Results distinguish
+attempted work, current native acceptance, native rejection/abstention, missing
+question mappings and unattempted originals. The historical terminal step and
+current release are separate observations; replay can retain an old outcome
+while today's evidence is incomplete. `authorized` and `evidence_accepted`
+remain false. An optional initial basis is frozen on first use and reused by the
+same request; changing bounds or planner conflicts.
+
+Exhausting the drive bound closes through canonical terminal and accounting
+owners. Unknown external completion remains reserved; unavailable cleanup
+permission does not imply cancellation or rollback. A live managed
+orchestration refuses caller-cycle effects before starting a caller run.
+ResearchExecution's existing retry, repair, qualification and release limits
+remain in force; this call creates no competing lifecycle or default provider.
+
 
 `ExecutionRoleLimit` and `ExecutionSchedule` optionally freeze aggregate role
 limits, allowed failure reasons, a finite backoff and explicit worker fallback

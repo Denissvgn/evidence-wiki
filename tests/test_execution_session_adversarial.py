@@ -126,7 +126,7 @@ def test_unfinished_accepted_replay_rechecks_current_qualification(execution_fix
             saved = next(row["data"]["step"] for row in execution.records(session)
                          if row["kind"] == "execution_step" and row["data"]["step"]["outcome"] == "accepted")
             monkeypatch.setattr(execution_session, "_finish", finish)
-            monkeypatch.setattr(execution_session, "_qualifications", lambda *_args: {
+            monkeypatch.setattr(execution_session, "_qualifications", lambda *_args, **_kwargs: {
                 "state": "unknown", "reason": "qualification_invalid_or_expired", "profiles": []})
             try:
                 current_result = session.advance(request_id=saved["request_id"], expected_basis_id=saved["before_basis_id"])

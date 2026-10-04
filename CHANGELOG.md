@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add a bounded host research cycle with authenticated scoped planner proposals,
+  current permitted worker evidence and durable terminal/replay accounting.
+
 - Expose bounded permission-filtered lexical/FTS search with exact excerpts and
   source revisions, plus separately selected native index publication.
 
