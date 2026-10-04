@@ -144,14 +144,27 @@ def originals(capture, root, config, policy, proposal):
     require(any(declared_root.is_relative_to(Path(value)) and root.is_relative_to(Path(value).resolve(strict=True))
                 for value in writable_roots), "original_writable_scope_changed")
     scopes = []
+    has_uri = False
     for value in authority["source_scope"]:
+        if type(value) is str and "://" in value:
+            from urllib.parse import urlsplit
+            try:
+                declared=urlsplit(value)
+                _port=declared.port
+                require(declared.scheme=="https" and declared.hostname is not None
+                    and declared.username is None and declared.password is None
+                    and not declared.query and not declared.fragment, "original_source_scope_unsupported", unsupported=True)
+            except ValueError:
+                refuse("original_source_scope_unsupported", unsupported=True)
+            has_uri = True
+            continue
         path = Path(value)
         require(path.is_absolute() and ".." not in path.parts and path.is_relative_to(declared_root),
                 "original_source_scope_unsupported", unsupported=True)
         path = checked_path(declared_root, path, field="original_source_scope")
         require(path.exists(), "original_source_scope_missing")
         scopes.append((path, path.is_dir()))
-    require(scopes, "original_source_scope_missing")
+    require(scopes, "original_source_scope_unsupported" if has_uri else "original_source_scope_missing", unsupported=has_uri)
     for source in payload["sources"]:
         require(source["kind"] == "local_file", "original_source_locator_unsupported", unsupported=True)
         path = Path(source["locator"])
@@ -247,9 +260,51 @@ def original_source_paths(root, capture, record, scopes, fingerprint_paths):
         require(relative in capture.files or any(name.startswith(relative + "/") for name in capture.files), "source_original_missing")
 
 
-def source_checks(root, config, policy, capture, proposal, observed_at, scopes, *, _live_view=None):
-    usage, publication = sibling("_evidence_usage"), sibling("_publication_context")
+def _check_evidence(root, config, policy, capture, observed_at, scopes, records, captured, mapped, frozen, normalized_relative, claim, evidence):
     normalized, verifier, inventory = sibling("_normalized_contract"), sibling("verify_quotes"), sibling("source_inventory")
+    identifier = evidence["source_id"]
+    require(identifier in records, "source_not_inventoried")
+    record = records[identifier]
+    fingerprint_paths = [path.relative_to(captured).as_posix()
+                         for path in inventory.raw_fingerprint_paths(captured, record)]
+    original_source_paths(root, capture, record, scopes, fingerprint_paths)
+    path, _label = verifier.normalized_record_path(captured, mapped, identifier)
+    relative = path.relative_to(captured).as_posix()
+    require(relative in capture.files and file_hash(capture.files[relative]) == evidence["record_sha256"], "source_record_revision_changed")
+    metadata, body = verifier.normalized_record_content(path)
+    require(metadata.get("source_id") == identifier, "source_identity_changed")
+    problems = normalized.validate_document(path, metadata, body, manifest_by_id=records,
+        normalized_root=captured / normalized_relative, project_root=captured, config=mapped)
+    require(not problems, "source_record_contract_invalid")
+    require(metadata.get("evidence_usable") is not False, "source_not_usable")
+    provenance = metadata.get("provenance") or {}
+    original_provenance = record.get("provenance") or {}
+    require(type(provenance) is dict and type(original_provenance) is dict, "source_time_changed")
+    parse_time = sibling("_evidence_authority").timestamp
+    retrieved = parse_time(original_provenance.get("retrieved_at"))
+    require(retrieved == parse_time(provenance.get("retrieved_at")) == parse_time(evidence["observed_at"]), "source_time_changed")
+    age = (observed_at - retrieved).total_seconds()
+    require(0 <= age <= policy["max_source_age_seconds"], "source_age_invalid")
+    fingerprint = inventory.compute_raw_fingerprint(captured, record)
+    require(fingerprint is None or fingerprint == record.get("raw_fingerprint") == metadata.get("raw_fingerprint"), "source_raw_revision_changed")
+    profile = metadata.get("host_capture")
+    if type(profile) is dict:
+        expected_kind = {"primary": "primary", "excerpt": "excerpt", "generated_summary": "summary", "search_snippet": "unknown"}.get(profile.get("content_kind"))
+        require(evidence["capture"] == expected_kind, "source_capture_kind_changed")
+    decision = sibling("_usage_gate").source_decision(captured, mapped, identifier, [record, metadata], view=frozen,
+        normalized=capture.files[relative], uses=["retrieval"], purpose="research")
+    require(decision.get("eligible") is True, "source_use_not_permitted")
+    entry = sibling("_strict_evidence").grounding_entry(claim, evidence)
+    parsed = verifier.grounding_entries({"grounding": [entry]}, claim["question_slug"])
+    require(len(parsed) == 1, "mechanical_grounding_unmatched")
+    mechanical = verifier.verify_entry(captured, mapped, parsed[0])
+    return {"result":"verified" if mechanical["result"] == "verified" else "failed",
+        "reason":None if mechanical["result"] == "verified" else "mechanical_grounding_unmatched",
+        "record_sha256":evidence["record_sha256"], "usage":decision, "mechanical":mechanical}
+
+
+def iter_source_diagnostics(root, config, policy, capture, proposal, observed_at, scopes, *, _live_view=None, fail_fast=False):
+    usage, publication = sibling("_evidence_usage"), sibling("_publication_context")
     manifest_relative, normalized_relative = sibling("normalize_sources").source_paths(config)
     checked_path(root, manifest_relative, field="source_manifest", kind="file")
     checked_path(root, normalized_relative, field="normalized_sources", kind="directory")
@@ -263,7 +318,7 @@ def source_checks(root, config, policy, capture, proposal, observed_at, scopes, 
         identifier = record.get("id")
         require(type(identifier) is str and identifier not in records and len(records) < 1000, "source_manifest_invalid")
         records[identifier] = record
-    count = 0
+    diagnostics = []
     selected = nullcontext(_live_view) if _live_view is not None else usage.current_view(root, config) if usage.configured(config) else nullcontext(None)
     with selected as view:
         binding = private_view(view)
@@ -274,45 +329,35 @@ def source_checks(root, config, policy, capture, proposal, observed_at, scopes, 
         mapped, captured_inputs = sibling("coverage_manifest").recovery_materialized_inputs(root, config, capture)
         with captured_inputs.materialize() as captured, publication.authorized_capture(captured, mapped, frozen):
             for claim in proposal["inventory"]["claims"]:
-                for evidence in claim["evidence"]:
-                    identifier = evidence["source_id"]
-                    require(identifier in records, "source_not_inventoried")
-                    record = records[identifier]
-                    fingerprint_paths = [path.relative_to(captured).as_posix()
-                                         for path in inventory.raw_fingerprint_paths(captured, record)]
-                    original_source_paths(root, capture, record, scopes, fingerprint_paths)
-                    path, _label = verifier.normalized_record_path(captured, mapped, identifier)
-                    relative = path.relative_to(captured).as_posix()
-                    require(relative in capture.files and file_hash(capture.files[relative]) == evidence["record_sha256"], "source_record_revision_changed")
-                    metadata, body = verifier.normalized_record_content(path)
-                    require(metadata.get("source_id") == identifier, "source_identity_changed")
-                    problems = normalized.validate_document(path, metadata, body, manifest_by_id=records,
-                        normalized_root=captured / normalized_relative, project_root=captured, config=mapped)
-                    require(not problems, "source_record_contract_invalid")
-                    require(metadata.get("evidence_usable") is not False, "source_not_usable")
-                    provenance = metadata.get("provenance") or {}
-                    original_provenance = record.get("provenance") or {}
-                    require(type(provenance) is dict and type(original_provenance) is dict, "source_time_changed")
-                    parse_time = sibling("_evidence_authority").timestamp
-                    retrieved = parse_time(original_provenance.get("retrieved_at"))
-                    require(retrieved == parse_time(provenance.get("retrieved_at")) == parse_time(evidence["observed_at"]), "source_time_changed")
-                    age = (observed_at - retrieved).total_seconds()
-                    require(0 <= age <= policy["max_source_age_seconds"], "source_age_invalid")
-                    fingerprint = inventory.compute_raw_fingerprint(captured, record)
-                    require(fingerprint is None or fingerprint == record.get("raw_fingerprint") == metadata.get("raw_fingerprint"), "source_raw_revision_changed")
-                    profile = metadata.get("host_capture")
-                    if type(profile) is dict:
-                        expected_kind = {"primary": "primary", "excerpt": "excerpt", "generated_summary": "summary", "search_snippet": "unknown"}.get(profile.get("content_kind"))
-                        require(evidence["capture"] == expected_kind, "source_capture_kind_changed")
-                    decision = sibling("_usage_gate").source_decision(captured, mapped, identifier, [record, metadata], view=frozen,
-                        normalized=capture.files[relative], uses=["retrieval"], purpose="research")
-                    require(decision.get("eligible") is True, "source_use_not_permitted")
-                    entry = sibling("_strict_evidence").grounding_entry(claim, evidence)
-                    parsed = verifier.grounding_entries({"grounding": [entry]}, claim["question_slug"])
-                    require(len(parsed) == 1 and verifier.verify_entry(captured, mapped, parsed[0])["result"] == "verified", "mechanical_grounding_unmatched")
-                    count += 1
+                for index, evidence in enumerate(claim["evidence"]):
+                    row = {"claim_id":claim["id"], "evidence_index":index, "source_id":evidence["source_id"],
+                        "record_sha256":evidence["record_sha256"], "location_hint":evidence.get("location_hint"),
+                        "anchor_pointer":evidence["anchor"]["pointer"] if evidence.get("anchor") is not None else None,
+                        "form":"anchor" if evidence.get("anchor") is not None else "quote",
+                        "result":"unknown", "reason":None, "mechanical":None,
+                        "semantic_approval":"not_evaluated", "accepted":False}
+                    try:
+                        checked = _check_evidence(root, config, policy, capture, observed_at, scopes, records,
+                            captured, mapped, frozen, normalized_relative, claim, evidence)
+                        if fail_fast:
+                            require(checked["result"] == "verified", "mechanical_grounding_unmatched")
+                        row.update(checked)
+                    except ScriptRefusal as error:
+                        if fail_fast:
+                            raise
+                        reason = error.details.get("reason") if type(error.details) is dict else None
+                        row.update(result="failed",reason=reason if type(reason) is str else "source_check_refused")
+                    diagnostics.append(row)
         require(private_view(view) == binding, "source_authority_changed")
-        return count, binding
+        if view is not None:
+            view.revalidate(root, config)
+        return diagnostics, binding
+
+
+def source_checks(root, config, policy, capture, proposal, observed_at, scopes, *, _live_view=None):
+    rows, binding = iter_source_diagnostics(root, config, policy, capture, proposal, observed_at, scopes,
+        _live_view=_live_view, fail_fast=True)
+    return len(rows), binding
 
 
 def dependencies(capture, target_path, new_directories, controls, *, temporary=None):

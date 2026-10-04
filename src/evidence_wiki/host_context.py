@@ -456,6 +456,7 @@ def call_binding() -> Iterator[None]:
 # Only known seam effects may run under an explicit context. The canonical
 # owners still validate their arguments and authenticate evidence independently.
 _READ_SEAMS = frozenset({
+    ("claim_diagnostics", "current"),
     ("acquisition_operations", "prepare"), ("acquisition_operations", "reconcile"),
     ("retrieval_operations", "search"),
     ("source_usability_operations", "current"),

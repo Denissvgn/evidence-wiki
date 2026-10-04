@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or os.open not in 
 
 def test_runtime_schema_and_contract_are_closed_and_advertise_actual_readonly_method():
     published=contract()
-    assert published["library_api"]["version"]=="32"
+    assert published["library_api"]["version"]=="33"
     assert "sources.usability" in published["library_api"]["surface"]
     assert published["source_usability"]["current_usability"]["schema"]=="evidence-source-usability-view/v1"
     assert "workspace-template/scripts/_host_capture_normalization.py" in published["required_asset_manifest"]["starter"]

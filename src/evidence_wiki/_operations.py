@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "15"
+OPERATION_MATRIX_VERSION = "16"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -50,6 +50,7 @@ _ROWS = (
     ("questions.block_current", None, "canonical question blocker references and activity log", "selected mutation workspace/request custody and native question/request locks", "none"),
     ("questions.reopen_current", None, "canonical question reopening only after all current blockers are qualified", "selected mutation workspace/request custody and native question/request/source checks", "none"),
     ("strict.check", "evidence-wiki strict check", "none in live workspace", "current private host view and bounded private capture", "none"),
+    ("strict.diagnose", None, "none; bounded unaccepted per-claim mechanical diagnostics", "native captured source/original bytes and held current usage with closing revalidation", "none; no publication or semantic reviewer"),
     ("strict.admit", None, "configured unaccepted claim inventory and private immutable plan/receipt; no approval or question status", "native mutation workspace/request gates followed by canonical claims gate and prior-byte checks", "none"),
     ("strict.prepare_review", "evidence-wiki strict prepare-review", "none in live workspace", "current private host view and exact review basis", "none"),
     ("strict.register_review", "evidence-wiki strict review", "authenticated review events in private host state", "canonical exclusive host state lock, checkpoint and request identity", "none"),

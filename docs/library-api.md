@@ -138,6 +138,11 @@ methods, with operation matrix `15`. Original scope and aggregate acquisition
 budgets remain tied to frozen instruction custody across runs. An authenticated
 choice is inert until fixed native owners recheck scope, permissions and allowance.
 
+Version `33` adds `strict.diagnose`, with operation matrix `16`. Read-only
+per-claim native findings preserve source revisions, declared quote/anchor
+locations, current usage and mechanical results without publishing or accepting
+a claim. Admission and semantic review retain their owning gates.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -811,6 +816,43 @@ trees and plans outside the declared bounds refuse before effects.
 
 `contract()["serialized_mutations"]` exposes supported operation names and the
 closed schema documents for host negotiation.
+
+`ws.strict.diagnose(proposal)` validates a closed unaccepted draft and returns
+`evidence-claim-diagnostics/v1` through the same native source checks used by
+serialized admission. The host grants `claim_diagnostics.current` and
+`strict_evidence.run_operation.check`; direct native reads still check every
+captured host path. The method performs no publication, question transition,
+review registration or source normalization.
+
+The full proposal, original/derived mapping, instructions and inference DAG are
+validated first. Malformed inventories and cyclic/forward premises refuse as
+structural inputs. Evidence-specific failures retain valid peer claim findings,
+so a generating host can correct wrong revisions, source age, missing inventory,
+quote mismatch or invalid locations without losing the whole report.
+
+Quote occurrence and native structured-pointer equality are mechanical results.
+Negation, compound statements and irrelevant passages still require independent
+semantic review; matching words confer no approval. The response retains claim
+qualification, scope/time/units, premise IDs and each declared source record SHA.
+`location_hint` and `anchor_pointer` identify caller-supplied locations;
+`anchor_pointer` is not an independently verified original-document coordinate.
+Expected/resolved source values, source text and incidental native error messages
+are withheld. Current native usage revision is separate from record identity.
+
+`basis_id` commits caller proposal material and only permitted mechanical/usage
+facts. The full workspace revision stays private for closing revalidation;
+changing denied source bytes cannot expose a public commitment to that material.
+Source age, current native usage/trust and exact captured inputs are checked
+again before return. Unknown or denied evidence stays unestablished, and
+`accepted`, `published` remain false with `semantic_approval="not_evaluated"`.
+
+The bounded profile supports up to100 claims/16 evidence references per claim and
+one MiB output. Declared local extents remain mandatory even when valid HTTPS
+acquisition declarations coexist; a URI grants no local file access. Nonlocal
+source-locator kinds, computation admission and multiple-origin derived mapping
+remain explicit unsupported profiles. Valid v2 capture inventory retains exact
+UTC timestamp representation and fractional precision from its immutable metadata.
+The schema is available through `evidence_wiki.claim_diagnostics.schema_document()`.
 
 **`ws.research`** provides current accounting and explicit bounded sessions:
 

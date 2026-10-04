@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "32"
+LIBRARY_API_VERSION = "33"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -96,6 +96,7 @@ LIBRARY_API_SURFACE = (
     "research.requirements.revise",
     "strict.check",
     "strict.admit",
+    "strict.diagnose",
     "strict.prepare_review",
     "strict.register_review",
     "strict.export",
@@ -558,6 +559,12 @@ def contract() -> dict:
             "qualification": "host-authenticated protected references tied to exact policy, model, prompt, controller, rubric, domain and expiry; host must withdraw frozen services when qualification is revoked",
             "operational_limits": "configured host required; reference subprocess bounds do not establish malicious-worker isolation or general semantic quality",
             "acceptance": "current canonical release is separate from workflow qualification",
+        },
+        "claim_diagnostics": {
+            "schema": "evidence-claim-diagnostics/v1",
+            "schema_accessor": "evidence_wiki.claim_diagnostics.schema_document",
+            "profile": "read-only per-claim mechanical native source/anchor/revision/usage diagnostics; semantic approval and acceptance remain unevaluated",
+            "basis": "caller proposal and permitted mechanical/usage facts; full workspace closing revision stays private",
         },
         "acquisition": {
             "schemas": ["evidence-acquisition-instruction/v1", "evidence-acquisition-agent-workflow-result/v1", "evidence-acquisition-agent-result/v1", "evidence-acquisition-workflow-result/v1", "evidence-acquisition-transport-result/v1", "evidence-acquisition-preparation/v1",

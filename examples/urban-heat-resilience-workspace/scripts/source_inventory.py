@@ -1827,6 +1827,15 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
             data[field] = None
             continue
         if field == "retrieved_at":
+            captured=document.get("host_capture")
+            if (isinstance(captured,dict) and captured.get("schema_version")=="evidence-host-capture/v2"
+                    and isinstance(value,str) and value==captured.get("retrieved_at")):
+                try:
+                    validate_host_capture(captured)
+                    data[field]=value
+                    continue
+                except (CaptureInvalid,TypeError,KeyError):
+                    pass
             timestamp = provenance_timestamp_text(value)
             if timestamp is None:
                 warnings.append(f"{relative_path}: provenance retrieved_at must be an ISO 8601 timestamp")

@@ -36,6 +36,7 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/_strict_evidence.py",
     "scripts/_draft_admission_contract.py",
     "scripts/_draft_admission.py",
+    "scripts/_claim_diagnostics.py",
     "scripts/strict_evidence.py",
     "scripts/_computation_contract.py",
     "scripts/_computation_expression.py",

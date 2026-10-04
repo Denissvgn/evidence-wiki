@@ -41,6 +41,15 @@ class StrictNamespace(Namespace):
             refuse("REVISION_CONFLICT", "/expected_revision")
         return self._workspace.mutations.submit(request)
 
+    def diagnose(self, proposal):
+        """Return per-claim native mechanical diagnostics without accepting drafts."""
+        self._workspace._check_open()
+        from .._facades._base import call_seam
+        def load(_stem):
+            from .. import claim_diagnostics
+            return claim_diagnostics
+        return call_seam(load,"claim_diagnostics","current",self._root,proposal)
+
     def check(self) -> dict[str, Any]:
         """Recompute strict checks without registering a review or publishing files."""
         return self._call("strict_evidence", "run_operation", self._root, operation="check")

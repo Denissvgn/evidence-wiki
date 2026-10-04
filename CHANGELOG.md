@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Expose read-only per-claim native source and anchor diagnostics while keeping
+  mechanical matching, current usage, semantic review and accepted release distinct.
+
 - Add scoped authenticated acquisition choice and bounded native evidence workflows
   with original request budget custody, current source reconciliation and exact replay.
 
