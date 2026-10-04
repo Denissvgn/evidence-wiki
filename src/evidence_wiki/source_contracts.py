@@ -89,6 +89,8 @@ def schemas():
     result.update(capture_schemas())
     from .source_usability_operations import schema as usability_schema
     result["evidence-source-usability-view/v1"] = usability_schema()
+    from .retrieval_operations import schemas as retrieval_schemas
+    result.update(retrieval_schemas())
     result["evidence-host-delivery-result/v2"] = {"$schema": "https://json-schema.org/draft/2020-12/schema",
         **obj(**{**delivered["properties"], "schema_version": {"const": "evidence-host-delivery-result/v2"},
             "content_bytes": {"type": "integer", "minimum": 1, "maximum": 8_388_608},
@@ -172,4 +174,13 @@ def contract_index():
             "qualification": "native stored consistency and current rights; semantic adequacy remains not_evaluated",
             "normalization_currency": "host_capture_normalization_version 1 for explicit v2 captures; stale/future observations refuse readiness",
             "pdf": "one explicit bounded native extraction; retained page consistency checks never rerun parser or prove extraction fidelity"},
+        "retrieval": {"operations": ["sources.search", "sources.build_index"],
+            "schemas": ["evidence-retrieval-view/v1", "evidence-retrieval-index-result/v1"],
+            "bounds": {"sources": 32, "query_chars": 4096, "results": 32, "excerpt_chars": 4096,
+                "selected_bytes": 33_554_432, "index_bytes": 16_777_216, "output_bytes": 1_048_576},
+            "permission": "current native source use before rank/snippets/disclosed processed counts",
+            "index": "explicit serialized native publication; cache schema and full current material hashes checked at read",
+            "fallback": "stale, absent or unsupported cache visibly uses lexical; old runtimes without hard SQLite limits refuse cache use",
+            "protected_cache": "persistent build unsupported; eligible-only in-memory FTS allowed",
+            "acceptance": "exact mechanical body excerpts and current local/native revision identity; semantic adequacy not_evaluated"},
         "provider_enablement": False, "truth_guarantee": False}

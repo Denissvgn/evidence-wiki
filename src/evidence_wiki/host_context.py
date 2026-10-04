@@ -23,6 +23,7 @@ from .errors import ConfigError
 _ACTIVE: ContextVar[HostContext | None] = ContextVar("evidence_wiki_host_context", default=None)
 _GENERATION: ContextVar[tuple[Path, str] | None] = ContextVar("evidence_wiki_host_generation", default=None)
 _MUTATION_GATE: ContextVar[_MutationWorkspaceGate | None] = ContextVar("evidence_wiki_mutation_workspace_gate", default=None)
+_HISTORICAL_READ: ContextVar[bool] = ContextVar("evidence_wiki_historical_read_scope", default=False)
 _IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _AUTHORITY_ENV = "EVIDENCE_WIKI_AUTHORITY_FILE"
 _STATE_ENV = "EVIDENCE_WIKI_STATE_DIR"
@@ -284,6 +285,8 @@ def _require_mutation_workspace_gate(root: Path, *, allow_read_only: bool = Fals
     """Refuse direct serialized writers without the exact live private native gate."""
     import hashlib
 
+    if _HISTORICAL_READ.get() and not allow_read_only:
+        _refuse("host_mutation_workspace_gate_read_only")
     context, gate = current_context(), _MUTATION_GATE.get()
     if context is None or context.mutation_control_directory is None:
         return
@@ -453,6 +456,7 @@ def call_binding() -> Iterator[None]:
 # Only known seam effects may run under an explicit context. The canonical
 # owners still validate their arguments and authenticate evidence independently.
 _READ_SEAMS = frozenset({
+    ("retrieval_operations", "search"),
     ("source_usability_operations", "current"),
     ("request_lifecycle_operations", "current"),
     ("requirements_operations", "current"), ("requirements_operations", "prepare_revision"),
@@ -468,6 +472,7 @@ _READ_SEAMS = frozenset({
     ("source_requests", "run_list_requests"),
 })
 _WRITE_SEAMS = frozenset({
+    ("retrieval_operations", "build_index"),
     ("request_lifecycle_operations", "link_current"), ("request_lifecycle_operations", "fulfill_current"),
     ("request_lifecycle_operations", "block_current"), ("request_lifecycle_operations", "reopen_current"),
     ("mutation_capture_recovery", "resume"),
@@ -491,6 +496,7 @@ _WRITE_SEAMS = frozenset({
     ("evidence_usage", "run_transact"), ("evidence_usage", "run_materialize"),
 })
 _SERIALIZED_WRITERS = frozenset({
+    ("retrieval_operations", "build_index"),
     ("request_lifecycle_operations", "link_current"), ("request_lifecycle_operations", "fulfill_current"),
     ("request_lifecycle_operations", "block_current"), ("request_lifecycle_operations", "reopen_current"),
     ("run_controller", "run_session_start"), ("run_controller", "run_session_record"),
@@ -504,9 +510,36 @@ _SERIALIZED_WRITERS = frozenset({
 })
 
 
+def _historical_read_allowed(key: tuple[str, str], kwargs: Mapping[str, Any]) -> bool:
+    """Narrow every checked owning call while historical custody is active."""
+    if key in {("fleet_status", "run_fleet_status"), ("workspace_status", "run_status_report")}:
+        return kwargs.get("no_cache", False) is True
+    if key == ("verify_quotes", "run_verify"):
+        return kwargs.get("write", False) is False
+    if key in {("intake_questions", "run_intake"), ("intake_questions", "run_intake_document"),
+               ("source_inventory", "run_inventory_report"), ("normalize_sources", "run_normalization_report")}:
+        return kwargs.get("dry_run", False) is True
+    if key == ("strict_evidence", "run_operation"):
+        return kwargs.get("operation") in {"check", "prepare-review", "export"}
+    if key in _READ_SEAMS or key in {("qualified_packet", "profiles"), ("evidence_snapshots", "run_verify")}:
+        return True
+    stem, seam = key
+    if stem == "mutation_operations":
+        return seam in {"revision", "inspect"}
+    if stem == "research_session":
+        return seam in {"current", "next_work", "session", "pending", "report"}
+    if stem == "telemetry":
+        return seam in {"report", "project"}
+    if key == ("evidence_assessments", "run_operation"):
+        return kwargs.get("operation") in {"prepare", "check", "plan-refresh"}
+    return False
+
+
 @contextmanager
 def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Iterator[Any]:
     """Authorize actual owner arguments before loading or invoking its seam."""
+    if _HISTORICAL_READ.get() and not _historical_read_allowed((stem, seam), kwargs):
+        _refuse("host_mutation_workspace_gate_read_only")
     context = current_context()
     if context is None:
         yield lambda: None

@@ -385,11 +385,14 @@ class MutationStore:
         """Read protected history without nesting or enlarging the held workspace gate."""
         if self._active or self._workspace is not None:
             _refuse("store_lock_nested")
+        from .host_context import _HISTORICAL_READ
         self._historical_readonly = True
+        token = _HISTORICAL_READ.set(True)
         try:
             with self.locked(request_id, borrow_workspace=borrow_workspace):
                 yield self
         finally:
+            _HISTORICAL_READ.reset(token)
             self._historical_readonly = False
 
     def _require_locked(self) -> None:

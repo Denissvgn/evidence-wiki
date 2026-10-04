@@ -119,6 +119,13 @@ producer revision, retained originals and precise structured/page locations.
 Extraction and stored consistency remain separate from current rights and
 semantic claim approval.
 
+Version `30` adds `sources.search` and serialized `sources.build_index`, with
+operation matrix `13`. Search filters current permission and source usability
+before ranking, excerpts and disclosed counts. Cache use checks native schema
+and full current material identity; stale or unsupported caches return an
+explicit lexical fallback. The shared schema matcher accepts finite native
+numeric ranking scores without boolean or string coercion.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -343,6 +350,8 @@ exactly as the CLI leaves them. `normalize.verify(None)` means `--all`.
 | --- | --- |
 | `sources.inventory` | `ws.sources.inventory(*, dry_run=False, append_log=False, require_checksum=False, reject_mismatch=False, max_records=1000, max_entries=10000, max_input_bytes=16777216)` |
 | `sources.usability` | `ws.sources.usability(source_ids: list[str]) -> dict` |
+| `sources.search` | `ws.sources.search(query: str, *, source_ids: list[str], engine="auto", limit=10, excerpt_chars=1200, index_path=None) -> dict` |
+| `sources.build_index` | `ws.sources.build_index(request: dict) -> dict` |
 | `sources.capture_bytes_document` | `ws.sources.capture_bytes_document(content: bytes, metadata: dict) -> dict` |
 | `sources.capture_path_document` | `ws.sources.capture_path_document(*, root, relative, metadata, expected_content_sha256, expected_bytes) -> dict` |
 | `sources.prepare_capture` | `ws.sources.prepare_capture(*, request_id, path, delivery) -> dict` |
@@ -528,6 +537,74 @@ changes current eligibility without rewriting retained evidence. Permission
 to retrieve a protected normalized revision does not grant raw normalization.
 `authorized`, `evidence_accepted` and `claim_support_eligible` remain false;
 strict claim/release owners still perform their own checks.
+
+Read bounded current evidence without invoking configured providers or building
+an index:
+
+```python
+view = ws.sources.search(
+    "measured reflectance", source_ids=[source_id], engine="lexical",
+    limit=10, excerpt_chars=1200,
+)
+for result in view["results"]:
+    text = result["excerpt"]["text"]
+    revision = result["source_revision"]
+```
+
+Search requires an active `HostContext` and `retrieval_operations.search`.
+Selectors contain 1–32 unique IDs. Query length is at most 4,096 characters;
+result count is 1–32 and exact excerpt width 128–4,096 characters. Selected bytes
+are bounded to 32 MiB, individual source/index files to 16 MiB and output to
+one MiB. `status` distinguishes `found`, `empty`, `unknown` and `truncated`.
+Coverage counts only permitted selected material; excluded details and material
+commitments are withheld. Empty matches do not establish exhaustive absence.
+
+Results retain exact normalized-body character/line offsets and omitted-prefix
+or suffix flags. Original document/page/table locations are not inferred from
+those offsets; the source's retained structured/page anchors remain the original
+location evidence. Local `source_revision` binds source ID, original/provenance,
+normalized bytes and actual scope; `usage_revision` is separately the signed
+native permission revision. Mechanical retrieval and matching words never
+supply semantic approval.
+
+`engine="fts"` without a path uses an eligible-only in-memory native FTS schema.
+With `index_path`, cached bytes are copied to a bounded immutable read-only
+snapshot, checked against exact native SQLite schema, selected material hashes
+and current document content. Unknown schema, stale content, malformed caches
+or unavailable hard-limit capabilities fall back visibly to lexical search.
+Denied cached rows cannot affect snippets, disclosed document counts or ranking.
+Search writes no index and never invokes the query command's provider/cache path.
+
+Build a cache explicitly through the existing mutation owner:
+
+```python
+request = ws.mutations.prepare(
+    request_id="index-1", operation="sources.build_index",
+    arguments={"source_ids": [source_id]},
+)
+receipt = ws.sources.build_index(request)
+view = ws.sources.search(
+    "reflectance", source_ids=[source_id], index_path=receipt["result"]["path"],
+)
+```
+
+Closed build arguments are `source_ids`,
+`index_path="sources/indexes/evidence.sqlite"` and `expected_sha256=None`.
+Only approved `sources/indexes/*.sqlite` paths are accepted. The host grants
+`retrieval_operations.build_index` plus existing mutation prepare/submit and
+workspace opening permissions. Publication requires live writable mutation
+custody, the canonical zero-wait index lock and prior-content CAS. An exact
+already-desired file is a native safe no-op; conflicting prior content refuses.
+SQLite serialization capability is checked before any cache output. Protected
+persistent indexes are unsupported in this profile; permitted protected FTS
+can remain in memory while the native usage view is held and revalidated.
+
+Index replay returns its original historical mutation receipt. Cache contents
+confer no permissions, claim approval or accepted release. Partial or uncertain
+publication remains unknown under the generic mutation protocol; search never
+repairs or rebuilds it implicitly. Historical read custody narrows all checked
+writer calls, including legacy/no-context routes and mixed cache-writing status
+operations, until the reader exits; its parent writer permission is then restored.
 
 New source and authoring seams qualify actual configuration, store, question,
 output and lock paths before effects. A linked workspace folder cannot redirect

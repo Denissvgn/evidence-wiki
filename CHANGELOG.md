@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Expose bounded permission-filtered lexical/FTS search with exact excerpts and
+  source revisions, plus separately selected native index publication.
+
 - Normalize bounded native text, JSON, CSV and PDF captures with retained
   structured/page anchors, producer currency and read-only current usability.
 

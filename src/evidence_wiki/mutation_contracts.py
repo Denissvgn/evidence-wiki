@@ -30,6 +30,7 @@ OPERATIONS = (
     "sources.capture_revision",
     "source_requests.link_current", "source_requests.fulfill_current",
     "questions.block_current", "questions.reopen_current",
+    "sources.build_index",
 )
 
 
@@ -88,6 +89,8 @@ def argument_schemas() -> dict[str, dict[str, Any]]:
             max_records=integer(10_000), max_entries=integer(100_000), max_input_bytes=integer(67_108_864)),
         "sources.capture": _obj(path=_text(512), delivery=opaque),
         "sources.capture_revision": _obj(path=_text(512), delivery=opaque),
+        "sources.build_index": _obj(source_ids=_array(_text(256), 32), index_path=_text(512),
+            expected_sha256=_null({"type": "string", "pattern": r"^sha256:[a-f0-9]{64}$"})),
         "strict.register_review": _obj(envelope=opaque),
         "strict.admit": _obj(proposal=opaque),
         "telemetry.record": _obj(run_id=_text(96), agent_id=_text(128), event=opaque),
@@ -115,6 +118,7 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
         "sources.inventory": {"dry_run": False, "append_log": False, "require_checksum": False,
             "reject_mismatch": False, "max_records": 1000, "max_entries": 10_000, "max_input_bytes": 16_777_216},
         "sources.capture": {}, "sources.capture_revision": {},
+        "sources.build_index": {"index_path": "sources/indexes/evidence.sqlite", "expected_sha256": None},
         "strict.register_review": {},
         "strict.admit": {},
         "telemetry.record": {},

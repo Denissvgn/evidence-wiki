@@ -10,6 +10,25 @@ from ._base import Namespace, call_seam
 class SourcesNamespace(Namespace):
     """Inventory retained local inputs through the source manifest owner."""
 
+    def search(self, query: str, *, source_ids: list[str], engine: str = "auto", limit: int = 10,
+               excerpt_chars: int = 1200, index_path: str | None = None) -> dict[str, Any]:
+        """Read bounded current permitted evidence with exact body excerpts."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import retrieval_operations
+            return retrieval_operations
+        return call_seam(load, "retrieval_operations", "search", self._root, query=query,
+            source_ids=source_ids, engine=engine, limit=limit, excerpt_chars=excerpt_chars, index_path=index_path)
+
+    def build_index(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Submit an explicitly selected current-source cache publication request."""
+        self._workspace._check_open()
+        from ..mutation_contracts import REQUEST, checked, refuse
+        request = checked(REQUEST, request)
+        if request["operation"] != "sources.build_index":
+            refuse("OPERATION_UNSUPPORTED", "/operation")
+        return self._workspace.mutations.submit(request)
+
     def capture_bytes_document(self, content: bytes, metadata: dict[str, Any]) -> dict[str, Any]:
         """Build a bounded inert capture delivery without publishing or approval."""
         self._workspace._check_open()

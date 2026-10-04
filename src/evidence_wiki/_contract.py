@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "29"
+LIBRARY_API_VERSION = "30"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -75,6 +75,8 @@ LIBRARY_API_SURFACE = (
     "normalize.validate_market",
     "sources.inventory",
     "sources.usability",
+    "sources.search",
+    "sources.build_index",
     "sources.capture_bytes_document",
     "sources.capture_path_document",
     "sources.prepare_capture",

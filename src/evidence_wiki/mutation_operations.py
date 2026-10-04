@@ -56,6 +56,7 @@ OWNER_OPERATIONS = {
     "sources.inventory": ("source_inventory", "run_inventory_report"),
     "sources.capture": ("source_delivery", "deliver"),
     "sources.capture_revision": ("source_capture_operations", "deliver"),
+    "sources.build_index": ("retrieval_operations", "build_index"),
     "strict.register_review": ("strict_evidence", "run_operation"),
     "strict.admit": ("strict_evidence", "run_admit_document"),
     "telemetry.record": ("run_controller", "run_telemetry_record"),
@@ -472,6 +473,11 @@ def _invoke(root: Path, intent: dict[str, Any], capture: dict[str, Any], *,
         def load(_stem):
             from . import request_lifecycle_operations
             return request_lifecycle_operations
+        return call_seam(load, stem, seam, root, **value)
+    if stem == "retrieval_operations":
+        def load(_stem):
+            from . import retrieval_operations
+            return retrieval_operations
         return call_seam(load, stem, seam, root, **value)
     with Workspace.open(root) as workspace:
         if operation == "questions.add_batch":
