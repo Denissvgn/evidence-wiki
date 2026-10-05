@@ -23,6 +23,7 @@ from evidence_wiki import (
     ExecutionRoleScope,
     ExecutionSchedule,
     HostReviewSigner,
+    NativeInputHandoff,
     QualificationAuthority,
     QualifiedEvaluators,
     ResearchExecution,
@@ -238,7 +239,8 @@ def fixture(tmp_path, monkeypatch, request=None):
         registry = ExecutionRoleRegistry((*registry.scopes, ExecutionRoleScope("calculator", "calculation", ("model", "calculation.propose"))))
     selected_meter = HostProtocolSimulationMeter if options.get("simulated_model_usage") else LocalMeter
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
-        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement)
+        roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement,
+        input_handoff=NativeInputHandoff() if options.get("repair") and options.get("disagreement") else None)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     if options.get("calculated_generation"):
@@ -273,6 +275,15 @@ def fixture(tmp_path, monkeypatch, request=None):
             "r['verdicts'].update(support='fail',scope='fail') if 'packet' in d and 'always' in d['packet']['claim']['text'] else None; "
             "print(json.dumps(r))"
         )
+    if options.get("calculated_generation") and options.get("repair"):
+        generator = ("import json,sys,copy; d=json.load(sys.stdin)['input']; g=" + repr(generated)
+            + "; r=d['calculation_selections'][0]['reference']; "
+            + "g['proposal']['inventory']=copy.deepcopy(d['repair_scope']['before_inventory']) if d['purpose']=='repair' else g['proposal']['inventory']; "
+            + "c=next(x for x in g['proposal']['inventory']['claims'] if x['id']==d['repair_scope']['target_claim_id']) if d['purpose']=='repair' else copy.deepcopy(g['proposal']['inventory']['claims'][0]); "
+            + "c.update(text='Declared result is '+r['expected']+' units.' if d['purpose']=='repair' else 'Declared result is always '+r['expected']+' units.'); "
+            + "c.update(id='derived',qualification='inference',premises=[c['id']],derivation='Apply the configured multiplication.',units=r['unit'],calculations=[r]) if d['purpose']!='repair' else None; "
+            + "g['proposal']['inventory']['claims'].append(c) if d['purpose']!='repair' else None; "
+            + "g['coverage_links']=[] if d['purpose']=='repair' else g['coverage_links']; print(json.dumps(g))")
     worker = tmp_path / "workers"
     worker.mkdir()
     commands = {"researcher": (sys.executable, "-c", generator), "profile-a": (sys.executable, "-c", evaluator)}
@@ -350,9 +361,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     signer = HostReviewSigner("lab-authority", "1", SigningIdentity("researcher", "runner", "runner-key", "runner", "generator", bytes.fromhex(KEYS["runner"])),
         reviewers, "2027-01-01T00:00:00Z")
     execution = ResearchExecution(executor, qualifications=QualifiedEvaluators(qualifications, issuer), review_signer=signer, observer_key=b"o" * 32)
-    context = HostContext([root], GRANTS | {"research_session.calculate", "research_session.propose_calculation", "calculation_session.current", "calculation_agent.propose"}, "caller", [root], authority_file=authority.policy_path,
+    context = HostContext([root], GRANTS | {"research_session.calculate", "research_session.propose_calculation", "calculation_session.current", "calculation_agent.propose"}
+        | ({"research_session.repair_progress", "repair_progress_owner.current"} if options.get("disagreement") else set()), "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
         controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
         role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())
     return root, policy, execution, context
-

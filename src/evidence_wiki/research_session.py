@@ -652,6 +652,13 @@ class ResearchSession:
         return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
 
     @_boundary
+    def repair_progress(self, *, original_id=None, after_sequence=0, max_records=32):
+        """Read historical repair effects and separately checked current approval."""
+        self._check("repair_progress")
+        from .repair_progress_owner import current
+        return current(self, original_id=original_id, after_sequence=after_sequence, max_records=max_records)
+
+    @_boundary
     def review_services(self):
         """Read provisioned credential usability and separately observed execution."""
         self._check("review_services")

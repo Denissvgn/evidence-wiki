@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from evidence_wiki import execution_session as native
+from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.mutation_contracts import digest
 from evidence_wiki.pack_discovery import owner
 
@@ -104,7 +105,22 @@ def require_current_producer(session, critic_attempt, current_claim):
                 or not measured_model(session, producer, observation)):
             continue
         output = observation.get("output")
-        if type(output) is not dict or output.get("proposal") != application["proposal"]:
+        if type(output) is not dict:
+            continue
+        producer_row = attempts[identifier]
+        if "repair_parent_inventory" in producer_row:
+            if producer_row.get("target_claim_id") != current_claim["id"]:
+                continue
+            from .repair_surface import project_proposal
+            try:
+                projected, proof = project_proposal(producer_row["repair_parent_inventory"], producer_row["repair_parent_inventory"],
+                    output.get("proposal"), target_claim_id=producer_row["target_claim_id"],
+                    worker_before=producer.input_document["repair_scope"]["before_inventory"])
+            except (ValueError, EvidenceWikiError, KeyError, TypeError):
+                continue
+            if projected != application["proposal"] or proof != application.get("repair_projection"):
+                continue
+        elif output.get("proposal") != application["proposal"]:
             continue
         return digest(producer.document())
     fail("counter_actual_generator_provenance_unknown")

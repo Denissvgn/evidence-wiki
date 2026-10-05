@@ -2166,3 +2166,68 @@ version. Single-configuration service plans and existing legacy disagreement
 profiles retain their supported contracts. Native host protocol observations do
 not by themselves establish live model quality, worker understanding or operating
 system isolation.
+
+API version 40 / operation matrix version 23 adds `session.repair_progress()`
+and `ws.strict.repair_schemas()`. Progress is a bounded read of the existing
+native execution journal, with `original_id`, `after_sequence` and `max_records`
+selectors (at most 32 records). `historical_effect_recorded` reports an earlier
+owned application; `current_review` and `fresh_independent_reviews` report
+separate current native observations. Neither a material difference nor a
+retained effect authorizes acceptance. Missing, changed, expired or withdrawn
+source dependencies withhold historical field and material commitments and
+make the outward basis unavailable. The read retains protected usage custody
+through final source, host selection and journal checks. Its additional grants
+are `research_session.repair_progress` and `repair_progress_owner.current`.
+
+Explicit `ServiceRepairBinding(service_plan.sha256, "sha256:" +
+ disagreement.sha256)` binds the exact immutable `ReviewServicePlan` and
+`DisagreementPlan` into execution-profile version 9. It enables scoped repair
+with approved alternate services, preserving actual target configuration,
+controller, current qualification and native envelope alongside each logical
+required slot. Version 8 keeps its existing unsupported alternate/disagreement
+combination. Earlier profile documents retain their serialized bytes and exact
+retained-attempt recovery. New scoped repair attempts use a narrower worker input
+and a deterministic parent merge that preserves unrelated claims. A failed
+semantic vote cannot select an alternate to obtain a different verdict, and
+unknown occupied work retains its reservation.
+
+Repair preserves the target identifier, every peer claim, original questions,
+source journal and frozen criteria. Strict v2 quantitative claims retain typed
+native calculation references, exact configured arithmetic, units, time and
+invariants. A new expression requires the current native engine result; a model
+cannot replace its value or waive an invariant. Intrinsic material differences
+exclude artifact bookkeeping while native approval still checks exact current
+result and source identities. Every material revision requires fresh independent
+first passes. The existing per-claim limit of two repairs, frozen global limits
+and actual role budgets end unchanged, oscillating, unknown or irreparable work
+with an unresolved original; no human review is manufactured. Reference-process
+protocol simulations establish bounded control behavior, not live model quality
+or scientific semantic approval.
+
+Scoped repair sends only the target and its permitted decisive premises to the
+worker. Full prior inventory and exact dependency commitments stay in the
+parent's authenticated journal. A deterministic native admission projection
+merges untouched peers, records the exact actual worker proposal commitment,
+and credits only the targeted claim as repair-produced. Preserved peers retain
+their earlier genuine producer. Raw coverage notes and historical model prose
+are withheld; current typed failure criteria and permitted evidence remain.
+The full-inventory admission profile requires every retained dependency to have
+an exact current permitted source closure. A denied, stale or unavailable peer
+therefore stops before repair dispatch; it does not gain a grant through a merge.
+Progress rechecks actual target qualification and native review age at read
+closure, so unchanged material alone cannot keep an expired approval current.
+
+New protected scoped repair dispatch also requires an immutable
+`NativeInputHandoff(delivery_seconds=30)` on the final execution profile before
+qualification and session binding. This produces profile version 10 and declares
+the exact bundled `BoundedSubprocessExecutor` route. Its ceiling is 1–30 seconds,
+including preflight, and never extends the original run or job deadline. The
+executing thread retains the native source-use read lease through synchronous
+stdin delivery, rechecking current scope, source material and expiry before each
+chunk and at closure. Parent-owned delivery records bind the exact job and full
+worker input before application. Generic adapters, subclasses and returned ACKs
+do not satisfy this boundary. Begun, partial, timed-out or otherwise unknown work
+keeps its occupied reservation; polling and historical replay never resend the
+input. Complete delivery does not establish model comprehension. Older serialized
+profiles remain unchanged, but cannot authorize a new protected repair handoff
+without this declaration.

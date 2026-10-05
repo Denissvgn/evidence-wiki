@@ -54,6 +54,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "ExecutionRoleScope": (".execution_roles", "ExecutionRoleScope"),
     "ExecutionRoleRegistry": (".execution_roles", "ExecutionRoleRegistry"),
     "ReviewContext": (".review_context", "ReviewContext"),
+    "ServiceRepairBinding": (".service_repair_binding", "ServiceRepairBinding"),
+    "NativeInputHandoff": (".protected_handoff", "NativeInputHandoff"),
     "ReviewServicePlan": (".review_service_policy", "ReviewServicePlan"),
     "ReviewServiceRoute": (".review_service_policy", "ReviewServiceRoute"),
     "ReviewDelivery": (".review_delivery", "ReviewDelivery"),

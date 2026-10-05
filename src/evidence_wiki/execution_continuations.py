@@ -14,6 +14,8 @@ def claim_sources(prepared, packets):
     snapshot = prepared["snapshot"]
     identifiers = {item["source_id"] for claim in [snapshot["claim"], *snapshot["premises"]]
         for item in claim["evidence"]}
+    if snapshot.get("computation") is not None:
+        identifiers.update(row["source_id"] for row in snapshot["computation"]["sources"])
     return [item for item in packets if item["source_id"] in identifiers]
 
 
@@ -102,24 +104,17 @@ def repair_evidence(session, claim_id, prepared, sources):
     records = session.execution.records(session)
     attempts = {item["data"]["attempt"]["attempt_id"]: item["data"] for item in records
         if item["kind"] == "execution_attempt"}
-    aliases = {}
-    for item in records:
-        if item["kind"] == "execution_application" and item["data"].get("operation") == "evaluate":
-            data = item["data"]
-            review_ref = digest(data["envelope"]["payload"]["body"]["review"])
-            sources_map = attempts[data["attempt_id"]].get("review_context", {}).get("aliases", {}).get("sources", {})
-            aliases[review_ref] = {alias: identifier for identifier, alias in sources_map.items()}
-    findings = detached(projection["first_pass_findings"])
-    for row in findings:
-        for objection in row["objections"]:
-            objection["source_refs"] = [aliases[row["review_ref"]][alias] for alias in objection["source_refs"]]
     applied = {item["data"]["attempt_id"] for item in records if item["kind"] == "execution_applied"
         and item["data"].get("operation") == "adjudicate"}
     investigations = [detached(item["data"]["findings"]) for item in records
         if item["kind"] == "execution_application" and item["data"].get("operation") == "adjudicate"
         and item["data"].get("claim_id") == claim_id and item["data"]["attempt_id"] in applied
         and attempts[item["data"]["attempt_id"]].get("disagreement", {}).get("material_basis_id") == projection["basis_id"]]
-    return {"material_basis_id": projection["basis_id"], "first_pass_findings": findings,
-        "investigations": investigations,
+    # Historical model prose can contain material absent from the current source
+    # closure. Supply typed criteria and current owner failures, not prior quotes,
+    # rationales, source references or hashes of unverified historical prose.
+    return {"first_pass_criteria": [{"verdicts": detached(row["verdicts"])} for row in projection["reviews"]],
+        "historical_prose": "withheld_current_closure_not_established",
+        "investigation_count": len(investigations),
         "native_failures": next(item["observation"]["reasons"] for item in prepared["result"]["claims"]
             if item["claim"]["id"] == claim_id), "authorized": False, "evidence_accepted": False}

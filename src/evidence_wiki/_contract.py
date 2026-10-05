@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "39"
+LIBRARY_API_VERSION = "40"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -103,7 +103,9 @@ LIBRARY_API_SURFACE = (
     "strict.register_review",
     "strict.export",
     "strict.service_schemas",
+    "strict.repair_schemas",
     "research.session.review_services",
+    "research.session.repair_progress",
     "strict.review_status",
     "strict.machine_compatibility",
     "strict.supersede_review",
@@ -473,7 +475,15 @@ def contract() -> dict:
             "credentials": "provisioned parent key/native role usability only; no enrollment, discovery or service-health assertion",
             "execution": "retained owned execution and current actual-target qualification are separate",
             "budget": "shared immutable role-slot ceiling; unknown occupied work and semantic failure never fail over",
-            "unsupported_combinations": ["alternate service routes with DisagreementPlan"]},
+            "unsupported_combinations": ["alternate service routes with DisagreementPlan in profile v8"],
+            "scoped_repair_profile": "research-execution-profile/v9 with exact ServiceRepairBinding"},
+        "scoped_repair": {"progress_schema": "research-repair-progress/v1", "diff_schema": "research-repair-diff/v1",
+            "binding_schema": "research-service-repair-binding/v1", "progress": "current permitted-only history projection; not approval",
+            "protected_handoff": "research-execution-profile/v10 NativeInputHandoff; exact bundled subprocess only; held native usage through bounded stdin delivery",
+            "handoff_schema": "research-native-input-handoff/v1",
+            "materials": "native strict v1/v2 claims, scientific calculation values/units/time/invariants and exact source dependencies",
+            "first_passes": "logical slot plus actual current qualified controller/configuration and native review",
+            "limits": "existing run journal and frozen repair/role budgets; unchanged or exhausted repairs remain unresolved"},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),

@@ -701,6 +701,12 @@ def reserve(session, request_id, action, view):
     operation = "evaluate" if action["operation"] in {"evaluate", "adjudicate"} else "generate"
     session.context.require_grant("research_session.host_job." + operation)
     purpose = action.get("retry_purpose", action.get("purpose", operation))
+    if purpose == "repair" and session.execution.profile.disagreement is not None and owner("_evidence_usage").configured(owner("_strict_evidence").configuration(session.root)):
+        from .agent_execution import BoundedSubprocessExecutor
+        from .protected_handoff import NativeInputHandoff
+        if (type(session.execution.executor) is not BoundedSubprocessExecutor
+                or type(session.execution.profile.input_handoff) is not NativeInputHandoff):
+            refuse("PROTECTED_HANDOFF_UNSUPPORTED")
     if (getattr(session.execution.profile, "review_delivery", None) is not None and operation == "evaluate"
             and purpose != "adjudicate" and "review_assembly_request_id" not in action):
         refuse("COMPLETE_REVIEW_DELIVERY_REQUIRED")
@@ -744,7 +750,7 @@ def reserve(session, request_id, action, view):
         if not sources <= {row["source_id"] for row in bindings}:
             refuse("SOURCE_SCOPE_UNSUPPORTED")
         evidence_ids = {item["source_id"] for claim in [packet["claim"], *packet["premises"]] for item in claim["evidence"]}
-        if "review_assembly_request_id" in action and packet.get("computation") is not None:
+        if packet.get("computation") is not None:
             evidence_ids.update(row["source_id"] for row in packet["computation"]["sources"])
         from .review_service_routing import required_profile
         if session.execution.profile.review_services is not None and purpose == "evaluate":
@@ -818,8 +824,20 @@ def reserve(session, request_id, action, view):
             from .execution_continuations import claim_sources, repair_evidence
             target = action.get("target_claim_id", action.get("claim_id"))
             target_prepared = owner("strict_evidence").prepare_review(session.root, target)
-            input_document["repair_scope"] = {"target_claim_id": target,
-                "claims": [row["claim"] for row in observed.strict.get("result", {}).get("claims", [])],
+            before_result = observed.strict.get("result", {})
+            before_inventory = {"schema_version": "evidence-strict-claims/v2" if before_result["schema_version"] == "evidence-strict-result/v2" else "evidence-strict-claims/v1",
+                "questions": detached(before_result["questions"]), "claims": [item["claim"] for item in before_result["claims"]]}
+            from .repair_surface import require_current_dependencies, worker_inventory
+            require_current_dependencies(before_inventory, packets, target_prepared["snapshot"].get("computation"))
+            repair_parent_sources = [{key: detached(packet[key]) for key in ("source_id", "record_sha256", "source_binding")}
+                for packet in packets]
+            worker_before = worker_inventory(before_inventory, target_claim_id=target,
+                premise_ids=[claim["id"] for claim in target_prepared["snapshot"]["premises"]])
+            input_document["questions"] = detached(worker_before["questions"])
+            input_document["sources"] = claim_sources(target_prepared, packets)
+            input_document.pop("coverage", None)
+            input_document["repair_scope"] = {"target_claim_id": target, "before_inventory": worker_before,
+                "claims": detached(worker_before["claims"]),
                 "defect_evidence": repair_evidence(session, target, target_prepared, claim_sources(target_prepared, packets)),
                 "instructions": "Preserve every claim identity, question association and peer claim exactly. Change only the targeted claim to address retained defects. Return no coverage changes. A bookkeeping-only change is not progress."}
         input_document["output_contract"] = {"proposal": "closed unaccepted proposal", "coverage_links":
@@ -836,6 +854,9 @@ def reserve(session, request_id, action, view):
         slugs = {question["slug"] for question in original["questions"]}
         input_document["existing_source_premises"] = [row["claim"] for row in observed.strict.get("result", {}).get("claims", [])
             if row["claim"]["question_slug"] in slugs and not row["claim"].get("premises") and not row["claim"].get("calculations")]
+        if purpose == "repair" and "repair_scope" in input_document:
+            allowed_claims = {claim["id"] for claim in input_document["repair_scope"]["claims"]}
+            input_document["existing_source_premises"] = [claim for claim in input_document["existing_source_premises"] if claim["id"] in allowed_claims]
         input_document["instructions"] += " Quantitative claims require strict v2 calculation references to this exact native result. Arithmetic, units and invariant outcomes cannot be changed by model agreement. Preserve every existing_source_premises entry exactly."
     if purpose == "calculation":
         if scope is None or scope.task_role != "calculation":
@@ -977,6 +998,8 @@ def reserve(session, request_id, action, view):
             extras["disagreement"] = attempt_metadata(action["disagreement_decision"], cycle_ref=request_id)
         if purpose == "repair":
             extras["target_claim_id"] = action.get("target_claim_id", action["claim_id"])
+            extras["repair_parent_inventory"] = detached(before_inventory)
+            extras["repair_parent_sources"] = repair_parent_sources
     append(session, "execution_attempt", child_id(request_id, "intent"), {"attempt": attempt.document(),
         "reservation": reservation, "purpose": action.get("purpose", operation), "original_id": original["original_id"],
         "claim_id": action.get("claim_id"), **extras,
@@ -1303,6 +1326,14 @@ def _validate_application(session, attempt, observation, application, *, allow_r
     records = retained(session)
     view = current(session)
     row = _attempt_rows(records)[attempt.attempt_id]
+    if row.get("retry_purpose", row.get("purpose")) == "repair" and session.execution.profile.input_handoff is not None:
+        expected = {"attempt_id": attempt.attempt_id, "job_sha256": attempt.job_sha256,
+            "input_sha256": attempt.input_sha256, "worker_sha256": hashlib.sha256(canonical(attempt.worker_document())).hexdigest(),
+            "boundary": "native_stdin_complete", "accepted": False}
+        deliveries = [item["data"] for item in records if item["kind"] == "execution_input_handoff"
+            and item["data"].get("attempt_id") == attempt.attempt_id]
+        if deliveries != [expected]:
+            refuse("PROTECTED_HANDOFF_UNPROVEN")
     if application is not None and session.execution.profile.review_services is not None and row.get("retry_purpose", row.get("purpose")) == "evaluate":
         from .review_service_routing import required_profile, review_current
         wanted = required_profile(session, attempt.config_ref, row.get("service_slot_ref"))
@@ -1467,6 +1498,15 @@ def _apply_owned(session, attempt_id):
                 prior = [item["claim"] for item in observed.strict.get("result", {}).get("claims", [])
                     if item["claim"]["question_slug"] not in allowed]
                 previous_claims = [item["claim"] for item in observed.strict.get("result", {}).get("claims", [])]
+                if "repair_parent_inventory" in row:
+                    from .repair_surface import project_proposal
+                    current_inventory = {"schema_version": row["repair_parent_inventory"]["schema_version"],
+                        "questions": detached(observed.strict["result"]["questions"]), "claims": previous_claims}
+                    proposal, repair_projection = project_proposal(row["repair_parent_inventory"], current_inventory,
+                        proposal, target_claim_id=row["target_claim_id"],
+                        worker_before=attempt.input_document["repair_scope"]["before_inventory"])
+                    application["repair_projection"] = repair_projection
+                    prior = []
                 if "target_claim_id" not in row or all(claim["question_slug"] in allowed for claim in proposal["inventory"]["claims"]):
                     proposal["inventory"]["claims"].extend(prior)
                 proposal = proposal_document(PROPOSAL, proposal)
@@ -1632,6 +1672,7 @@ def _resolve(session, original_id):
 
 
 def _external(session, method, attempt, *, cleanup=False):
+    started_monotonic = time.monotonic()
     if cleanup:
         timeout = session.execution.profile.cleanup_timeout_seconds
     else:
@@ -1640,6 +1681,23 @@ def _external(session, method, attempt, *, cleanup=False):
         timeout = max(0, remaining) if method == "invoke" else min(max(0, remaining), session.execution.profile.cleanup_timeout_seconds)
     if timeout <= 0:
         return None, "host_wait_expired"
+    if method == "invoke" and attempt.input_document.get("purpose") == "repair" and session.execution.profile.disagreement is not None:
+        from .agent_execution import BoundedSubprocessExecutor
+        from .execution_handoff import NativeHandoffLease
+        from .protected_handoff import NativeInputHandoff
+        configured = owner("_strict_evidence").configuration(session.root)
+        if owner("_evidence_usage").configured(configured):
+            if (type(session.execution.executor) is not BoundedSubprocessExecutor
+                    or type(session.execution.profile.input_handoff) is not NativeInputHandoff):
+                return None, "protected_handoff_unsupported"
+            lease = NativeHandoffLease(session, attempt, wait_seconds=timeout, started_monotonic=started_monotonic)
+            result, reason = bounded_host_call(session.execution.executor.invoke_guarded, (attempt, lease), timeout)
+            if lease.delivered_sha256 is not None:
+                with gate(session):
+                    append(session, "execution_input_handoff", child_id(attempt.attempt_id, "input_handoff"),
+                        {"attempt_id": attempt.attempt_id, "job_sha256": attempt.job_sha256, "input_sha256": attempt.input_sha256,
+                            "worker_sha256": lease.delivered_sha256, "boundary": "native_stdin_complete", "accepted": False})
+            return result, reason
     return bounded_host_call(getattr(session.execution.executor, method), (attempt,), timeout)
 
 

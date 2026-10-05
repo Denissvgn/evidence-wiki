@@ -23,8 +23,8 @@ from .mutations import MutationsNamespace
 from .normalize import NormalizeNamespace
 from .orchestrate import OrchestrateNamespace, OrchestrationSession
 from .questions import QuestionsNamespace
-from .research import ResearchNamespace
 from .requirements import RequirementsNamespace
+from .research import ResearchNamespace
 from .snapshots import SnapshotsNamespace
 from .source_requests import SourceRequestsNamespace
 from .sources import SourcesNamespace

@@ -26,6 +26,7 @@ from evidence_wiki import (
     ExecutionRoleScope,
     ExecutionSchedule,
     HostReviewSigner,
+    NativeInputHandoff,
     QualificationAuthority,
     QualifiedEvaluators,
     ResearchExecution,
@@ -33,6 +34,7 @@ from evidence_wiki import (
     ReviewServicePlan,
     ReviewServiceRoute,
     RunPolicy,
+    ServiceRepairBinding,
     SigningIdentity,
     Workspace,
 )
@@ -258,7 +260,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
         roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement,
         review_delivery=ReviewDelivery(**options.get("review_delivery_limits", {})) if options.get("review_delivery") else None,
-        review_services=service_plan)
+        review_services=service_plan, service_repair=ServiceRepairBinding(service_plan.sha256,
+            "sha256:" + disagreement.sha256) if options.get("service_repair") else None,
+        input_handoff=NativeInputHandoff() if options.get("repair") and options.get("disagreement") else None)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     if options.get("acquisition_choice"):
@@ -275,8 +279,12 @@ def fixture(tmp_path, monkeypatch, request=None):
         unsupported = json.loads(json.dumps(generated))
         unsupported["proposal"]["inventory"]["claims"][0]["text"] = "Solar reflectance is always 0.74."
         repaired = dict(generated, coverage_links=[]) if options.get("disagreement") else generated
-        generator = ("import json,sys; d=json.load(sys.stdin)['input']; print(json.dumps(" + repr(repaired)
-            + " if d['purpose']=='repair' else " + repr(unsupported) + "))")
+        generator = ("import json,sys,copy; d=json.load(sys.stdin)['input']; g=" + repr(repaired)
+            + "; g['proposal']['inventory']=copy.deepcopy(d['repair_scope']['before_inventory']) if d['purpose']=='repair' and 'repair_scope' in d else g['proposal']['inventory']; "
+            + "target=next((c for c in g['proposal']['inventory']['claims'] if c['id']==d.get('repair_scope',{}).get('target_claim_id')),None); "
+            + "target.update(next(c for c in " + repr(repaired["proposal"]["inventory"]["claims"])
+            + " if c['id']==target['id'])) if target is not None else None; "
+            + "print(json.dumps(g if d['purpose']=='repair' else " + repr(unsupported) + "))")
         evaluator = (
             "import json,sys; d=json.load(sys.stdin)['input']; "
             "r=({'case_id':d['case_id'],'label':'accept' if d['supported'] else 'reject'} if 'case_id' in d else "
@@ -368,7 +376,7 @@ def fixture(tmp_path, monkeypatch, request=None):
     context = HostContext([root], GRANTS | ({"review_page_operations.prepare", "review_page_operations.page",
         "review_page_session.assembled", "review_packet_execution.bind", "review_packet_execution.reserve",
         "coverage_observation.observe", "research_session.assemble_review_packet"} if options.get("review_delivery") else set())
-        | ({"research_session.review_services", "service_authentication.status"} if options.get("review_services") else set()), "caller", [root], authority_file=authority.policy_path,
+        | ({"research_session.review_services", "service_authentication.status"} if options.get("review_services") else set()) | ({"research_session.repair_progress", "repair_progress_owner.current"} if options.get("service_repair") else set()), "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
         controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
         role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 from .agent_execution import ExecutionError, validate_observation
 from .disagreement import CRITERIA, _hash, _ref, disagreement_action
@@ -57,8 +58,7 @@ def material_basis(owner_snapshot, rubric, sources):
     """
     snapshot, rubric, sources = detached(owner_snapshot), detached(rubric), detached(sources)
     if (type(snapshot) is not dict or type(rubric) is not dict or type(rubric.get("criteria")) is not dict
-            or set(rubric["criteria"]) != CRITERIA or type(sources) is not list or len(sources) > 64
-            or snapshot.get("computation") is not None):
+            or set(rubric["criteria"]) != CRITERIA or type(sources) is not list or len(sources) > 64):
         _fail("material_unsupported")
     source_material = {}
     for source in sources:
@@ -69,10 +69,20 @@ def material_basis(owner_snapshot, rubric, sources):
             _fail("source_duplicate")
         source_material[identifier] = {"content": _content(source["content"]),
             "metadata": {key: source["metadata"][key] for key in sorted(_SCIENCE.intersection(source["metadata"]))}}
+    computation = snapshot.get("computation")
+    calculated = None
+    if computation is not None:
+        from .repair_calculation_material import calculation_material
+        calculated = calculation_material(computation, source_material, sources)
     def claim_material(claim):
-        if type(claim) is not dict or claim.get("calculations"):
+        if type(claim) is not dict:
             _fail("material_unsupported")
         result = {key: claim[key] for key in ("text", "scope", "time", "units", "derivation", "limitations")}
+        if computation is not None:
+            from .repair_calculation_material import reference_material
+            result["calculations"] = reference_material(claim.get("calculations", []), computation)
+        elif claim.get("calculations"):
+            _fail("calculation_context_missing")
         result["kind"] = "inference" if claim["qualification"] == "inference" else "assertion"
         evidence = claim["evidence"]
         if type(evidence) is not list or len(evidence) > 16:
@@ -91,6 +101,8 @@ def material_basis(owner_snapshot, rubric, sources):
         if type(premises) is not list or len(premises) > 32:
             _fail("material_unsupported")
         references = {item["source_id"] for claim in [snapshot["claim"], *premises] for item in claim["evidence"]}
+        if computation is not None:
+            references.update(row["source_id"] for row in computation["sources"])
         if references != set(source_material):
             _fail("source_scope_invalid")
         nodes, intrinsic, labels = {}, {}, {}
@@ -125,9 +137,12 @@ def material_basis(owner_snapshot, rubric, sources):
             return value
         root = build(snapshot["claim"]["id"], set())
         all_nodes = [build(identifier, set()) for identifier in nodes]
-        return digest({"schema_version": "research-claim-material/v1", "claim": root,
+        material = {"schema_version": "research-claim-material/v1", "claim": root,
             "question": snapshot["question"]["question"], "premises": sorted(all_nodes, key=canonical),
-            "sources": _distinct(source_material.values()), "rubric_criteria": rubric["criteria"]})
+            "sources": _distinct(source_material.values()), "rubric_criteria": rubric["criteria"]}
+        if calculated is not None:
+            material.update(schema_version="research-claim-material/v2", computation=calculated)
+        return digest(material)
     except (KeyError, TypeError, IndexError, AttributeError):
         _fail("material_invalid")
 
@@ -234,7 +249,13 @@ def project_claim(session, *, claim_id, prepared, sources):
                 _fail("observation_conflict")
             if previous is None or observation["sequence"] > previous["sequence"]:
                 observations[data["attempt_id"]] = observation
-    required = {item["profile_ref"]: item for item in session.policy.to_dict()["required_evaluators"]
+    services = getattr(session.execution.profile, "service_repair", None)
+    if services is not None:
+        from .review_service_policy import approved_profiles
+        required_rows = approved_profiles(session.policy.to_dict(), session.execution.profile)
+    else:
+        required_rows = session.policy.to_dict()["required_evaluators"]
+    required = {item["profile_ref"]: item for item in required_rows
                 if item["role"] in {"evaluator", "critic"}}
     review_rows, first_pass_findings, reservations, cycles = [], [], [], {}
     for identifier, (attempt, data) in attempts.items():
@@ -304,9 +325,23 @@ def project_claim(session, *, claim_id, prepared, sources):
         _hash(material)
         if result["strict_basis_id"] == strict_basis and material != basis:
             _fail("review_material_mismatch")
+        slot_fields = {}
+        if services is not None:
+            from .review_service_routing import review_current
+            slot = data.get("service_slot_ref")
+            if (slot is None or result.get("service_slot_ref") != slot or application.get("service_slot_ref") != slot
+                    or result.get("service_identity") != application.get("service_identity")):
+                _fail("review_service_slot_mismatch")
+            route = session.execution.profile.review_services.route(slot)
+            if attempt.config_ref not in route.config_refs or selected["role"] != route.task_role:
+                _fail("review_service_slot_mismatch")
+            native_view = __import__("evidence_wiki.execution_session", fromlist=["current"]).current(session)
+            if not review_current(session, result, native_view, selected):
+                continue
+            slot_fields = {"service_slot_ref": slot, "qualification_ref": result["service_identity"]["qualification_ref"]}
         review_ref = digest(review)
         review_rows.append({"review_ref": review_ref, "profile_ref": attempt.config_ref, "role": selected["role"],
-            "controller_ref": final["controller_ref"], "basis_id": material,
+            "controller_ref": final["controller_ref"], "basis_id": material, **slot_fields,
             "verdicts": findings["verdicts"], "objection_refs": findings["objection_refs"]})
         first_pass_findings.append({"review_ref": review_ref, "rationale": findings["rationale"],
             "objections": findings["objections"]})
@@ -327,7 +362,8 @@ def adjudication_packet(session, *, claim_id, prepared, sources, context_id, ord
     projection = project_claim(session, claim_id=claim_id, prepared=prepared, sources=sources)
     decision = disagreement_action(policy=session.policy, claim_id=claim_id, basis_id=projection["basis_id"],
         generator_controller_ref=session.execution.review_signer.generator.controller_ref,
-        reviews=projection["reviews"], history=projection["history"], gates=gates)
+        reviews=projection["reviews"], history=projection["history"], gates=gates,
+        service_profile=session.execution.profile if getattr(session.execution.profile, "service_repair", None) is not None else None)
     if decision["operation"] != "adjudicate":
         _fail("adjudication_not_selected")
     context = create_review_context(context_id=context_id, task_role="adjudicator", basis_id=prepared["result"]["basis_id"],
@@ -383,15 +419,30 @@ def driver_action(session, projection, *, gates, original_id):
     """Return named proposals for the driver; caller still reserves/checks effects."""
     decision = disagreement_action(policy=session.policy, claim_id=projection["claim_id"], basis_id=projection["basis_id"],
         generator_controller_ref=session.execution.review_signer.generator.controller_ref,
-        reviews=projection["reviews"], history=projection["history"], gates=gates)
+        reviews=projection["reviews"], history=projection["history"], gates=gates,
+        service_profile=session.execution.profile if getattr(session.execution.profile, "service_repair", None) is not None else None)
     operation = decision["operation"]
     result = {"operation": operation, "original_id": _ref(original_id), "claim_id": projection["claim_id"],
         "reason": decision["reason"], "disagreement_decision": decision}
     if operation == "collect_first_passes":
-        present = {row["profile_ref"] for row in projection["reviews"] if row["basis_id"] == projection["basis_id"]}
+        present = {row.get("service_slot_ref", row["profile_ref"]) for row in projection["reviews"] if row["basis_id"] == projection["basis_id"]}
         missing = next(item for item in session.policy.to_dict()["required_evaluators"]
             if item["role"] in {"evaluator", "critic"} and item["profile_ref"] not in present)
-        result.update(operation="evaluate", purpose="evaluate", config_ref=missing["profile_ref"])
+        if getattr(session.execution.profile, "service_repair", None) is not None:
+            from .execution_session import current, retained
+            from .review_service_routing import selected
+            target = selected(session, slot_ref=missing["profile_ref"], claim_id=projection["claim_id"],
+                strict_basis_id=projection["strict_basis_id"], view=current(session), records=retained(session))
+            if target["action"] != "select":
+                _fail("service_first_pass_unavailable")
+            if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+                return {"operation": "reconcile", "attempt_id": target["predecessor_attempt_id"],
+                    "reason": "retry_backoff", "retry_after_utc": target["retry_after_utc"]}
+            result.update(operation="evaluate", purpose="retry" if "predecessor_attempt_id" in target else "evaluate",
+                **({"retry_purpose": "evaluate"} if "predecessor_attempt_id" in target else {}),
+                **{key: target[key] for key in ("config_ref", "service_slot_ref", "predecessor_attempt_id", "predecessor_observation_ref", "retry_after_utc") if key in target})
+        else:
+            result.update(operation="evaluate", purpose="evaluate", config_ref=missing["profile_ref"])
     elif operation == "repair":
         result.update(purpose="repair", defects=projection["reviews"], target_claim_id=projection["claim_id"])
     elif operation == "adjudicate":

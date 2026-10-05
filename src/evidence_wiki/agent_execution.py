@@ -44,6 +44,8 @@ PROFILE_V5 = "research-execution-profile/v5"
 PROFILE_V6 = "research-execution-profile/v6"
 PROFILE_V7 = "research-execution-profile/v7"
 PROFILE_V8 = "research-execution-profile/v8"
+PROFILE_V9 = "research-execution-profile/v9"
+PROFILE_V10 = "research-execution-profile/v10"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -259,8 +261,14 @@ class ExecutionProfile:
     disagreement: DisagreementPlan | None = None
     review_delivery: ReviewDelivery | None = None
     review_services: ReviewServicePlan | None = None
+    service_repair: object | None = None
+    input_handoff: object | None = None
 
     def __post_init__(self) -> None:
+        if self.input_handoff is not None:
+            from .protected_handoff import NativeInputHandoff
+            if type(self.input_handoff) is not NativeInputHandoff or self.disagreement is None or self.role_scopes is None:
+                raise ExecutionError("protected_handoff_profile_invalid")
         _ref(self.profile_ref)
         _ref(self.pricing_ref)
         if type(self.currency) is not str or not re.fullmatch(r"[A-Z]{3}", self.currency):
@@ -327,7 +335,14 @@ class ExecutionProfile:
             from .review_service_policy import ReviewServicePlan
             if type(self.review_services) is not ReviewServicePlan:
                 raise ExecutionError("service_plan_invalid")
+            if self.service_repair is not None:
+                from .service_repair_binding import ServiceRepairBinding
+                if type(self.service_repair) is not ServiceRepairBinding:
+                    raise ExecutionError("service_repair_binding_invalid")
+                self.service_repair.check(self)
             self.review_services.check_profile(self)
+        elif self.service_repair is not None:
+            raise ExecutionError("service_repair_plan_required")
 
     def document(self) -> dict[str, Any]:
         result = {
@@ -353,6 +368,10 @@ class ExecutionProfile:
             result.update(schema_version=PROFILE_V7, review_delivery=self.review_delivery.document())
         if self.review_services is not None:
             result.update(schema_version=PROFILE_V8, review_services=self.review_services.document())
+        if self.service_repair is not None:
+            result.update(schema_version=PROFILE_V9, service_repair=self.service_repair.document())
+        if self.input_handoff is not None:
+            result.update(schema_version=PROFILE_V10, input_handoff=self.input_handoff.document())
         return result
 
     @property
@@ -504,6 +523,10 @@ class _Running:
     sequence: int = 0
     lock: Any = field(default_factory=threading.RLock)
     finished: Any = field(default_factory=threading.Event)
+    protected_delivery: bool = False
+    handoff_complete: Any = field(default_factory=threading.Event)
+    handoff_decided: Any = field(default_factory=threading.Event)
+    handoff_deadline: float | None = None
 
 
 def _usage(value: Any) -> dict[str, Any]:
@@ -651,6 +674,33 @@ class BoundedSubprocessExecutor:
         return value
 
     def invoke(self, attempt: ExecutionAttempt) -> dict[str, Any]:
+        if self.profile.input_handoff is not None and attempt.input_document.get("purpose") == "repair":
+            raise ExecutionError("protected_handoff_custody_required")
+        return self._invoke(attempt)
+
+    def invoke_guarded(self, attempt: ExecutionAttempt, lease) -> dict[str, Any]:
+        from .execution_handoff import NativeHandoffLease
+        if type(self) is not BoundedSubprocessExecutor or type(lease) is not NativeHandoffLease or lease.attempt.document() != attempt.document():
+            raise ExecutionError("protected_handoff_adapter_unsupported")
+        payload = _json(attempt.worker_document())
+        try:
+            with lease.custody(payload):
+                result = self._invoke(attempt, lease)
+            return result
+        except Exception:
+            with self._lock:
+                running = self._attempts.get(attempt.attempt_id)
+                if running is not None:
+                    with running.lock:
+                        running.reason = "protected_handoff_unknown"
+                        self._kill(running)
+                        if running.snapshot is not None:
+                            running.snapshot.update(state="unknown", reason="protected_handoff_unknown", output=None,
+                                observed_usage={name: None for name in ("seconds", "model_calls", "tool_calls", "tokens", "cost")},
+                                final_accounting=False, cancellation_confirmed=False)
+            raise
+
+    def _invoke(self, attempt: ExecutionAttempt, lease=None) -> dict[str, Any]:
         with self._lock:
             existing = self._stored(attempt)
             if existing is not None:
@@ -676,11 +726,29 @@ class BoundedSubprocessExecutor:
             except OSError:
                 return self._unavailable(attempt, "executor_unavailable")
             running = _Running(attempt, process, stamp, time.monotonic(), timeout)
+            running.protected_delivery = lease is not None
+            running.handoff_deadline = None if lease is None else lease._deadline
             self._attempts[attempt.attempt_id] = running
             threading.Thread(target=self._read, args=(running,), daemon=True).start()
-            threading.Thread(target=self._write, args=(running, payload), daemon=True).start()
+            if lease is None:
+                threading.Thread(target=self._write, args=(running, payload), daemon=True).start()
             threading.Thread(target=self._watch, args=(running,), daemon=True).start()
-            return self._observe(running)
+        if lease is not None:
+            try:
+                self._write_guarded(running, payload, lease)
+                running.handoff_complete.set()
+            except Exception:
+                with running.lock:
+                    running.reason = "protected_handoff_unknown"
+                    self._kill(running)
+                    if running.snapshot is not None:
+                        running.snapshot.update(state="unknown", reason="protected_handoff_unknown", output=None,
+                            observed_usage={name: None for name in ("seconds", "model_calls", "tool_calls", "tokens", "cost")},
+                            final_accounting=False, cancellation_confirmed=False)
+                raise
+            finally:
+                running.handoff_decided.set()
+        return self._observe(running)
 
     def _write(self, running: _Running, payload: bytes) -> None:
         try:
@@ -693,7 +761,14 @@ class BoundedSubprocessExecutor:
             except (OSError, ValueError):
                 pass
 
+    def _write_guarded(self, running: _Running, payload: bytes, lease) -> None:
+        from .handoff_pipe import write_handoff
+        write_handoff(running.process.stdin, payload, lease, deadline=lease._deadline,
+            max_bytes=MAX_BYTES, is_alive=lambda: running.process.poll() is None)
+
     def _kill(self, running: _Running) -> None:
+        if running.process is None:
+            return
         try:
             os.killpg(running.process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -749,6 +824,8 @@ class BoundedSubprocessExecutor:
                 code = running.process.wait(timeout=self.profile.cleanup_timeout_seconds)
             # A successful leader cannot leave continuing work in its group.
             self._kill(running)
+            if running.protected_delivery:
+                running.handoff_decided.wait(timeout=max(0, running.handoff_deadline - time.monotonic()))
             elapsed = time.monotonic() - running.started_monotonic
             completed = _now()
             output = None
@@ -780,6 +857,9 @@ class BoundedSubprocessExecutor:
             usage, final = self._meter_usage(running, {"state": state, "seconds": elapsed,
                                                       "started_utc": running.started_utc, "completed_utc": completed})
             with running.lock:
+                if running.reason == "protected_handoff_unknown" or running.protected_delivery and not running.handoff_complete.is_set():
+                    state, reason, output = "unknown", "protected_handoff_unknown", None
+                    usage, final = {name: None for name in ("seconds", "model_calls", "tool_calls", "tokens", "cost")}, False
                 running.snapshot = {"state": state, "reason": reason, "completed_utc": completed,
                                     "output": output, "observed_usage": usage, "final_accounting": final,
                                     "cancellation_confirmed": state == "cancelled"}

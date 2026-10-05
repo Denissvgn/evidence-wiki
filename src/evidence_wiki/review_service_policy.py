@@ -70,7 +70,13 @@ class ReviewServicePlan:
         if type(profile) is not ExecutionProfile or profile.role_scopes is None:
             raise ExecutionError("service_scoped_profile_required")
         if profile.disagreement is not None and any(len(route.config_refs) > 1 for route in self.routes):
-            raise ExecutionError("service_disagreement_alternates_unsupported")
+            declaration = getattr(profile, "service_repair", None)
+            if declaration is None:
+                raise ExecutionError("service_disagreement_alternates_unsupported")
+            from .service_repair_binding import ServiceRepairBinding
+            if type(declaration) is not ServiceRepairBinding:
+                raise ExecutionError("service_repair_binding_invalid")
+            declaration.check(profile)
         controllers = []
         models = []
         workers = {role.controller_ref for role in profile.roles if role.role == "host_worker"}

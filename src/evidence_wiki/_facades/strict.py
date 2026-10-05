@@ -93,6 +93,15 @@ class StrictNamespace(Namespace):
         from ..review_service_policy import SERVICE_PLAN, schema_document
         return {**schemas(), SERVICE_PLAN: schema_document()}
 
+    def repair_schemas(self):
+        """Return bounded repair diff/progress and immutable service binding shapes."""
+        self._workspace._check_open()
+        from ..protected_handoff import HANDOFF
+        from ..protected_handoff import schema_document as handoff_schema
+        from ..repair_progress import schemas
+        from ..service_repair_binding import BINDING, schema_document
+        return {**schemas(), BINDING: schema_document(), HANDOFF: handoff_schema()}
+
     def review_status(self, claim_id: str | None = None) -> dict[str, Any]:
         """Return current authenticated selection, including failed or stale reviews."""
         return self._call("strict_evidence", "run_operation", self._root,

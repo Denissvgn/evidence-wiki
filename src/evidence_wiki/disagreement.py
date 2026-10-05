@@ -41,18 +41,28 @@ def _refs(value: Any) -> list[str]:
     return sorted(values)
 
 
-def _reviews(values, required, generator_controller_ref):
+def _reviews(values, required, generator_controller_ref, service_profile=None, frozen=None):
     if type(values) is not list or len(values) > 32:
         raise ExecutionError("disagreement_reviews_invalid")
     result, refs = [], {}
     for supplied in values:
-        if type(supplied) is not dict or set(supplied) != REVIEW_FIELDS:
+        extra = {"service_slot_ref", "qualification_ref"} if service_profile is not None else set()
+        if type(supplied) is not dict or set(supplied) != REVIEW_FIELDS | extra:
             raise ExecutionError("disagreement_reviews_invalid")
         review = detached(supplied)
         for name in ("review_ref", "profile_ref", "controller_ref"):
             _ref(review[name])
         _hash(review["basis_id"])
         configured = required.get(review["profile_ref"])
+        if service_profile is not None:
+            from .review_service_policy import approved_profiles
+            slot = _ref(review["service_slot_ref"])
+            _ref(review["qualification_ref"])
+            configured = next((row for row in approved_profiles(frozen, service_profile)
+                if row["profile_ref"] == review["profile_ref"]), None)
+            route = service_profile.review_services.route(slot)
+            if slot not in required or review["profile_ref"] not in route.config_refs:
+                raise ExecutionError("disagreement_review_slot_invalid")
         if (configured is None or review["role"] != configured["role"]
                 or review["controller_ref"] != configured["controller_ref"]
                 or review["controller_ref"] == generator_controller_ref):
@@ -113,7 +123,7 @@ def _gates(values):
 
 
 def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, generator_controller_ref: str,
-                        reviews: list[dict[str, Any]], history: list[dict[str, Any]], gates: dict[str, Any]) -> dict[str, Any]:
+                        reviews: list[dict[str, Any]], history: list[dict[str, Any]], gates: dict[str, Any], service_profile=None) -> dict[str, Any]:
     """Choose a bounded proposal; adjudication never resolves native eligibility.
 
     History includes reserved attempts, including failed attempts, from the
@@ -152,8 +162,15 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
         return terminal("policy_incompatible", "human_review_required", "machine_review_incompatible")
     required = {row["profile_ref"]: row for row in frozen["required_evaluators"] if row["role"] in {"evaluator", "critic"}}
     try:
+        if service_profile is not None:
+            from .agent_execution import ExecutionProfile
+            from .service_repair_binding import ServiceRepairBinding
+            if type(service_profile) is not ExecutionProfile or type(service_profile.service_repair) is not ServiceRepairBinding:
+                raise ExecutionError("disagreement_service_profile_invalid")
+            service_profile.service_repair.check(service_profile)
+            service_profile.review_services.check(service_profile, frozen)
         canonical_gates = _gates(gates)
-        current = [row for row in _reviews(reviews, required, generator_controller_ref) if row["basis_id"] == basis_id]
+        current = [row for row in _reviews(reviews, required, generator_controller_ref, service_profile, frozen) if row["basis_id"] == basis_id]
         retained = _history(history, claim_id)
     except (ExecutionError, MutationError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
         return terminal("rejected", "untrusted_observation", "invalid_scoped_input")
@@ -227,10 +244,11 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
         return terminal("blocked_external", "qualification_unknown", "current_reviewer_qualification_missing")
     by_profile = {}
     for row in current:
-        prior = by_profile.get(row["profile_ref"])
+        slot = row.get("service_slot_ref", row["profile_ref"])
+        prior = by_profile.get(slot)
         if prior is not None and (prior["verdicts"] != row["verdicts"] or prior["objection_refs"] != row["objection_refs"]):
             return terminal("abstained", "review_disagreement", "conflicting_first_passes_from_one_profile")
-        by_profile[row["profile_ref"]] = row
+        by_profile[slot] = row
     if set(by_profile) != set(required):
         if not permitted("model") or not canonical_gates["model_available"]:
             return terminal("blocked_external", "executor_unavailable", "first_pass_execution_unavailable")

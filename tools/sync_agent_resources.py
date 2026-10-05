@@ -19,6 +19,7 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
     CALCULATION_SCHEMAS,
     CATALOG_PATH,
     RECOVERY_SCHEMAS,
+    REPAIR_SCHEMAS,
     REVIEW_PACKET_SCHEMAS,
     SERVICE_SCHEMAS,
     resource_paths,
@@ -28,11 +29,16 @@ from evidence_wiki._script_host import load_packaged_script  # noqa: E402
 from evidence_wiki.calculation_contracts import schema_document as calculation_schema
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
+from evidence_wiki.protected_handoff import HANDOFF
+from evidence_wiki.protected_handoff import schema_document as handoff_schema
 from evidence_wiki.recovery_contracts import schema_document as recovery_schema
+from evidence_wiki.repair_progress import schema_document as repair_schema
 from evidence_wiki.review_packet_contracts import schema_document as review_packet_schema
 from evidence_wiki.review_service_contracts import schemas as service_schemas
 from evidence_wiki.review_service_policy import SERVICE_PLAN
 from evidence_wiki.review_service_policy import schema_document as service_plan_schema
+from evidence_wiki.service_repair_binding import BINDING as REPAIR_BINDING
+from evidence_wiki.service_repair_binding import schema_document as repair_binding_schema
 
 
 def encoded(value: dict) -> bytes:
@@ -49,6 +55,7 @@ def exports() -> dict[str, bytes]:
     schemas.update(strict.schema_documents())
     schemas.update(computation.schemas())
     schemas.update({key:calculation_schema(key) for key in CALCULATION_SCHEMAS})
+    schemas.update({key: handoff_schema() if key == HANDOFF else repair_binding_schema() if key == REPAIR_BINDING else repair_schema(key) for key in REPAIR_SCHEMAS})
     schemas.update({key:review_packet_schema(key) for key in REVIEW_PACKET_SCHEMAS})
     schemas.update({key:recovery_schema() for key in RECOVERY_SCHEMAS})
     service_documents = {**service_schemas(), SERVICE_PLAN: service_plan_schema()}

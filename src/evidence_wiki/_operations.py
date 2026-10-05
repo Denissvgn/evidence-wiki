@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "22"
+OPERATION_MATRIX_VERSION = "23"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -56,6 +56,8 @@ _ROWS = (
     ("strict.prepare_packet", None, "none; protected complete blinded page handle", "current native source/diagnostic/rights and closing material checks on every access", "none"),
     ("strict.packet_schemas", None, "none; closed inert packet and delivery contracts", "none", "none"),
     ("strict.register_review", "evidence-wiki strict review", "authenticated review events in private host state", "canonical exclusive host state lock, checkpoint and request identity", "none"),
+    ("strict.repair_schemas", None, "none; closed bounded repair shapes", "none", "none"),
+    ("research.session.repair_progress", None, "none; historical effects separated from current native eligibility", "held current protected usage, source/host scope and closing journal/config/root checks", "none; no repair or approval callback"),
     ("strict.service_schemas", None, "none; closed inert service declarations/reports", "none", "none"),
     ("research.session.review_services", None, "none; provisioned credential/native execution status", "current native trust, qualified role and closing material checks", "none; no external model callback"),
     ("strict.review_status", None, "none; current native review selection", "held current authority and bounded closing capture", "none"),

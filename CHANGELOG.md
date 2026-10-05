@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Add current permission-filtered scoped repair progress with exact material
+  differences, native scientific calculation revalidation and explicit logical
+  review-slot binding for approved alternate services. Material changes require
+  fresh independent native review within the frozen run budgets.
+  Protected repair uses a declared bundled-adapter delivery ceiling and held
+  native source custody through stdin handoff; uncertain work retains its budget.
+
 - Add current provisioned review-service status and explicit immutable approved
   alternate routes with shared role budgets, exact owned output/producer checks,
   current target qualification and parent-only signing. Unknown work and semantic
