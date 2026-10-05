@@ -24,7 +24,7 @@ from .research_observation import ResearchObservation
 from .research_observation import reason as owner_reason
 from .research_session_contracts import CURRENT_V2, NEXT_V2, NEXT_V3, NEXT_V4, STEP_V2, checked, refuse
 from .review_context import ReviewContext, create_review_context
-from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, validate_document
+from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, POLICY_V3, validate_document
 from .workflow_contracts import EXECUTION_OBSERVATION, JOB_V2, JOB_V3, JOB_V4, WorkflowContractError, validate_job
 
 
@@ -125,7 +125,10 @@ def _qualifications(session, observed, *, originals=None, packets=None, records=
             now_utc(), rubric["id"], rubric_sha256=hashlib.sha256(canonical(rubric)).hexdigest(), **extra)
     except ValueError:
         return {"state": "unknown", "reason": "qualification_invalid_or_expired", "profiles": []}
-    qualified = all(row["qualified"] is True and row["independent"] is True for row in profiles)
+    services = getattr(session.execution.profile, "review_services", None)
+    qualified = (all(any(row["profile_ref"] in route.config_refs and row["qualified"] is True and row["independent"] is True
+        for row in profiles) for route in services.routes) if services is not None else
+        all(row["qualified"] is True and row["independent"] is True for row in profiles))
     result = {"state": "qualified" if qualified else "unknown", "reason": "qualified_scoped_profiles" if qualified
         else "qualification_unknown", "profiles": profiles}
     plan = getattr(session.execution.profile, "disagreement", None)
@@ -170,6 +173,21 @@ def require_machine_compatible(session):
 
 
 def current(session):
+    try:
+        return _current_owned(session)
+    except (Exception, SystemExit):
+        if session.execution.profile.review_services is None:
+            raise
+        try:
+            config = owner("_strict_evidence").configuration(session.root)
+            owner("_evidence_authority").load_trust(session.root, config, datetime.now(timezone.utc))
+        except (Exception, SystemExit):
+            from .review_service_blocking import current as blocked_current
+            return blocked_current(session)
+        raise
+
+
+def _current_owned(session):
     from .research_session import _current_observation
 
     records = retained(session)
@@ -297,9 +315,13 @@ def policy_observation(session, view):
             for profile in required:
                 reviews = [row["data"] for row in records if row["kind"] == "execution_applied"
                     and row["data"].get("operation") == "evaluate" and row["data"].get("claim_id") == claim["id"]
-                    and row["data"].get("profile_ref") == profile["profile_ref"]
+                    and row["data"].get("service_slot_ref", row["data"].get("profile_ref")) == profile["profile_ref"]
                     and row["data"].get("strict_basis_id") == (release or {}).get("basis_id")]
-                independent = independent and bool(reviews and reviews[-1]["passed"])
+                eligible = bool(reviews and reviews[-1]["passed"])
+                if eligible and session.execution.profile.review_services is not None:
+                    from .review_service_routing import review_current
+                    eligible = review_current(session, reviews[-1], view, profile)
+                independent = independent and eligible
         qualified = view["qualification"]["state"] == "qualified"
         selected.append({"question_id": original["original_id"], "outcome_ref": digest(original),
             "basis_id": view["basis_id"], "claim_refs": [claim["id"] for claim in claims], "source_refs": source_ids,
@@ -308,7 +330,7 @@ def policy_observation(session, view):
     flags = {key: bool(selected) and all(row[key] for row in selected) for key in
         ("source_current", "source_present", "mechanical_pass", "review_pass", "qualified", "context_complete")}
     count = len(view["accounting"]["original_ids"])
-    result = {"schema_version": OBSERVATION_V2 if session.policy.to_dict()["schema_version"] == POLICY_V2 else OBSERVATION,
+    result = {"schema_version": OBSERVATION_V2 if session.policy.to_dict()["schema_version"] in {POLICY_V2, POLICY_V3} else OBSERVATION,
         "policy_id": session.policy.policy_id, "basis_id": view["basis_id"], "expected_basis_id": view["basis_id"],
         "observation_kind": "canonical_owner", "owner_ref": "current-strict-publication",
         "receipt_ref": digest(view["canonical_release"]), "policy_compatible": view["policy_compatible"],
@@ -347,6 +369,8 @@ def _disagreement_refusal(session, view, error):
 def _owner_action(session, view, records, *, resuming=False):
     frozen = session.policy.to_dict()
     profile = session.execution.profile
+    if view["qualification"]["reason"] == "service_authority_unavailable":
+        return _terminal_action(session, view, "blocked_external", "qualification_unknown")
     if getattr(profile, "role_scopes", None) is not None and profile.required_diversity:
         try:
             configs = [_worker_config(session), *[row["profile_ref"] for row in frozen["required_evaluators"]]]
@@ -359,6 +383,10 @@ def _owner_action(session, view, records, *, resuming=False):
             return _terminal_action(session, view, "blocked_external", "qualification_unknown")
     if not view["policy_compatible"] or frozen["human_review"] or any(row["human_required"] for row in frozen["required_evaluators"]):
         return _terminal_action(session, view, "policy_incompatible", "human_review_required")
+    if profile.review_services is not None:
+        from .service_authentication import status as service_status
+        if service_status(session)["state"] != "ready":
+            return _terminal_action(session, view, "blocked_external", "qualification_unknown")
     if not view["authority"]["terminal_grants_available"]:
         return _terminal_action(session, view, "blocked_external", "authority_unavailable")
     if records and datetime.now(timezone.utc) >= deadline(session):
@@ -397,6 +425,19 @@ def _owner_action(session, view, records, *, resuming=False):
         if pending["state"] == "succeeded":
             return {"operation": "admit", "attempt_id": pending["attempt_id"], "reason": "eligible_result_intake"}
         prior = _attempt_rows(records)[pending["attempt_id"]]
+        if session.execution.profile.review_services is not None and prior.get("service_slot_ref") is not None:
+            from .review_service_routing import selected
+            prepared = owner("strict_evidence").prepare_review(session.root, prior["claim_id"])
+            target = selected(session, slot_ref=prior["service_slot_ref"], claim_id=prior["claim_id"],
+                strict_basis_id=prepared["result"]["basis_id"], view=view, records=records)
+            if target["action"] != "select":
+                return _terminal_action(session, view, "blocked_external", "executor_unavailable")
+            if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+                return {"operation": "reconcile", "attempt_id": pending["attempt_id"], "reason": "retry_backoff",
+                    "retry_after_utc": target["retry_after_utc"]}
+            return {"operation": "evaluate", "purpose": "retry", "retry_purpose": "evaluate",
+                "original_id": prior["original_id"], "claim_id": prior["claim_id"], "reason": "bounded_retry",
+                **{key: target[key] for key in ("config_ref", "service_slot_ref", "predecessor_attempt_id", "predecessor_observation_ref", "retry_after_utc") if key in target}}
         if prior.get("retry_purpose", prior.get("purpose")) == "adjudicate":
             from .execution_continuations import authenticated_gates, claim_sources, current_gates
             from .execution_disagreement import project_claim
@@ -556,10 +597,25 @@ def _owner_action(session, view, records, *, resuming=False):
             wanted = frozen["required_evaluators"]
             failures = []
             for profile in wanted:
-                matches = [item for item in current_reviews if item["profile_ref"] == profile["profile_ref"]]
+                matches = [item for item in current_reviews if item.get("service_slot_ref", item["profile_ref"]) == profile["profile_ref"]]
                 if not matches:
-                    return {"operation": "evaluate", "purpose": "evaluate", "original_id": original["original_id"],
-                        "claim_id": row["claim"]["id"], "config_ref": profile["profile_ref"], "reason": "independent_review_required"}
+                    from .review_service_routing import selected
+                    target = selected(session, slot_ref=profile["profile_ref"], claim_id=row["claim"]["id"],
+                        strict_basis_id=basis, view=view, records=records)
+                    if target["action"] != "select":
+                        return _terminal_action(session, view, "blocked_external", "executor_unavailable")
+                    if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+                        return {"operation": "reconcile", "attempt_id": target["predecessor_attempt_id"], "reason": "retry_backoff",
+                            "retry_after_utc": target["retry_after_utc"]}
+                    return {"operation": "evaluate", "purpose": "retry" if "predecessor_attempt_id" in target else "evaluate",
+                        **({"retry_purpose": "evaluate"} if "predecessor_attempt_id" in target else {}),
+                        "original_id": original["original_id"], "claim_id": row["claim"]["id"],
+                        "config_ref": target["config_ref"], "reason": "independent_review_required",
+                        **{key: target[key] for key in ("service_slot_ref", "predecessor_attempt_id", "predecessor_observation_ref", "retry_after_utc") if key in target}}
+                if session.execution.profile.review_services is not None:
+                    from .review_service_routing import review_current
+                    if not review_current(session, matches[-1], view, profile):
+                        return _terminal_action(session, view, "blocked_external", "qualification_unknown")
                 if not matches[-1]["passed"]:
                     failures.append(matches[-1])
             if failures:
@@ -657,6 +713,16 @@ def reserve(session, request_id, action, view):
     if session.context.controller_for(role.role, config_ref) != role.controller_ref:
         refuse("HOST_CAPABILITY_UNAVAILABLE")
     registry = session.execution.profile.role_scopes
+    if operation == "evaluate" and session.execution.profile.review_services is not None and purpose == "evaluate":
+        from .review_service_routing import required_profile
+        from .service_authentication import status as service_status
+        required_profile(session, config_ref, action.get("service_slot_ref"))
+        services = service_status(session)
+        selected_service = next((item for item in services["services"] if item["config_ref"] == config_ref), None)
+        if selected_service is None or selected_service["credential_state"] != "verified" or selected_service["qualification_state"] != "qualified":
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        slot = next(route.slot_ref for route in session.execution.profile.review_services.routes if config_ref in route.config_refs)
+        action = {**action, "service_slot_ref": slot}
     scope = None if registry is None else registry.scope(config_ref)
     if scope is not None and operation == "generate" and scope.task_role != ("calculation" if purpose == "calculation" else "coverage" if purpose == "coverage" else "planner" if purpose == "plan" else "repair" if purpose == "repair" else "researcher"):
         refuse("HOST_CAPABILITY_UNAVAILABLE")
@@ -680,8 +746,17 @@ def reserve(session, request_id, action, view):
         evidence_ids = {item["source_id"] for claim in [packet["claim"], *packet["premises"]] for item in claim["evidence"]}
         if "review_assembly_request_id" in action and packet.get("computation") is not None:
             evidence_ids.update(row["source_id"] for row in packet["computation"]["sources"])
-        required_role = "critic" if purpose == "counterevidence" else "adjudicator" if purpose == "adjudicate" else next(item["role"]
-            for item in frozen["required_evaluators"] if item["profile_ref"] == config_ref)
+        from .review_service_routing import required_profile
+        if session.execution.profile.review_services is not None and purpose == "evaluate":
+            from .review_service_routing import selected as selected_service
+            target = selected_service(session, slot_ref=action["service_slot_ref"], claim_id=action["claim_id"],
+                strict_basis_id=prepared["result"]["basis_id"], view=view, records=retained(session))
+            existing_attempt = _attempt_rows(retained(session)).get(request_id)
+            if existing_attempt is None and (target["action"] != "select" or target["config_ref"] != config_ref):
+                refuse("SERVICE_SELECTION_REQUIRED")
+            if existing_attempt is None and "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+                refuse("SERVICE_BACKOFF_REQUIRED")
+        required_role = "critic" if purpose == "counterevidence" else "adjudicator" if purpose == "adjudicate" else required_profile(session, config_ref, action.get("service_slot_ref"))["role"]
         if scope is not None and scope.task_role != required_role:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
         if "review_assembly_request_id" in action:
@@ -831,6 +906,19 @@ def reserve(session, request_id, action, view):
         timeout = min(timeout, int(Decimal(role_remaining["seconds"])))
         if timeout < 1 or any(cap[key] > role_remaining[key] for key in ("model_calls", "tool_calls", "tokens")) or Decimal(cap["cost"]) > Decimal(role_remaining["cost"]):
             refuse("BUDGET_EXHAUSTED")
+    if operation == "evaluate" and session.execution.profile.review_services is not None and any(config_ref in route.config_refs for route in session.execution.profile.review_services.routes):
+        from .review_service_accounting import projection as service_projection
+        slot = next(route.slot_ref for route in session.execution.profile.review_services.routes if config_ref in route.config_refs)
+        route = session.execution.profile.review_services.route(slot)
+        if config_ref not in route.config_refs:
+            refuse("HOST_CAPABILITY_UNAVAILABLE")
+        shared = service_projection(session.execution.profile.review_services, plan, retained(session), slot)
+        if shared["usage_unknown"] or shared["overrun"]:
+            refuse("BUDGET_EXHAUSTED")
+        role_remaining = shared["remaining"]
+        timeout = min(timeout, int(Decimal(role_remaining["seconds"])))
+        if timeout < 1 or any(cap[key] > role_remaining[key] for key in ("model_calls", "tool_calls", "tokens")) or Decimal(cap["cost"]) > Decimal(role_remaining["cost"]):
+            refuse("BUDGET_EXHAUSTED")
     if (cap["model_calls"] < 1 or cap["tokens"] < 1 or any(cap[key] > remaining[key] for key in ("model_calls", "tool_calls", "tokens"))
             or Decimal(cap["cost"]) > Decimal(remaining["cost"])):
         refuse("BUDGET_EXHAUSTED")
@@ -846,7 +934,7 @@ def reserve(session, request_id, action, view):
     job = validate_job({"schema_version": JOB_V2 if scope is None else JOB_V4 if purpose == "calculation" or review_context is not None and review_context.document()["schema_version"] == "research-review-context/v2" else JOB_V3, "id": request_id, "operation": operation, "role": role.role,
         "controller_ref": role.controller_ref, "grant_ref": frozen["host_capability_refs"]["model"],
         "input_id": session.binding["request_binding"], "basis_id": view["basis_id"], "policy_id": session.policy.policy_id,
-        "policy_version": "2" if frozen["schema_version"] == POLICY_V2 else "1", "prompt_version": role.prompt_version,
+        "policy_version": frozen["schema_version"].rsplit("v", 1)[-1], "prompt_version": role.prompt_version,
         "revision_precondition": view["basis_id"], "original_text": original["original_text"], "scope": [original["original_id"]],
         "required_capabilities": ["model", "calculation.propose"] if purpose == "calculation" else ["model", "coverage.propose"] if purpose == "coverage" else ["model", "objection.propose"] if purpose == "counterevidence" else ["model", "plan.propose"] if purpose == "plan" else ["model", "acquisition.propose"] if purpose == "acquisition" else ["model"], "payload": payload, "issued_utc": now.isoformat(),
         "deadline_utc": (now + timedelta(seconds=timeout)).isoformat(), "timeout_seconds": timeout, "max_attempts": 1,
@@ -864,6 +952,8 @@ def reserve(session, request_id, action, view):
     if current(session)["basis_id"] != view["basis_id"]:
         refuse("BASIS_CHANGED")
     extras = {}
+    if "service_slot_ref" in action:
+        extras["service_slot_ref"] = action["service_slot_ref"]
     if "review_assembly_request_id" in action:
         extras["review_assembly_request_id"] = action["review_assembly_request_id"]
     if purpose == "calculation":
@@ -1213,6 +1303,11 @@ def _validate_application(session, attempt, observation, application, *, allow_r
     records = retained(session)
     view = current(session)
     row = _attempt_rows(records)[attempt.attempt_id]
+    if application is not None and session.execution.profile.review_services is not None and row.get("retry_purpose", row.get("purpose")) == "evaluate":
+        from .review_service_routing import required_profile, review_current
+        wanted = required_profile(session, attempt.config_ref, row.get("service_slot_ref"))
+        if not review_current(session, application, view, wanted):
+            refuse("RESULT_INELIGIBLE")
     if "review_assembly_request_id" in row:
         from .review_packet_execution import require_current
         require_current(session, attempt, row)
@@ -1292,6 +1387,37 @@ def _proposal_limits(session, proposal, bindings):
 
 
 def _apply(session, attempt_id):
+    services = session.execution.profile.review_services
+    records = retained(session)
+    row = _attempt_rows(records).get(attempt_id)
+    ordinary_service = services is not None and row is not None and row.get("service_slot_ref") is not None and row.get("retry_purpose", row.get("purpose")) == "evaluate"
+    if ordinary_service and any(item["kind"] == "execution_applied" and item["data"]["attempt_id"] == attempt_id for item in records):
+        return
+    try:
+        return _apply_owned(session, attempt_id)
+    except (Exception, SystemExit) as error:
+        if not ordinary_service:
+            raise
+        with gate(session):
+            records = retained(session)
+            latest = _latest_observation(records, attempt_id)
+            plan = session.execution.ledger(session, records)
+            unknown = plan is None or attempt_id in accounting.projection(plan, limits=_limits(session))["incomplete_attempt_ids"]
+            effect = any(item["kind"] == "execution_native" and item["data"]["reservation"]["attempt_id"] == child_id(attempt_id, "register") for item in records)
+            if unknown or latest is None or not latest["final_accounting"] or latest["state"] != "succeeded" or effect:
+                raise
+            reason = getattr(error, "error_code", "SERVICE_RESULT_REFUSED")
+            append(session, "execution_service_refusal", child_id(attempt_id, "service_refusal"),
+                {"attempt_id": attempt_id, "config_ref": row["attempt"]["config_ref"], "service_slot_ref": row["service_slot_ref"],
+                    "observation_ref": digest(latest), "reason": reason, "accepted": False})
+            append(session, "execution_applied", child_id(attempt_id, "applied"),
+                {"attempt_id": attempt_id, "operation": "service_refused", "original_id": row["original_id"],
+                    "claim_id": row["claim_id"], "profile_ref": row["attempt"]["config_ref"],
+                    "service_slot_ref": row["service_slot_ref"], "passed": False})
+        return
+
+
+def _apply_owned(session, attempt_id):
     from .draft_contracts import PROPOSAL
     from .draft_contracts import validate_document as proposal_document
 
@@ -1407,10 +1533,21 @@ def _apply(session, attempt_id):
                 if "review_assembly_request_id" in row:
                     from .review_packet_execution import require_current
                     require_current(session, attempt, row)
+                if session.execution.profile.review_services is not None:
+                    from .service_authentication import require_output
+                    require_output(session, attempt, observation, prepared)
                 envelope = session.execution.review_signer.registration(prepared, output["verdicts"], output["rationale"],
                     child_id(attempt_id, "review"), now_utc(), config_ref=attempt.config_ref)
                 _verify_review_controller(session, attempt, envelope)
+                if session.execution.profile.review_services is not None:
+                    target = session.execution.profile.role(attempt.config_ref)
+                    qualified_row = next(item for item in view["qualification"]["profiles"] if item["profile_ref"] == attempt.config_ref)
+                    application["service_identity"] = {"controller_ref": target.controller_ref, "model_ref": target.model_ref,
+                        "prompt_version": target.prompt_version, "execution_profile_sha256": session.execution.profile.sha256,
+                        "policy_id": session.policy.policy_id, "qualification_ref": qualified_row["qualification_ref"],
+                        "attempt_ref": digest(attempt.document()), "observation_ref": digest(observation)}
                 application.update(envelope=envelope, claim_id=row["claim_id"], profile_ref=attempt.config_ref,
+                    **({"service_slot_ref": row["service_slot_ref"]} if "service_slot_ref" in row else {}),
                     strict_basis_id=prepared["result"]["basis_id"], passed=all(value == "pass" for value in output["verdicts"].values()),
                     critical_failure=any(output["verdicts"].get(key) != "pass" for key in ("support", "counterevidence")))
             append(session, "execution_application", child_id(attempt_id, "application"), application)
@@ -1436,6 +1573,10 @@ def _apply(session, attempt_id):
             effect_precondition=lambda: _validate_application(session, attempt, observation, application, allow_receipt_proof=False))
         applied = {key: application[key] for key in ("attempt_id", "operation", "original_id", "claim_id", "profile_ref",
             "strict_basis_id", "passed", "critical_failure")}
+    if "service_slot_ref" in application:
+        applied["service_slot_ref"] = application["service_slot_ref"]
+    if "service_identity" in application:
+        applied["service_identity"] = application["service_identity"]
     with gate(session):
         if "disagreement" in row and application["operation"] == "generate":
             from .execution_continuations import claim_sources

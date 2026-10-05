@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .disagreement_configuration import DisagreementPlan
     from .execution_roles import ExecutionRoleRegistry
     from .review_delivery import ReviewDelivery
+    from .review_service_policy import ReviewServicePlan
 
 PROFILE = "research-execution-profile/v1"
 PROFILE_V2 = "research-execution-profile/v2"
@@ -42,6 +43,7 @@ PROFILE_V4 = "research-execution-profile/v4"
 PROFILE_V5 = "research-execution-profile/v5"
 PROFILE_V6 = "research-execution-profile/v6"
 PROFILE_V7 = "research-execution-profile/v7"
+PROFILE_V8 = "research-execution-profile/v8"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -256,6 +258,7 @@ class ExecutionProfile:
     calibration: CalibrationPlan | None = None
     disagreement: DisagreementPlan | None = None
     review_delivery: ReviewDelivery | None = None
+    review_services: ReviewServicePlan | None = None
 
     def __post_init__(self) -> None:
         _ref(self.profile_ref)
@@ -320,6 +323,11 @@ class ExecutionProfile:
             if type(self.review_delivery) is not ReviewDelivery or self.role_scopes is None:
                 raise ExecutionError("execution_complete_review_scope_required")
 
+        if self.review_services is not None:
+            from .review_service_policy import ReviewServicePlan
+            if type(self.review_services) is not ReviewServicePlan:
+                raise ExecutionError("service_plan_invalid")
+            self.review_services.check_profile(self)
 
     def document(self) -> dict[str, Any]:
         result = {
@@ -343,6 +351,8 @@ class ExecutionProfile:
             result["schema_version"] = PROFILE_V6
         if self.review_delivery is not None:
             result.update(schema_version=PROFILE_V7, review_delivery=self.review_delivery.document())
+        if self.review_services is not None:
+            result.update(schema_version=PROFILE_V8, review_services=self.review_services.document())
         return result
 
     @property
@@ -655,7 +665,7 @@ class BoundedSubprocessExecutor:
                 raise ExecutionError("execution_control_job_unsupported")
             command = self._commands.get(attempt.config_ref)
             if command is None:
-                return self._unavailable(attempt, "executor_unavailable")
+                return self._not_started(attempt) if self.profile.review_services is not None else self._unavailable(attempt, "executor_unavailable")
             timeout = min(job["timeout_seconds"], (_utc(job["deadline_utc"]) - _utc(stamp)).total_seconds())
             payload = _json(attempt.worker_document())
             try:
@@ -801,6 +811,16 @@ class BoundedSubprocessExecutor:
         }
         value["authentication"] = hmac.new(self._key, _json(value), hashlib.sha256).hexdigest()
         return validate_observation(value)
+
+    def _not_started(self, attempt):
+        """A local invoke precheck observed no process/effect; retain exact terminal state."""
+        running = _Running(attempt, None, None, time.monotonic(), 0)
+        running.snapshot = {"state": "unavailable", "reason": "executor_unavailable", "completed_utc": None,
+            "output": None, "observed_usage": {"seconds": 0, "model_calls": 0, "tool_calls": 0, "tokens": 0, "cost": "0"},
+            "final_accounting": True, "cancellation_confirmed": False}
+        running.finished.set()
+        self._attempts[attempt.attempt_id] = running
+        return self._observe(running)
 
     def _unavailable(self, attempt: ExecutionAttempt, reason: str) -> dict[str, Any]:
         return self._envelope(attempt, sequence=0, started_utc=None, details={

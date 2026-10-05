@@ -2119,3 +2119,50 @@ application. The canonical drive stops finitely when complete delivery is
 unavailable. `worker_consumption` and `worker_comprehension` remain
 `not_observed`; `semantic_approval` remains `not_evaluated`. Only independently
 qualified current reviews and the native release owner decide acceptance.
+
+
+API version 39 / operation matrix version 22 adds `session.review_services()`
+and `ws.strict.service_schemas()`. The status read checks only already configured
+parent-held credentials against current native trust and role/controller
+selection. It performs no credential discovery, enrollment, remote mutual
+authentication or service-health request. A credential challenge proves parent
+key possession and native role usability; `authenticated_owned_execution` is a
+retained correlated execution fact, not current reachability or approval of a
+current claim. Current semantic qualification remains the separate qualification
+owner's exact scoped decision. These reports keep `authorized` and
+`evidence_accepted` false.
+
+An explicit `ReviewServicePlan` in both policy version 3 and execution-profile
+version 8 declares evaluator/critic role slots, ordered approved configurations,
+and one immutable `ExecutionRoleLimit` per slot. Earlier policy/profile documents
+keep their existing behavior. Every selected target retains its actual
+configuration, controller, model, prompt and qualification commitments in the
+native journal and signed review. Another target's qualification cannot cover a
+stale vote. Parent signing requires the actual measured producer application,
+owned reviewer output, complete current packet and canonical mechanical checks;
+worker inputs contain no signing keys.
+
+Automatic evaluation uses the existing run journal, reservation, invocation,
+intake and application owners. Only known predispatch service unavailability or
+authenticated settled service failure may use an already approved alternate,
+within the frozen retry grant, backoff, run deadline and shared role-slot budget.
+Unknown external work retains its reservation; a failed or unknown semantic
+verdict never buys another service vote. Direct reservations obey the same
+selection and timing rules. A known final ineligible output settles as a retained
+refusal without signing or redispatch, while uncertain effects remain pending.
+Missing configured signing credentials, qualified identity or controller
+separation produces a finite blocked result under the same valid host context.
+Deleting or changing the foundational authority invalidates the immutable host
+selection and yields a typed custody conflict without new records; it does not
+authorize a finish under changed custody. Key/envelope policy changes remain host-owned, and source
+rights still come from the canonical usage owner.
+
+`session.review_services()` requires `research_session.review_services` and
+`service_authentication.status` in addition to the existing current-read grants.
+The automatic bridge uses the ordinary model/evaluation/intake and native
+registration grants; the schema read creates no authority. Alternate-service
+routes combined with `DisagreementPlan` are explicitly unsupported in this
+version. Single-configuration service plans and existing legacy disagreement
+profiles retain their supported contracts. Native host protocol observations do
+not by themselves establish live model quality, worker understanding or operating
+system isolation.

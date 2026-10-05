@@ -108,12 +108,14 @@ class CalibratedEvaluators:
         frozen = policy.to_dict()
         records = {row["binding"]["config_ref"]: self.authority.verify(row) for row in json.loads(self._records)}
         result = []
-        selected_profiles = frozen["required_evaluators"] if selected_profiles is None else selected_profiles
+        from .review_service_policy import approved_profiles
+        required_profiles = approved_profiles(frozen, profile)
+        selected_profiles = required_profiles if selected_profiles is None else selected_profiles
         if auxiliary:
             expected = None if profile.disagreement is None else profile.disagreement.auxiliary_profile(policy, profile)
             if expected is None or selected_profiles != [expected]:
                 raise ExecutionError("calibration_auxiliary_selection_invalid")
-        elif selected_profiles != frozen["required_evaluators"]:
+        elif selected_profiles != required_profiles:
             raise ExecutionError("calibration_required_selection_changed")
         for wanted in selected_profiles:
             row = {**wanted, "qualification_ref": None, "qualified": None, "independent": None,

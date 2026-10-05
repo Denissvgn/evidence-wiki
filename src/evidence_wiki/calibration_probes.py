@@ -80,11 +80,12 @@ def refresh(session, request_id):
     else:
         optional = getattr(session.execution.profile, "disagreement", None)
         auxiliary = None if optional is None else optional.adjudicator_config_ref
-        if auxiliary is not None:
+        service_routes = session.execution.profile.review_services is not None
+        if auxiliary is not None or service_routes:
             probe["configuration_reasons"] = {}
         for selection in sorted(plan.selections, key=lambda row: (row.config_ref == auxiliary, row.config_ref)):
             def failure(reason, selection=selection):
-                if selection.config_ref == auxiliary:
+                if selection.config_ref == auxiliary or service_routes:
                     probe["configuration_reasons"].setdefault(selection.config_ref, []).append(reason)
                     return False
                 probe["reasons"].append(reason)

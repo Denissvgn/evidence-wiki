@@ -157,7 +157,8 @@ class QualificationAuthority:
         selected = profile.role(config_ref)
         if selected.model_ref.startswith("offline/"):
             _fail("qualification_offline_fixture_unsupported")
-        required = [row for row in frozen["required_evaluators"] if row["profile_ref"] == config_ref
+        from .review_service_policy import approved_profiles
+        required = [row for row in approved_profiles(frozen, profile) if row["profile_ref"] == config_ref
                     and row["controller_ref"] == selected.controller_ref]
         if selected.role != "evaluator" or len(required) != 1 or required[0]["human_required"]:
             _fail("qualification_role_invalid")
@@ -284,7 +285,8 @@ class QualifiedEvaluators:
         records = json.loads(self._records)
         lookup = {(record["role"], record["profile_ref"]): self.authority.verify(record) for record in records}
         rows = []
-        for wanted in frozen["required_evaluators"]:
+        from .review_service_policy import approved_profiles
+        for wanted in approved_profiles(frozen, execution_profile):
             row = {**wanted, "qualification_ref": None, "qualified": None, "independent": None,
                 "assurance": frozen["assurance"], "reference_cases": None, "families": None,
                 "critical_false_acceptances": None, "positive_acceptance": None, "meaning_preserving_flip": None}
@@ -299,6 +301,9 @@ class QualifiedEvaluators:
             if any(record[key] != value for key, value in expected.items()) or role.controller_ref != wanted["controller_ref"]:
                 _fail("qualification_binding_mismatch")
             if not _utc(record["issued_utc"]) <= _utc(now_utc) < _utc(record["expires_utc"]):
+                if getattr(execution_profile, "review_services", None) is not None:
+                    rows.append(row)
+                    continue
                 _fail("qualification_expired")
             if rubric_sha256 is None:
                 rows.append(row)

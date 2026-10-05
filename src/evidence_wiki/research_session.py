@@ -278,6 +278,9 @@ class ResearchSession:
         if execution is not None and type(execution) is not ResearchExecution:
             refuse("EXECUTION_CONFIG_INVALID")
         self._execution = execution
+        if execution is not None:
+            from .review_service_policy import approved_profiles
+            approved_profiles(self.policy.to_dict(), execution.profile)
         self._closed = False
         self._owner_workspace = None
         view = current(root, self.policy, run_id=None)
@@ -647,6 +650,13 @@ class ResearchSession:
         self._check("propose_calculation", write=True)
         from .calculation_agent import propose
         return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
+
+    @_boundary
+    def review_services(self):
+        """Read provisioned credential usability and separately observed execution."""
+        self._check("review_services")
+        from .service_authentication import status
+        return status(self)
 
     @_boundary
     def recovery_status(self, *, after_sequence=0, max_effects=32):

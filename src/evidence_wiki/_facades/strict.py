@@ -86,6 +86,13 @@ class StrictNamespace(Namespace):
         return self._call("strict_evidence", "run_operation", self._root,
                           operation="review", envelope=envelope)
 
+    def service_schemas(self):
+        """Return closed service reports and immutable approved route declarations."""
+        self._workspace._check_open()
+        from ..review_service_contracts import schemas
+        from ..review_service_policy import SERVICE_PLAN, schema_document
+        return {**schemas(), SERVICE_PLAN: schema_document()}
+
     def review_status(self, claim_id: str | None = None) -> dict[str, Any]:
         """Return current authenticated selection, including failed or stale reviews."""
         return self._call("strict_evidence", "run_operation", self._root,

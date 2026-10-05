@@ -253,7 +253,8 @@ class CalibrationAuthority:
         if expected != suite:
             fail("suite_changed")
         role, frozen = profile.role(config_ref), policy.to_dict()
-        required = [row for row in frozen["required_evaluators"] if row["profile_ref"] == config_ref]
+        from .review_service_policy import approved_profiles
+        required = [row for row in approved_profiles(frozen, profile) if row["profile_ref"] == config_ref]
         if type(auxiliary) is not bool:
             fail("role_invalid")
         if auxiliary:

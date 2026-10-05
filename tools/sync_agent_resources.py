@@ -20,6 +20,7 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
     CATALOG_PATH,
     RECOVERY_SCHEMAS,
     REVIEW_PACKET_SCHEMAS,
+    SERVICE_SCHEMAS,
     resource_paths,
 )
 from evidence_wiki._contract import LIBRARY_API_VERSION  # noqa: E402
@@ -29,6 +30,9 @@ from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bun
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
 from evidence_wiki.recovery_contracts import schema_document as recovery_schema
 from evidence_wiki.review_packet_contracts import schema_document as review_packet_schema
+from evidence_wiki.review_service_contracts import schemas as service_schemas
+from evidence_wiki.review_service_policy import SERVICE_PLAN
+from evidence_wiki.review_service_policy import schema_document as service_plan_schema
 
 
 def encoded(value: dict) -> bytes:
@@ -47,6 +51,8 @@ def exports() -> dict[str, bytes]:
     schemas.update({key:calculation_schema(key) for key in CALCULATION_SCHEMAS})
     schemas.update({key:review_packet_schema(key) for key in REVIEW_PACKET_SCHEMAS})
     schemas.update({key:recovery_schema() for key in RECOVERY_SCHEMAS})
+    service_documents = {**service_schemas(), SERVICE_PLAN: service_plan_schema()}
+    schemas.update({key: service_documents[key] for key in SERVICE_SCHEMAS})
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
     guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()

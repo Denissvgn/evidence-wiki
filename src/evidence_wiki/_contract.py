@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "38"
+LIBRARY_API_VERSION = "39"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -102,6 +102,8 @@ LIBRARY_API_SURFACE = (
     "strict.prepare_review",
     "strict.register_review",
     "strict.export",
+    "strict.service_schemas",
+    "research.session.review_services",
     "strict.review_status",
     "strict.machine_compatibility",
     "strict.supersede_review",
@@ -466,6 +468,12 @@ def contract() -> dict:
             "pi_bridge": {"api": "evidence_wiki.pi_bridge.PiRpcBridge", "managed_runner": False,
                           "host_enforced": False, "automatic_replay": False},
         },
+        "review_services": {"status_schema": "research-review-service-status/v1", "plan_schema": "research-review-service-plan/v1",
+            "policy": "research-run-policy/v3 explicit approved alternatives", "profile": "research-execution-profile/v8",
+            "credentials": "provisioned parent key/native role usability only; no enrollment, discovery or service-health assertion",
+            "execution": "retained owned execution and current actual-target qualification are separate",
+            "budget": "shared immutable role-slot ceiling; unknown occupied work and semantic failure never fail over",
+            "unsupported_combinations": ["alternate service routes with DisagreementPlan"]},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add current provisioned review-service status and explicit immutable approved
+  alternate routes with shared role budgets, exact owned output/producer checks,
+  current target qualification and parent-only signing. Unknown work and semantic
+  failures never trigger service failover; no credential enrollment is performed.
+
 - Expose current strict review status, signed supersession and source revocation,
   with current strict/coverage compatibility checks before new machine work.
   Human-only or unknown contracts stop without changing policy or evidence.
