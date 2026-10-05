@@ -25,6 +25,8 @@ def open_gate(*_args, **_kwargs):
 
 def isolated_boundaries(monkeypatch, policy, *, steps_used=0, steps_limit=8):
     records, finished, closed, reservations = [], [], [], []
+    # These isolated mechanics tests provide no native machine-policy proof.
+    monkeypatch.setattr(execution_session, "require_machine_compatible", lambda _session: None)
     now = datetime.now(timezone.utc)
     document = {"state": {"current": "answering"}, "started_at": now.isoformat(), "updated_at": now.isoformat()}
     originals = [{"original_id": identifier, "original_text": "Frozen original " + str(index),
@@ -42,7 +44,7 @@ def isolated_boundaries(monkeypatch, policy, *, steps_used=0, steps_limit=8):
                           "source_bindings": [{"source_id": "captured-source", "extent_ref": "/workspace/raw/measurements.txt", "closure_id": DIGEST}]}}
     session = SimpleNamespace(policy=policy, run_id="controlled-run", root="/workspace", binding={},
                               context=SimpleNamespace(require_grant=lambda _grant: None),
-                              execution=SimpleNamespace(profile=SimpleNamespace(total_steps=steps_limit), ledger=lambda *_args: None))
+                              execution=SimpleNamespace(profile=SimpleNamespace(total_steps=steps_limit, review_services=None, input_handoff=None, disagreement=None, calibration=None), ledger=lambda *_args: None))
 
     def current(_session):
         result = copy.deepcopy(view)
@@ -159,7 +161,7 @@ def test_proposed_inventory_claim_extent_is_checked_before_application_or_mutati
     isolated.session.execution.attempt = lambda _document: attempt
     isolated.session.execution.authenticate = lambda supplied, _attempt: copy.deepcopy(supplied)
     monkeypatch.setattr(execution_session, "ResearchObservation", lambda *_args, **_kwargs:
-                        SimpleNamespace(strict={"result": {"claims": []}}, finish=lambda: None))
+                        SimpleNamespace(strict={"result": {"claims": []}}, computation=None, finish=lambda: None))
     mutations = []
     monkeypatch.setattr(execution_session, "_mutation", lambda _session, identifier, operation, arguments, **_kwargs:
                         mutations.append((identifier, operation, copy.deepcopy(arguments))))
@@ -181,7 +183,7 @@ def test_manual_job_reservation_obeys_and_charges_the_same_step_allowance(monkey
     monkeypatch.setattr(execution_session, "_sources", lambda *_args: (
         [{"source_id": "captured-source"}], copy.deepcopy(isolated.view["execution"]["source_bindings"])))
     monkeypatch.setattr(execution_session, "ResearchObservation", lambda *_args, **_kwargs: SimpleNamespace(
-        strict={"state": "present", "result": {"claims": []}}, policy=None,
+        strict={"state": "present", "result": {"claims": []}}, policy=None, computation=None, config={},
         questions=[{"slug": "first", "status": "unanswered"}, {"slug": "second", "status": "unanswered"}],
         finish=lambda: None))
 

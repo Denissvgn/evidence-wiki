@@ -120,6 +120,18 @@ def fixture(tmp_path, monkeypatch, request=None):
         proposal["originals"].append({"original_id": "unavailable", "text": question, "question_slugs": ["unavailable"]})
         proposal["inventory"]["questions"].append({"slug": "unavailable", "original_id": "unavailable", "question": question})
         update_policy(root)
+    if options.get("derived_partial"):
+        question = "What unavailable independent observation would refine the retained result?"
+        path = root / "docs/research-requirements.json"
+        requirements = json.loads(path.read_bytes())
+        requirements["request"]["payload"]["derived_questions"].append({"id": "refinement", "text": question, "original_ids": ["q"]})
+        path.write_bytes(authenticated_bytes(requirements))
+        owner("intake_questions").run_intake_document(root, {"schema_version": "1.0", "questions": [
+            {"id": "refinement", "question": question, "origin": "caller", "metadata": {"research_id": "refinement",
+                "original_ids_json": '["q"]', "original_text": question}}]}, dry_run=False, from_file_label="local-study")
+        proposal["originals"][0]["question_slugs"].append("refinement")
+        proposal["inventory"]["questions"].append({"slug": "refinement", "original_id": "q", "question": question})
+        update_policy(root)
     directory = tmp_path / "authority"
     directory.mkdir()
     authority = UsageFixture(directory, monkeypatch)
@@ -172,6 +184,8 @@ def fixture(tmp_path, monkeypatch, request=None):
         "evidence_path": "official_guidance", "source_policy": "primary_or_official", "freshness_policy": "no_staleness_check",
         "identity_policy": "none", "min_sources": 1}]}
     owner("coverage_manifest").run_init_inline(root, slug="q", template=template)
+    if options.get("derived_partial"):
+        owner("coverage_manifest").run_init_inline(root, slug="refinement", template=template)
     if options.get("coverage_examination"):
         from tests.test_research_planning import question_plan
         requirements_path = root / "docs/research-requirements.json"
@@ -192,6 +206,8 @@ def fixture(tmp_path, monkeypatch, request=None):
     if options.get("partial"):
         policy["scope"]["question_ids"].append("unavailable")
         policy["source_rules"]["allow_partial"] = True
+    if "allow_partial" in options:
+        policy["source_rules"]["allow_partial"] = options["allow_partial"]
     policy["budgets"].update(seconds=1800, model_calls=100, tokens=1000000, cost_limit="0")
     service_plan = None
     if options.get("review_services"):

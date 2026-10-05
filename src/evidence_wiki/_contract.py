@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "40"
+LIBRARY_API_VERSION = "41"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -104,8 +104,10 @@ LIBRARY_API_SURFACE = (
     "strict.export",
     "strict.service_schemas",
     "strict.repair_schemas",
+    "strict.resolution_schemas",
     "research.session.review_services",
     "research.session.repair_progress",
+    "research.session.resolution",
     "strict.review_status",
     "strict.machine_compatibility",
     "strict.supersede_review",
@@ -484,6 +486,15 @@ def contract() -> dict:
             "materials": "native strict v1/v2 claims, scientific calculation values/units/time/invariants and exact source dependencies",
             "first_passes": "logical slot plus actual current qualified controller/configuration and native review",
             "limits": "existing run journal and frozen repair/role budgets; unchanged or exhausted repairs remain unresolved"},
+        "research_resolution": {"schema": "research-question-resolution/v1",
+            "method": "research.session.resolution", "schemas": "strict.resolution_schemas",
+            "grants": ["research_session.resolution", "resolution_operations.current"],
+            "selection": "every frozen original and its native derived questions; no caller approval dictionaries",
+            "eligibility": "current native publication, complete owned mandatory actual-target reviews and exact frozen policy",
+            "partial": "per-original derived subset only under frozen allow_partial; original accepted counts unchanged",
+            "basis": "permitted-content domain commitment or null; native global material and review commitments remain private",
+            "effects": "read-only; lifecycle and external-action authority are separate",
+            "limits": {"originals": 100, "questions": 300, "bytes": 1048576}},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),

@@ -2231,3 +2231,43 @@ keeps its occupied reservation; polling and historical replay never resend the
 input. Complete delivery does not establish model comprehension. Older serialized
 profiles remain unchanged, but cannot authorize a new protected repair handoff
 without this declaration.
+
+
+API version 41 / operation matrix version 24 adds `session.resolution()` and
+`ws.strict.resolution_schemas()`. The session method accepts no arguments and
+requires a bound `ResearchExecution`, `research_session.resolution` and
+`resolution_operations.current`. The schema accessor returns the closed
+`research-question-resolution/v1` document and follows the workspace lifetime.
+The session read remains available under the existing historical read-only scope;
+it cannot dispatch, sign a review, resolve a question or authorize an external action.
+
+The report accounts for every frozen original and its derived question identifiers.
+Each original reports `accept`, `partial`, `abstain` or `reject`, with unresolved
+questions, missing identifiers and global blockers retained. A derived subset can
+receive partial credit only when the frozen policy permits it and each included
+question has current canonical publication, complete owned mandatory reviews,
+genuine production and current actual reviewer qualification. Such a subset does
+not increase the run's accepted-original count. A coarse rejected run cannot reject
+all originals; a local rejection needs its current native claim decision.
+
+Eligible content contains the permitted native question and claim fields, including
+strict v2 calculation references. Private native verification commitments are
+withheld. `current_checks` summarizes the current source/mechanical, mandatory
+review, actual target qualification and producer/context checks for each eligible
+question. It carries no reusable approval receipt. `current_basis_id` is a separate
+commitment to the visible report content, or null when no content is eligible;
+`publication_basis_id` and `current_publication` are null. The full workspace and
+native review commitments remain private, so denied unrelated material is not
+included in an outward hash.
+
+Resolution holds current native source-use custody through an independent closing
+pass over publication, journal, policy, mandatory reviewer identities, qualifications,
+review age, full required packet delivery and budgets. Unknown occupied work,
+per-job or shared-role overruns, hard global blockers and changed or withdrawn
+material withhold eligibility. A closing change refuses the read rather than
+returning an earlier snapshot. Legacy structural answers and generic latest-review
+flags cannot substitute for authenticated mandatory reviews. Current acceptance,
+historical terminal lifecycle and external-action authority are separate fields;
+`authorized` and `external_action_authorized` remain false. This read establishes
+current owner eligibility under the declared contracts, not semantic truth or
+permission to publish outside the workspace.

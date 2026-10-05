@@ -93,6 +93,12 @@ class StrictNamespace(Namespace):
         from ..review_service_policy import SERVICE_PLAN, schema_document
         return {**schemas(), SERVICE_PLAN: schema_document()}
 
+    def resolution_schemas(self):
+        """Return the closed bounded current question-resolution report shape."""
+        self._workspace._check_open()
+        from ..resolution_contracts import schemas
+        return schemas()
+
     def repair_schemas(self):
         """Return bounded repair diff/progress and immutable service binding shapes."""
         self._workspace._check_open()

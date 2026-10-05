@@ -533,3 +533,32 @@ def test_decision_envelope_cannot_be_promoted_to_authority():
         candidate = {**result, key: True}
         with pytest.raises(WorkflowContractError):
             validate_document(DECISION, candidate)
+
+
+@pytest.mark.parametrize("faults,expected", [
+    ("scope_human", ("rejected", "scope_accounting")),
+    ("human_authority", ("policy_incompatible", "human_review_required")),
+    ("grant_unknown", ("blocked_external", "executor_unavailable")),
+    ("unknown_budget", ("stop_budget", "usage_unknown")),
+    ("budget_stale", ("stop_budget", "budget_exhausted")),
+])
+def test_hard_multifault_precedence_preserves_frozen_policy_bytes(faults, expected):
+    policy = RunPolicy(policy_document())
+    before = policy.to_json()
+    observed = observation(policy)
+    if faults == "scope_human":
+        observed["selected_outcomes"][0]["source_refs"] = ["outside-source"]
+        observed["policy_compatible"] = False
+    elif faults == "human_authority":
+        observed.update(policy_compatible=False, authority_granted=False)
+    elif faults == "grant_unknown":
+        observed.update(model_required=True, model_granted=False)
+        observed["spent"]["seconds"] = None
+    elif faults == "unknown_budget":
+        observed["spent"].update(tokens=None, seconds=policy.to_dict()["budgets"]["seconds"] + 1)
+    else:
+        observed["spent"]["seconds"] = policy.to_dict()["budgets"]["seconds"] + 1
+        observed.update(source_current=False, expected_basis_id="changed-basis")
+    assert outcome(policy, observed) == expected
+    assert policy.to_json() == before
+    assert RunPolicy.from_json(before).to_json() == before

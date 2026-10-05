@@ -456,6 +456,86 @@ def _profiles_qualified(policy: dict[str, Any], observed: dict[str, Any]) -> boo
     return True
 
 
+def _owner_observation(frozen, observed):
+    """Validate the existing closed owner shape; this does not authenticate it."""
+    try:
+        version = OBSERVATION_V2 if frozen["schema_version"] in {POLICY_V2, POLICY_V3} else OBSERVATION
+        return validate_document(version, observed)
+    except WorkflowContractError:
+        return None
+
+
+def _hard_policy_failure(frozen, owner):
+    """Shared hard binding, scope, authority and exhaustion predicates.
+
+    Native owners authenticate observations before this pure predicate. Derived
+    subsets retain the original observation and original-level counts.
+    """
+    if owner is None:
+        return ("rejected", "invalid_input")
+    count = len(frozen["scope"]["question_ids"])
+    def permits(effect):
+        return effect in frozen["allowed_effects"] and frozen["host_capability_refs"].get(effect) is not None
+
+    if owner["policy_id"] != frozen["policy_id"]:
+        return ("rejected", "policy_binding")
+    if owner["observation_kind"] != "canonical_owner":
+        return ("rejected", "untrusted_observation")
+    selected = owner["selected_outcomes"]
+    ids = [row["question_id"] for row in selected]
+    refs = [row["outcome_ref"] for row in selected]
+    authorized_sources = set(frozen["scope"]["source_scope"])
+    if frozen["scope"].get("source_scope_kind") == "native_extent":
+        bindings = owner["source_bindings"]
+        if (len({row["source_id"] for row in bindings}) != len(bindings)
+                or any(row["extent_ref"] not in authorized_sources for row in bindings)):
+            return ("rejected", "scope_accounting")
+        authorized_sources = {row["source_id"] for row in bindings}
+    if (owner["original_count"] != count or owner["accepted_count"] + owner["unresolved_count"] != count
+            or owner["accepted_count"] != len(selected) or len(ids) != len(set(ids)) or len(refs) != len(set(refs))
+            or set(ids) - set(frozen["scope"]["question_ids"])
+            or any(set(row["source_refs"]) - authorized_sources for row in selected)):
+        return ("rejected", "scope_accounting")
+    if (frozen["human_review"] or any(row["human_required"] for row in frozen["required_evaluators"])
+            or any(row["human_required"] for row in owner["evaluators"]) or owner["policy_compatible"] is not True):
+        return ("policy_incompatible", "human_review_required")
+    if owner["authority_granted"] is not True:
+        return ("blocked_external", "authority_unavailable")
+    if owner["model_required"] and (owner["model_granted"] is not True or not permits("model")):
+        return ("blocked_external", "executor_unavailable")
+    spent = owner["spent"]
+    budgets = frozen["budgets"]
+    if any(value is None for value in spent.values()):
+        return ("stop_budget", "usage_unknown")
+    selected_sources = {reference for row in selected for reference in row["source_refs"]}
+    # A claim may support several selected questions. Bound its actual unique
+    # reference extent independently of the owner's observed usage counter.
+    selected_claims = {reference for row in selected for reference in row["claim_refs"]}
+    if (spent["seconds"] >= budgets["seconds"] or spent["tool_calls"] > budgets["tool_calls"]
+            or (budgets["tool_calls"] > 0 and spent["tool_calls"] == budgets["tool_calls"])
+            or Decimal(spent["cost_limit"]) > Decimal(budgets["cost_limit"])
+            or len(selected_sources) > budgets["sources"]
+            or len(selected_claims) > budgets["claims"]
+            or any(spent[name] > budgets[name] for name in ("model_calls", "tokens", "claims", "sources"))
+            or any(spent[name] > frozen["continuation_limits"][name] for name in _COUNTERS)):
+        return ("stop_budget", "budget_exhausted")
+    if owner["model_required"] and (spent["model_calls"] >= budgets["model_calls"] or spent["tokens"] >= budgets["tokens"]):
+        return ("stop_budget", "model_budget_exhausted")
+    return None
+
+
+def _derived_scope_failure(frozen, owner, *, claim_refs, source_refs):
+    """Bound native-derived extent without minting an accepted original row."""
+    allowed = set(frozen["scope"]["source_scope"])
+    if frozen["scope"].get("source_scope_kind") == "native_extent":
+        allowed = {row["source_id"] for row in owner["source_bindings"]}
+    if not set(source_refs) <= allowed:
+        return "scope_accounting"
+    if len(set(source_refs)) > frozen["budgets"]["sources"] or len(set(claim_refs)) > frozen["budgets"]["claims"]:
+        return "budget_exhausted"
+    return None
+
+
 def decide(policy: RunPolicy, observed: Any) -> dict[str, Any]:
     """Return a deterministic inert record from authenticated owner observations.
 
@@ -468,11 +548,7 @@ def decide(policy: RunPolicy, observed: Any) -> dict[str, Any]:
         _refuse("INVALID", "/policy")
     frozen = policy.to_dict()
     count = len(frozen["scope"]["question_ids"])
-    try:
-        version = OBSERVATION_V2 if frozen["schema_version"] in {POLICY_V2, POLICY_V3} else OBSERVATION
-        owner = validate_document(version, observed)
-    except WorkflowContractError:
-        owner = None
+    owner = _owner_observation(frozen, observed)
     evidence = {key: value for key, value in owner.items() if key != "agent_rationale"} if owner else None
 
     def record(outcome: str, reason: str, effect: str | None = None, eligible: bool = False) -> dict[str, Any]:
@@ -500,50 +576,10 @@ def decide(policy: RunPolicy, observed: Any) -> dict[str, Any]:
 
     if owner is None:
         return record("rejected", "invalid_input")
-    if owner["policy_id"] != frozen["policy_id"]:
-        return record("rejected", "policy_binding")
-    if owner["observation_kind"] != "canonical_owner":
-        return record("rejected", "untrusted_observation")
+    failure = _hard_policy_failure(frozen, owner)
+    if failure is not None:
+        return record(*failure)
     selected = owner["selected_outcomes"]
-    ids = [row["question_id"] for row in selected]
-    refs = [row["outcome_ref"] for row in selected]
-    authorized_sources = set(frozen["scope"]["source_scope"])
-    if frozen["scope"].get("source_scope_kind") == "native_extent":
-        bindings = owner["source_bindings"]
-        if (len({row["source_id"] for row in bindings}) != len(bindings)
-                or any(row["extent_ref"] not in authorized_sources for row in bindings)):
-            return record("rejected", "scope_accounting")
-        authorized_sources = {row["source_id"] for row in bindings}
-    if (owner["original_count"] != count or owner["accepted_count"] + owner["unresolved_count"] != count
-            or owner["accepted_count"] != len(selected) or len(ids) != len(set(ids)) or len(refs) != len(set(refs))
-            or set(ids) - set(frozen["scope"]["question_ids"])
-            or any(set(row["source_refs"]) - authorized_sources for row in selected)):
-        return record("rejected", "scope_accounting")
-    if (frozen["human_review"] or any(row["human_required"] for row in frozen["required_evaluators"])
-            or any(row["human_required"] for row in owner["evaluators"]) or owner["policy_compatible"] is not True):
-        return record("policy_incompatible", "human_review_required")
-    if owner["authority_granted"] is not True:
-        return record("blocked_external", "authority_unavailable")
-    if owner["model_required"] and (owner["model_granted"] is not True or not permits("model")):
-        return record("blocked_external", "executor_unavailable")
-    spent = owner["spent"]
-    budgets = frozen["budgets"]
-    if any(value is None for value in spent.values()):
-        return record("stop_budget", "usage_unknown")
-    selected_sources = {reference for row in selected for reference in row["source_refs"]}
-    # A claim may support several selected questions. Bound its actual unique
-    # reference extent independently of the owner's observed usage counter.
-    selected_claims = {reference for row in selected for reference in row["claim_refs"]}
-    if (spent["seconds"] >= budgets["seconds"] or spent["tool_calls"] > budgets["tool_calls"]
-            or (budgets["tool_calls"] > 0 and spent["tool_calls"] == budgets["tool_calls"])
-            or Decimal(spent["cost_limit"]) > Decimal(budgets["cost_limit"])
-            or len(selected_sources) > budgets["sources"]
-            or len(selected_claims) > budgets["claims"]
-            or any(spent[name] > budgets[name] for name in ("model_calls", "tokens", "claims", "sources"))
-            or any(spent[name] > frozen["continuation_limits"][name] for name in _COUNTERS)):
-        return record("stop_budget", "budget_exhausted")
-    if owner["model_required"] and (spent["model_calls"] >= budgets["model_calls"] or spent["tokens"] >= budgets["tokens"]):
-        return record("stop_budget", "model_budget_exhausted")
     stale = (owner["basis_id"] != owner["expected_basis_id"] or owner["source_current"] is not True
              or any(row["basis_id"] != owner["basis_id"] or row["source_current"] is not True for row in selected))
     if stale:

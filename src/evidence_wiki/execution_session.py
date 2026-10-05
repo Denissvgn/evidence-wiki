@@ -366,6 +366,32 @@ def _disagreement_refusal(session, view, error):
         "insufficient_evidence" if source_gap else "unsupported_claim" if unsupported else "untrusted_observation")
 
 
+def execution_budget_overrun(session, records):
+    """Use authenticated ledger, frozen role/slot and exact job caps for all owners."""
+    plan = session.execution.ledger(session, records)
+    if plan is not None:
+        projection = accounting.projection(plan, limits=_limits(session))
+        if projection["overrun"]:
+            return True
+        if getattr(session.execution.profile, "schedule", None) is not None:
+            for role in session.execution.profile.roles:
+                if role_projection(session.execution.profile, plan, records, role.config_ref)["overrun"]:
+                    return True
+    for row in _attempt_rows(records).values():
+        observation = _latest_observation(records, row["attempt"]["attempt_id"])
+        if observation is not None:
+            actual, cap = observation["observed_usage"], row["attempt"]["job"]["budgets"]
+            if (any(actual[key] is not None and actual[key] > cap[key] for key in ("model_calls", "tool_calls", "tokens"))
+                    or actual["cost"] is not None and Decimal(actual["cost"]) > Decimal(cap["cost"])):
+                return True
+    if plan is not None and session.execution.profile.review_services is not None:
+        from .review_service_accounting import projection as service_projection
+        for route in session.execution.profile.review_services.routes:
+            if service_projection(session.execution.profile.review_services, plan, records, route.slot_ref)["overrun"]:
+                return True
+    return False
+
+
 def _owner_action(session, view, records, *, resuming=False):
     frozen = session.policy.to_dict()
     profile = session.execution.profile
@@ -396,22 +422,8 @@ def _owner_action(session, view, records, *, resuming=False):
     for key in ("claims", "sources"):
         if view["usage"][key] is not None and view["usage"][key] > frozen["budgets"][key]:
             return _terminal_action(session, view, "stop_budget", "budget_exhausted")
-    plan = session.execution.ledger(session, records)
-    if plan is not None:
-        projection = accounting.projection(plan, limits=_limits(session))
-        if projection["overrun"]:
-            return _terminal_action(session, view, "stop_budget", "budget_exhausted")
-        if getattr(session.execution.profile, "schedule", None) is not None:
-            for role in session.execution.profile.roles:
-                if role_projection(session.execution.profile, plan, records, role.config_ref)["overrun"]:
-                    return _terminal_action(session, view, "stop_budget", "budget_exhausted")
-    for row in _attempt_rows(records).values():
-        observation = _latest_observation(records, row["attempt"]["attempt_id"])
-        if observation is not None:
-            actual, cap = observation["observed_usage"], row["attempt"]["job"]["budgets"]
-            if (any(actual[key] is not None and actual[key] > cap[key] for key in ("model_calls", "tool_calls", "tokens"))
-                    or actual["cost"] is not None and Decimal(actual["cost"]) > Decimal(cap["cost"])):
-                return _terminal_action(session, view, "stop_budget", "budget_exhausted")
+    if execution_budget_overrun(session, records):
+        return _terminal_action(session, view, "stop_budget", "budget_exhausted")
     pending = view["execution"]["pending"]
     if pending and not pending["applied"]:
         scheduled = getattr(session.execution.profile, "schedule", None) is not None

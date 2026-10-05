@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add bounded read-only per-original resolution with current native publication,
+  authenticated mandatory reviews and exact frozen policy checks. Partial derived
+  credit preserves original accounting, private review commitments stay withheld,
+  and lifecycle status remains separate from current eligibility and external actions.
+
 - Add current permission-filtered scoped repair progress with exact material
   differences, native scientific calculation revalidation and explicit logical
   review-slot binding for approved alternate services. Material changes require

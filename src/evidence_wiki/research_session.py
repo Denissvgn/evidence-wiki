@@ -652,6 +652,13 @@ class ResearchSession:
         return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
 
     @_boundary
+    def resolution(self):
+        """Read current eligible questions and every unresolved original outcome."""
+        self._check("resolution")
+        from .resolution_operations import current
+        return current(self)
+
+    @_boundary
     def repair_progress(self, *, original_id=None, after_sequence=0, max_records=32):
         """Read historical repair effects and separately checked current approval."""
         self._check("repair_progress")
