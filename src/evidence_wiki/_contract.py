@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "42"
+LIBRARY_API_VERSION = "43"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -92,6 +92,7 @@ LIBRARY_API_SURFACE = (
     "source_requests.link_current",
     "source_requests.fulfill_current",
     "research.requirements.current",
+    "research.changes",
     "research.requirements.prepare_revision",
     "research.requirements.revise",
     "strict.check",

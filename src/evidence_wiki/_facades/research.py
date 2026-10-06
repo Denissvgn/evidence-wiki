@@ -27,6 +27,15 @@ class ResearchNamespace(Namespace):
             return research_session
         return call_seam(load, "research_session", seam, self._root, *args, **kwargs)
 
+    def changes(self, *, pairs, before_requirements_revision_id=None):
+        """Read bounded local changes under current source and original scope."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import change_operations
+            return change_operations
+        return call_seam(load, "change_operations", "current", self._root, pairs=pairs,
+            before_requirements_revision_id=before_requirements_revision_id)
+
     def current(self, policy, *, run_id=None, execution=None):
         return self._invoke("current", policy, run_id=run_id, execution=execution)
 

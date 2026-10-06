@@ -7,10 +7,11 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "25"
+OPERATION_MATRIX_VERSION = "26"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("research.changes", None, "none; selected retained local source and requirements comparison", "current native usage and original scope with closing workspace and authority checks", "none; no remote refresh"),
     ("workspace.open", None, "none; validates an existing workspace", "none", "none"),
     ("workspace.close", None, "none; closes the handle", "none", "none"),
     ("workspace.versions", "evidence-wiki contract (installation metadata only)", "none", "none", "none"),

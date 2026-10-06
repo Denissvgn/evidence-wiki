@@ -2383,3 +2383,26 @@ retention, including host restart, stays unavailable; it never proves dispatch
 absent. Missing intermediate observations remain unknown until authentic
 receipts arrive. Recovery settles history without resending input or renewing
 current qualification, source rights or semantic eligibility.
+
+
+### Local source and requirements changes
+
+`workspace.research.changes(pairs=[{"before_source_id": source_id,
+"before_revision": revision_id, "after_source_id": source_id}],
+before_requirements_revision_id=None)` compares explicitly selected retained
+revisions with current local originals. It requires `change_operations.current`,
+a protected original requirements binding, current host path scope, and native
+source usage custody. The optional requirements selector names an authenticated
+append receipt; omission compares the preserved original requirements with the
+current effective requirements.
+
+The report separates raw content, normalized content, extraction metadata,
+capture provenance, current rights, source scope and requirements. Exact byte
+identity does not imply identical provenance or semantic identity. Denied
+inputs expose no protected hashes or evidence references; missing or unsupported
+retention produces unavailable dimensions. Local comparison neither contacts
+remote sources nor grants current acceptance. Sources and original requirements
+remain unchanged. At most 32 pairs and 32 distinct source IDs may be selected;
+retained inputs and the output each have a 1 MiB bound. Unsupported original
+path bindings are unavailable. Whole-workspace closing checks refuse concurrent
+changes, and a closed workspace cannot perform the read.
