@@ -44,6 +44,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "ResearchExecution": (".research_execution", "ResearchExecution"),
     "OperationControl": (".operation_control", "OperationControl"),
     "ExecutionProfile": (".agent_execution", "ExecutionProfile"),
+    "ArtifactDeliveryPlan": (".artifact_delivery_contracts", "ArtifactDeliveryPlan"),
+    "ArtifactDestination": (".artifact_delivery_contracts", "ArtifactDestination"),
     "ExecutionRole": (".agent_execution", "ExecutionRole"),
     "CalibrationAuthority": (".qualification_calibration", "CalibrationAuthority"),
     "CalibrationSelection": (".calibration_registry", "CalibrationSelection"),

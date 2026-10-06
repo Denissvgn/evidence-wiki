@@ -8,7 +8,7 @@ import re
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -771,7 +771,10 @@ def _action(session, view, records, *, resuming=False):
     if session.execution.profile.readability is not None and action["operation"] == "terminal":
         from .readability_execution import before_soft_terminal
         action = before_soft_terminal(session, view, records, action)
-    if action.get("purpose") == "readability" or action.get("presentation_defects"):
+    if session.execution.profile.artifact_delivery is not None and action["operation"] in {"terminal", "release"}:
+        from .artifact_release import before_terminal
+        action = before_terminal(session, view, records, action)
+    if action.get("purpose") in {"readability", "release"} or action.get("presentation_defects"):
         return action
     if action.get("retry_purpose") == "plan" and action["operation"] != "reconcile":
         prior = _attempt_rows(records)[view["execution"]["pending"]["attempt_id"]]
@@ -819,6 +822,9 @@ def reserve(session, request_id, action, view):
     if purpose == "readability":
         from .readability_execution import reserve as reserve_readability
         return reserve_readability(session, request_id, action, view)
+    if purpose == "release":
+        from .artifact_release import reserve as reserve_release
+        return reserve_release(session, request_id, action, view)
     if purpose == "repair" and session.execution.profile.disagreement is not None and owner("_evidence_usage").configured(owner("_strict_evidence").configuration(session.root)):
         from .agent_execution import BoundedSubprocessExecutor
         from .protected_handoff import NativeInputHandoff
@@ -1145,6 +1151,11 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
             and row["data"]["reservation"]["attempt_id"] == identifier), None)
         done = next((row for row in records if row["kind"] == "execution_native_observation"
             and row["data"]["observation"]["attempt_id"] == identifier), None)
+        if operation == "artifact.deliver":
+            from .artifact_delivery_status import completion
+            completed = completion(records, identifier)
+            if completed is not None:
+                done = {"data": completed}
         recovering = previous is not None
         if recovering:
             if previous["data"]["operation"] != operation or previous["data"]["arguments"] != arguments:
@@ -1180,7 +1191,12 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
     try:
         control.checkpoint("before_canonical_effect")
         invoked = True
-        result = recover(control) if recovering else invoke(control)
+        dispatch = nullcontext()
+        if operation == "artifact.deliver" and not recovering:
+            from .artifact_delivery_input import effect_dispatch
+            dispatch = effect_dispatch(session, identifier, arguments, control)
+        with dispatch:
+            result = recover(control) if recovering else invoke(control)
         control.checkpoint("after_canonical_effect")
     except (Exception, SystemExit) as caught:
         error = caught
@@ -1191,8 +1207,10 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
         elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(reservation["issued_at"].replace("Z", "+00:00"))).total_seconds()
     with gate(session):
         state_only = recovering and type(result) is dict and result.get("proof_kind") == "exact_canonical_question_postcondition"
+        publication_unknown = operation == "artifact.deliver" and (error is not None or type(result) is not dict
+            or result.get("status") not in {"committed", "reconciled"})
         observation = session.execution.native_observation(session, identifier, seconds=elapsed, succeeded=error is None,
-            invocation_observed=not state_only, tool_calls=1 if recovering or invoked else 0)
+            invocation_observed=not state_only and not publication_unknown, tool_calls=1 if recovering or invoked else 0)
         after_basis = None
         if (type(result) is dict and result.get("status") in {"committed", "reconciled"}
                 and type(result.get("after_revision")) is str):
@@ -1210,7 +1228,7 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
             "owner_reason": owner_reason(error) if error else None,
             "elapsed_scope": "utc_lifetime_including_recovery_wait" if recovering else "in_process_effect_elapsed",
             "lifetime_seconds": format(elapsed, ".9f") if recovering else None,
-            "invocation_proof": "desired_state_only" if state_only else "canonical_owner_receipt" if recovering
+            "invocation_proof": "observed_owner_call_with_unsettled_publication" if publication_unknown else "desired_state_only" if state_only else "canonical_owner_receipt" if recovering
                 else "observed_owner_call" if invoked else "not_invoked",
             "active_execution_seconds": None if recovering else format(elapsed, ".9f"),
             "after_input_basis": after_basis})
@@ -1600,6 +1618,9 @@ def _apply_owned(session, attempt_id):
     if row.get("retry_purpose", row.get("purpose")) == "readability":
         from .readability_execution import apply as apply_readability
         return apply_readability(session, attempt_id)
+    if row.get("retry_purpose", row.get("purpose")) == "release":
+        from .artifact_release import apply as apply_release
+        return apply_release(session, attempt_id)
     attempt = session.execution.attempt(row["attempt"])
     observation = session.execution.authenticate(_latest_observation(records, attempt_id), attempt)
     application = next((item["data"] for item in records if item["kind"] == "execution_application"

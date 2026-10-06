@@ -27,6 +27,7 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
 )
 from evidence_wiki._contract import LIBRARY_API_VERSION  # noqa: E402
 from evidence_wiki._script_host import load_packaged_script  # noqa: E402
+from evidence_wiki.artifact_delivery_contracts import schemas as delivery_schemas
 from evidence_wiki.brief_contracts import _schemas as brief_schemas
 from evidence_wiki.calculation_contracts import schema_document as calculation_schema
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
@@ -72,6 +73,7 @@ def exports() -> dict[str, bytes]:
     schemas.update(brief_schemas(native_shapes))
     schemas.update(readability_schemas(native_shapes))
     schemas.update(readability_plan_schemas())
+    schemas.update(delivery_schemas())
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
     guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()

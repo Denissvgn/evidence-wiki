@@ -652,6 +652,36 @@ class ResearchSession:
         return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
 
     @_boundary
+    def delivery_status(self, *, request_id):
+        """Read historical completion without treating it as current acceptance."""
+        self._check("delivery_status")
+        from .artifact_delivery_status import status
+        return status(self, request_id=request_id)
+
+    @_boundary
+    @_serialized
+    def reconcile_delivery(self, *, request_id):
+        """Settle only an actual committed receipt; never repeat a publication."""
+        self._check("reconcile_delivery", write=True)
+        from .artifact_delivery_status import reconcile
+        return reconcile(self, request_id=request_id)
+
+    @_boundary
+    def prepare_delivery(self):
+        """Read current exact artifact identity and approved opaque destinations."""
+        self._check("prepare_delivery")
+        from .artifact_delivery_session import prepare
+        return prepare(self)
+
+    @_boundary
+    @_serialized
+    def deliver(self, *, request_id, proposal):
+        """Publish exact current bytes through the frozen native file owner."""
+        self._check("deliver", write=True)
+        from .artifact_delivery_session import deliver
+        return deliver(self, request_id=request_id, proposal=proposal)
+
+    @_boundary
     def brief(self, *, format="structured"):
         """Read current permitted content or its deterministic literal Markdown."""
         self._check("brief")

@@ -47,6 +47,7 @@ PROFILE_V8 = "research-execution-profile/v8"
 PROFILE_V9 = "research-execution-profile/v9"
 PROFILE_V10 = "research-execution-profile/v10"
 PROFILE_V11 = "research-execution-profile/v11"
+PROFILE_V12 = "research-execution-profile/v12"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -265,6 +266,7 @@ class ExecutionProfile:
     service_repair: object | None = None
     input_handoff: object | None = None
     readability: object | None = None
+    artifact_delivery: object | None = None
 
     def __post_init__(self) -> None:
         if self.input_handoff is not None:
@@ -352,6 +354,12 @@ class ExecutionProfile:
                 raise ExecutionError("readability_plan_invalid")
             self.readability.check_profile(self)
 
+        if self.artifact_delivery is not None:
+            from .artifact_delivery_contracts import ArtifactDeliveryPlan
+            if type(self.artifact_delivery) is not ArtifactDeliveryPlan:
+                raise ExecutionError("artifact_delivery_plan_invalid")
+            self.artifact_delivery.check_profile(self)
+
     def document(self) -> dict[str, Any]:
         result = {
             "schema_version": PROFILE, "profile_ref": self.profile_ref, "total_steps": self.total_steps,
@@ -382,6 +390,8 @@ class ExecutionProfile:
             result.update(schema_version=PROFILE_V10, input_handoff=self.input_handoff.document())
         if self.readability is not None:
             result.update(schema_version=PROFILE_V11, readability=self.readability.document())
+        if self.artifact_delivery is not None:
+            result.update(schema_version=PROFILE_V12, artifact_delivery=self.artifact_delivery.document())
         return result
 
     @property

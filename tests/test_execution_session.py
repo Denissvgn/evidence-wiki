@@ -281,13 +281,21 @@ def fixture(tmp_path, monkeypatch, request=None):
             def finalize(self, attempt, summary):
                 return {**super().finalize(attempt, summary), **({"model_calls":0} if attempt.config_ref == "profile-b" else {})}
         selected_meter = ZeroCriticMeter
+    artifact_delivery = None
+    if options.get("artifact_delivery"):
+        from evidence_wiki.artifact_delivery_contracts import ArtifactDeliveryPlan, ArtifactDestination
+        roles += (ExecutionRole("release", "host_worker", "runner", "controlled-release-process", "release/v1"),)
+        registry = ExecutionRoleRegistry((*registry.scopes,
+            ExecutionRoleScope("release", "release", ("model", "eligibility.read", "release.propose"))))
+        artifact_delivery = ArtifactDeliveryPlan("release", "runner", (ArtifactDestination("local-brief"),),
+            timeout_seconds=600, tokens=1000)
     profile = ExecutionProfile("local-reference", options.get("total_steps", 256), "EUR", "native-no-provider-charge/v1",
         roles, 1, 1, 1000, "0", 1, schedule, registry, ("control", "context") if registry else (), disagreement=disagreement,
         review_delivery=ReviewDelivery(**options.get("review_delivery_limits", {})) if options.get("review_delivery") else None,
         review_services=service_plan, service_repair=ServiceRepairBinding(service_plan.sha256,
             "sha256:" + disagreement.sha256) if options.get("service_repair") else None,
         input_handoff=NativeInputHandoff() if (options.get("repair") or options.get("readability")) and options.get("disagreement") else None,
-        readability=readability)
+        readability=readability, artifact_delivery=artifact_delivery)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     if options.get("acquisition_choice"):
@@ -353,6 +361,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     if readability is not None:
         from tests._readability_fixture import command
         commands["readability"] = command(worker, material=options.get("readability_material", False), hostile=options.get("readability_hostile", False))
+    if artifact_delivery is not None:
+        release_source = "import json,sys; d=json.load(sys.stdin)['input']['packet']; a=d['artifact']; print(json.dumps({'schema_version':'research-artifact-delivery-proposal/v1','artifact_id':a['artifact_id'],'artifact_sha256':a['artifact_sha256'],'artifact_bytes':a['bytes'],'destination_ref':d['approved_destination_refs'][0],'plan_sha256':d['plan_sha256']}))"
+        commands["release"] = (sys.executable, "-c", release_source)
     executor = BoundedSubprocessExecutor(profile, commands=commands,
         cwd=worker, receipt_key=b"e" * 32, meter=selected_meter())
     from evidence_wiki.review_service_policy import approved_profiles
@@ -417,7 +428,10 @@ def fixture(tmp_path, monkeypatch, request=None):
         "review_page_session.assembled", "review_packet_execution.bind", "review_packet_execution.reserve",
         "coverage_observation.observe", "research_session.assemble_review_packet"} if options.get("review_delivery") else set())
         | ({"research_session.review_services", "service_authentication.status"} if options.get("review_services") else set()) | ({"research_session.repair_progress", "repair_progress_owner.current"} if options.get("service_repair") else set())
-        | ({"research_session.brief", "brief_operations.current", "research_session.resolution", "resolution_operations.current", "service_authentication.status"} if readability is not None else set()), "caller", [root], authority_file=authority.policy_path,
+        | ({"research_session.brief", "brief_operations.current", "research_session.resolution", "resolution_operations.current", "service_authentication.status"} if readability is not None or artifact_delivery is not None else set())
+        | ({"research_session.prepare_delivery", "research_session.deliver", "artifact_delivery_operations.prepare", "artifact_delivery_operations.deliver",
+            "research_session.delivery_status", "research_session.reconcile_delivery",
+            "artifact_delivery_operations.delivery_status", "artifact_delivery_operations.reconcile_delivery"} if artifact_delivery is not None else set()), "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
         controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
         role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())

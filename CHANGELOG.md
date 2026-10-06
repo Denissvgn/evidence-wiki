@@ -4,6 +4,11 @@
 
 ### Added
 
+- Add frozen local Markdown artifact destinations, exact scoped Release proposals,
+  current evidence checks at publication and protected receipt-only reconciliation.
+  Interrupted unchecked writes remain uncertain; historical delivery does not
+  renew current acceptance or authorize another publication.
+
 - Current structured research briefs and deterministic literal Markdown preserve every original outcome, reviewed finding/inference, evidence, limitation and unresolved question. Optional protected readability inspection reports only bounded field issues and uses existing scoped repair and fresh independent reviews.
 
 - Add bounded read-only per-original resolution with current native publication,

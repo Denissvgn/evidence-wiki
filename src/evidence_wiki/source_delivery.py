@@ -35,7 +35,11 @@ def _directory(parent, relative):
         raise
 
 
-def _publish(directory, name, raw):
+def _publish(directory, name, raw, *, custody=None):
+    if custody is not None:
+        from .artifact_publication import _PublicationWitness
+        if type(custody) is not _PublicationWitness:
+            refuse("publication_custody_invalid")
     temporary = ".host-capture-" + uuid.uuid4().hex
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
     try:
@@ -43,9 +47,13 @@ def _publish(directory, name, raw):
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
+        if custody is not None:
+            custody.retain(directory, temporary)
         os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
         os.unlink(temporary, dir_fd=directory)
         os.fsync(directory)
+        if custody is not None:
+            custody.verify_link()
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary, dir_fd=directory)

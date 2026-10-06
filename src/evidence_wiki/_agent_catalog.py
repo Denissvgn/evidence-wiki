@@ -35,11 +35,14 @@ COMPUTATION_SCRIPTS = (
 )
 
 
+DELIVERY_SCHEMAS = ("research-artifact-delivery-plan/v1", "research-artifact-delivery-input/v1",
+    "research-artifact-delivery-proposal/v1", "research-artifact-delivery-result/v1")
+
 def resource_paths() -> dict[str, str]:
     """Return fixed IDs; caller data can never add an inventory entry."""
     paths = {f"guide/{name}/v1": f"workspace-template/{path}" for name, path in GUIDES.items()}
     paths["guide/orchestrator/v1"] = "orchestrator/skills/research-orchestrate.md"
-    for schema_id in (*schema_ids(), *STRICT_SCHEMAS, *COMPUTATION_SCHEMAS, *CALCULATION_SCHEMAS, *RECOVERY_SCHEMAS, *REVIEW_PACKET_SCHEMAS, *SERVICE_SCHEMAS, *REPAIR_SCHEMAS, *RESOLUTION_SCHEMAS, *BRIEF_SCHEMAS, *READABILITY_SCHEMAS):
+    for schema_id in (*schema_ids(), *STRICT_SCHEMAS, *COMPUTATION_SCHEMAS, *CALCULATION_SCHEMAS, *RECOVERY_SCHEMAS, *REVIEW_PACKET_SCHEMAS, *SERVICE_SCHEMAS, *REPAIR_SCHEMAS, *RESOLUTION_SCHEMAS, *BRIEF_SCHEMAS, *READABILITY_SCHEMAS, *DELIVERY_SCHEMAS):
         paths[schema_id] = "workspace-template/docs/agent-resources/" + schema_id.replace("/", "--") + ".json"
     for stem in (*COMPUTATION_SCRIPTS, "_strict_contract", "_strict_evidence", "strict_evidence"):
         paths[f"script/{stem}/v1"] = f"workspace-template/scripts/{stem}.py"

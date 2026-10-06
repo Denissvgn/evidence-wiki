@@ -178,6 +178,11 @@ page access and before dispatch, signing and application. Host delivery does
 not establish worker consumption, comprehension, semantic correctness or
 accepted release.
 
+Version `45` exposes checked local artifact delivery and receipt-only
+reconciliation, with operation matrix `28`. Optional `ArtifactDeliveryPlan`
+produces execution profile/v12. See [checked local delivery](#checked-local-delivery)
+for destinations, grants, interrupted writes and historical status.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -942,6 +947,10 @@ The schema is available through `evidence_wiki.claim_diagnostics.schema_document
 | cancellation request | `session.cancel_pending(*, request_id)` |
 | authenticated history intake | `session.intake_observation(observation, *, request_id)` |
 | execution metadata | `session.report(*, after_sequence=0, max_records=64)` |
+| current delivery identity | `session.prepare_delivery()` |
+| checked local publication | `session.deliver(*, request_id, proposal)` |
+| historical delivery status | `session.delivery_status(*, request_id)` |
+| receipt-only delivery reconciliation | `session.reconcile_delivery(*, request_id)` |
 | session lifetime | `session.close()` or a context manager |
 
 These operations require an active `HostContext` with selected mutation control
@@ -2384,6 +2393,68 @@ absent. Missing intermediate observations remain unknown until authentic
 receipts arrive. Recovery settles history without resending input or renewing
 current qualification, source rights or semantic eligibility.
 
+
+### Checked local delivery
+
+The host freezes `ArtifactDeliveryPlan` and `ArtifactDestination` on its final
+`ExecutionProfile` before binding a session or qualifying its configured roles.
+Destinations are opaque references to unique Markdown filenames inside
+`runs/<run_id>/deliveries/`. The initial adapter requires native POSIX descriptor
+operations, supports at most 16 destinations and one MiB per artifact, and never
+replaces an existing file. Remote destinations are unsupported.
+
+```python
+from evidence_wiki import ArtifactDeliveryPlan, ArtifactDestination
+
+delivery = ArtifactDeliveryPlan(
+    config_ref="release", controller_ref="release-controller",
+    destinations=(ArtifactDestination("accepted-brief", "brief.md"),),
+    timeout_seconds=60, tokens=4096, cost_limit="1",
+)
+```
+
+The selected host-worker configuration must use task role `release` and explicit
+`model`, `eligibility.read` and `release.propose` scopes. The frozen run policy
+must permit model and delivery effects with host capability references. The
+host supplies matching controller selection, model executor, current evidence
+qualification, write paths and operation grants. A proposal cannot create any
+of those capabilities. `contract()["research_artifact_delivery"]` supplies the
+four closed schemas and supported limits.
+
+`prepare_delivery()` returns current exact artifact identity and approved
+destination references. It grants no acceptance or publication authority.
+The configured autonomous workflow invokes one bounded Release worker to select
+that identity and a destination. Output text, paths, replacement content and
+approvals are rejected. Native publication rechecks current eligible evidence,
+mandatory review, source rights, the exact rendered bytes and frozen policy.
+Its private occupied reservation does not make ordinary pending brief reads
+eligible. Staged publication retains the actual inode and checks destination
+custody before linking and before protected owner completion.
+
+Public grants are `research_session.prepare_delivery`, `research_session.deliver`,
+`research_session.delivery_status` and `research_session.reconcile_delivery`.
+Their corresponding inner grants are `artifact_delivery_operations.prepare`,
+`artifact_delivery_operations.deliver`, `artifact_delivery_operations.delivery_status`
+and `artifact_delivery_operations.reconcile_delivery`. Current artifact reads
+also require the documented brief and resolution grants.
+
+A protected completion receipt can settle a lost journal return through
+`reconcile_delivery(request_id=...)` without repeating the write or agent call.
+Recovered usage records UTC lifetime including recovery wait; unknown usage is
+never recorded as zero. A file linked before final owner checks completed stays
+`commit_unknown`, even if identical bytes are present. Retained live writers are
+bounded to 16; exhaustion or loss of custody does not justify adopting a file
+or retrying publication. Terminal accounting cannot be reopened.
+
+Status reads create no effects and report history separately from current
+eligibility. Artifact, destination and receipt references are withheld when
+current identity or eligibility cannot be established. Terminal annotations or
+later journal changes can change the rendered identity; historical delivery
+does not renew approval. The local adapter reports `artifact_checked` and makes
+no `host_enforced` or semantic Release qualification claim.
+Changing the bound authority policy invalidates the immutable session and
+returns a typed binding refusal. Source revocation under the existing policy
+does not restore disclosure or permit terminal reconciliation.
 
 ### Local source and requirements changes
 

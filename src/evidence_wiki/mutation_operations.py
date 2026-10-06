@@ -56,6 +56,7 @@ OWNER_OPERATIONS = {
     "sources.inventory": ("source_inventory", "run_inventory_report"),
     "sources.capture": ("source_delivery", "deliver"),
     "sources.capture_revision": ("source_capture_operations", "deliver"),
+    "artifact.deliver": ("artifact_delivery_operations", "deliver"),
     "sources.build_index": ("retrieval_operations", "build_index"),
     "strict.register_review": ("strict_evidence", "run_operation"),
     "strict.admit": ("strict_evidence", "run_admit_document"),
@@ -69,10 +70,14 @@ STAGED_COVERAGE = frozenset({"coverage.revision", "coverage.evaluate"})
 STAGED_DRAFTS = frozenset({"strict.admit"})
 STAGED_REQUIREMENTS = frozenset({"requirements.revise"})
 STAGED_CAPTURES = frozenset({"sources.capture_revision"})
-STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS | STAGED_CAPTURES
+STAGED_ARTIFACTS = frozenset({"artifact.deliver"})
+STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS | STAGED_CAPTURES | STAGED_ARTIFACTS
 
 
 def _recovery_module(operation):
+    if operation in STAGED_ARTIFACTS:
+        from . import artifact_delivery_recovery
+        return artifact_delivery_recovery
     if operation in STAGED_CAPTURES:
         from . import mutation_capture_recovery
         return mutation_capture_recovery
@@ -426,6 +431,9 @@ def prepare_request(project_root: str | Path, *, request_id: str, operation: str
     """Freeze explicit arguments, input bytes, revision and installed owners."""
     root, control = _scope(project_root, "prepare_request")
     value = checked_arguments(operation, arguments)
+    if operation in STAGED_ARTIFACTS:
+        from .artifact_delivery_operations import require_scope
+        require_scope(root, request_id, value)
     with _store(root, control).workspace_locked():
         observed = _capture(root, _input_paths(root, operation, value))
         result = {"schema_version": REQUEST, "request_id": request_id, "operation": operation,
@@ -535,6 +543,9 @@ def submit(project_root: str | Path, request: Any, *,
     """
     root, control = _scope(project_root, "submit", write=True)
     request = checked(REQUEST, request)
+    if request["operation"] in STAGED_ARTIFACTS:
+        from .artifact_delivery_operations import require_scope
+        require_scope(root, request["request_id"], request["arguments"])
     if _host_selection() != request["host_context_sha256"]:
         refuse("HOST_CONTEXT_CONFLICT", "/host_context_sha256")
     info = root.stat()
@@ -645,6 +656,8 @@ def inspect(project_root: str | Path, request_id: str) -> dict[str, Any]:
     request_id = validate_request_id(request_id)
     store = _store(root, control)
     value = store.inspect(request_id)
+    if value is not None and value["intent"]["operation"] in STAGED_ARTIFACTS:
+        refuse("OWNER_PRIVATE_READ_REQUIRED", "/operation")
     if value is not None and _host_selection() != value["intent"]["host_context_sha256"]:
         refuse("HOST_CONTEXT_CONFLICT", "/host_context_sha256")
     return checked(INSPECTION, {"schema_version": INSPECTION, "request_id": request_id,
@@ -909,6 +922,8 @@ def reconcile(project_root: str | Path, request_id: str, *,
     if value is None:
         refuse("REQUEST_UNKNOWN", "/request_id")
     intent = checked(INTENT, value["intent"])
+    if intent["operation"] in STAGED_ARTIFACTS:
+        refuse("OWNER_PRIVATE_READ_REQUIRED", "/operation")
     if _host_selection() != intent["host_context_sha256"]:
         refuse("HOST_CONTEXT_CONFLICT", "/host_context_sha256")
     if value.get("receipt") is not None and value["receipt"]["status"] in {"committed", "refused"}:

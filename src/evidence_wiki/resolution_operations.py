@@ -100,6 +100,38 @@ class _OwnedReadabilityInput(_OwnedResolution):
         return project(self._result)
 
 
+@dataclass(frozen=True)
+class _OwnedArtifactInput(_OwnedReadabilityInput):
+    """Reserved native publication content carries no public approval handle."""
+
+    def document(self):
+        refuse("private_publication_input_is_not_current_resolution")
+
+
+def _input_constraints(session, view, records, proofs, admission):
+    from .artifact_delivery_input import _PublicationAdmission
+    from .readability_execution import _InputDispatch
+    if type(admission) is _InputDispatch:
+        from .readability_execution import input_constraints
+    elif type(admission) is _PublicationAdmission:
+        from .artifact_delivery_input import constraints as input_constraints
+    else:
+        refuse("private_input_custody_required")
+    return input_constraints(session, view, records, proofs, admission)
+
+
+def _input_type(admission):
+    if admission is None:
+        return _OwnedResolution
+    from .artifact_delivery_input import _PublicationAdmission
+    from .readability_execution import _InputDispatch
+    if type(admission) is _InputDispatch:
+        return _OwnedReadabilityInput
+    if type(admission) is _PublicationAdmission:
+        return _OwnedArtifactInput
+    refuse("private_input_custody_required")
+
+
 def _input_observation(current, observation, proofs):
     # This private content selection is never retained as a policy observation.
     # Measured spend and original accounting are untouched.
@@ -122,6 +154,7 @@ def _held_owner(session, admission=None):
     """
     if type(session) is not ResearchSession:
         refuse("bound_execution_session_required")
+    owned_type = _input_type(admission)
     session._check("resolution")
     session.context.require_grant("resolution_operations.current")
     if session.execution is None:
@@ -143,8 +176,7 @@ def _held_owner(session, admission=None):
             if admission is None:
                 constraints = blockers(view, session.policy.to_dict(), observation, proofs)
             else:
-                from .readability_execution import input_constraints
-                constraints = input_constraints(session, view, records, proofs, admission)
+                constraints = _input_constraints(session, view, records, proofs, admission)
             if native.execution_budget_overrun(session, records):
                 constraints.append("current_execution_budget_overrun")
             # The run summary omits its decision intentionally. Only a retained
@@ -157,7 +189,6 @@ def _held_owner(session, admission=None):
                 policy_document=session.policy.to_dict(), policy_observation=observation if admission is None else _input_observation(view, observation, proofs), decision=decision,
                 derived_proofs=proofs, subset_blockers=constraints,
                 lifecycle={"terminal": terminal is not None, "decision": terminal})
-            owned_type = _OwnedResolution if admission is None else _OwnedReadabilityInput
             observed = owned_type(session, result, view["basis_id"], digest({
                 "basis_id": view["basis_id"], "records": records, "qualification": view["qualification"],
                 "observation": observation, "decision": decision, "proofs": proofs, "constraints": constraints,
@@ -178,7 +209,7 @@ def _held_owner(session, admission=None):
                     _InputPass(session, closing_config, admission, packets=closing_facts.packets))
                 closing_proofs = questions(session, closing, records, usage_view=live, facts=facts)
             closing_constraints = (blockers(closing, session.policy.to_dict(), closing_observation, closing_proofs) if admission is None else
-                input_constraints(session, closing, records, closing_proofs, admission))
+                _input_constraints(session, closing, records, closing_proofs, admission))
             if native.execution_budget_overrun(session, records):
                 closing_constraints.append("current_execution_budget_overrun")
             if (closing["basis_id"] != view["basis_id"] or native.retained(session) != records
@@ -226,3 +257,13 @@ def current(session):
     with _held_current(session) as observed:
         result = observed.document()
     return result
+
+
+@contextmanager
+def _held_artifact_input(session, admission):
+    from .artifact_delivery_input import _PublicationAdmission
+    if type(admission) is not _PublicationAdmission:
+        refuse("private_publication_custody_required")
+    admission.held(session)
+    with _held_owner(session, admission) as observed:
+        yield observed

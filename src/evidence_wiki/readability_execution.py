@@ -239,8 +239,8 @@ def qualification(session, observed, *, application_attempt_id=None):
     observed.require(session)
     if type(session.execution.qualifications) is not CalibratedEvaluators:
         refuse("protected_issuer_required")
-    from .resolution_operations import _OwnedReadabilityInput
-    domain = observe_domain(observed.input_brief() if type(observed) is _OwnedReadabilityInput else project(observed.document()))
+    from .resolution_operations import _OwnedArtifactInput, _OwnedReadabilityInput
+    domain = observe_domain(observed.input_brief() if type(observed) in {_OwnedReadabilityInput, _OwnedArtifactInput} else project(observed.document()))
     probe_id = (native.child_id(native.child_id(application_attempt_id, "readability_application"), "readability_probe")
         if application_attempt_id is not None else None)
     records = native.retained(session)
@@ -312,7 +312,8 @@ def _remaining(session, records):
 def _current_application(session, observed):
     observed.require(session)
     plan = session.execution.profile.readability
-    brief = project(observed.document())
+    from .resolution_operations import _OwnedArtifactInput
+    brief = observed.input_brief() if type(observed) is _OwnedArtifactInput else project(observed.document())
     records = native.retained(session)
     effects = {row["data"]["attempt_id"] for row in records if row["kind"] == "execution_applied"
         and row["data"].get("operation") == "readability"}

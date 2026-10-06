@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "43"
+LIBRARY_API_VERSION = "45"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -111,6 +111,10 @@ LIBRARY_API_SURFACE = (
     "research.session.repair_progress",
     "research.session.resolution",
     "research.session.brief",
+    "research.session.prepare_delivery",
+    "research.session.deliver",
+    "research.session.delivery_status",
+    "research.session.reconcile_delivery",
     "strict.review_status",
     "strict.machine_compatibility",
     "strict.supersede_review",
@@ -364,6 +368,7 @@ def contract() -> dict:
     import yaml
 
     from . import orchestration
+    from .artifact_delivery_contracts import schemas as delivery_schemas
     from .environment import SERVICE_VARIABLES
     from .extension_contracts import index as extension_index
     from .mutation_contracts import MAX_BYTES as MUTATION_MAX_BYTES
@@ -511,6 +516,20 @@ def contract() -> dict:
                 "output": "bounded enum existing-field pointers and exact hashes; no prose edits or approval",
                 "effects": "explicit configured preterminal execution; material issues require scoped repair and fresh ordinary reviews",
                 "custody": "exact bundled non-repair stdin lease; unknown effects retained for reconciliation"}},
+        "research_artifact_delivery": {
+            "schemas": sorted(delivery_schemas()), "schema_documents": delivery_schemas(),
+            "profile": "research-execution-profile/v12",
+            "methods": ["research.session.prepare_delivery", "research.session.deliver",
+                "research.session.delivery_status", "research.session.reconcile_delivery"],
+            "adapter": "native_posix_run_file", "replacement": "never",
+            "selection": "frozen ArtifactDeliveryPlan and opaque ArtifactDestination references",
+            "gate": "fresh current native brief and source closure before the protected completion receipt",
+            "boundary": "artifact_checked; host_enforced not qualified by this adapter",
+            "release": "one scoped measured Release proposal; no semantic qualification claimed",
+            "reconciliation": "protected completed owner receipt only; no redispatch, deadline renewal or terminal reopening",
+            "unknown": "a linked file without completed owner checks remains uncertain",
+            "limits": {"artifact_bytes": 1048576, "destinations": 16, "live_writers": 16},
+            "remote_delivery": "unsupported"},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),
