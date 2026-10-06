@@ -27,14 +27,17 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
 )
 from evidence_wiki._contract import LIBRARY_API_VERSION  # noqa: E402
 from evidence_wiki._script_host import load_packaged_script  # noqa: E402
+from evidence_wiki.brief_contracts import _schemas as brief_schemas
 from evidence_wiki.calculation_contracts import schema_document as calculation_schema
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
 from evidence_wiki.protected_handoff import HANDOFF
 from evidence_wiki.protected_handoff import schema_document as handoff_schema
+from evidence_wiki.readability_contracts import _schemas as readability_schemas
+from evidence_wiki.readability_plan import schemas as readability_plan_schemas
 from evidence_wiki.recovery_contracts import schema_document as recovery_schema
 from evidence_wiki.repair_progress import schema_document as repair_schema
-from evidence_wiki.resolution_contracts import schemas as resolution_schemas
+from evidence_wiki.resolution_contracts import _schema_document as resolution_schema
 from evidence_wiki.review_packet_contracts import schema_document as review_packet_schema
 from evidence_wiki.review_service_contracts import schemas as service_schemas
 from evidence_wiki.review_service_policy import SERVICE_PLAN
@@ -62,7 +65,13 @@ def exports() -> dict[str, bytes]:
     schemas.update({key:recovery_schema() for key in RECOVERY_SCHEMAS})
     service_documents = {**service_schemas(), SERVICE_PLAN: service_plan_schema()}
     schemas.update({key: service_documents[key] for key in SERVICE_SCHEMAS})
-    schemas.update({key: resolution_schemas()[key] for key in RESOLUTION_SCHEMAS})
+    # The fixed-root export owner can bootstrap newly declared resource anchors.
+    # Public discovery still requires a complete installed asset generation.
+    native_shapes = strict.schema_documents()
+    schemas.update({key: resolution_schema(native_shapes) for key in RESOLUTION_SCHEMAS})
+    schemas.update(brief_schemas(native_shapes))
+    schemas.update(readability_schemas(native_shapes))
+    schemas.update(readability_plan_schemas())
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
     guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()

@@ -2271,3 +2271,115 @@ historical terminal lifecycle and external-action authority are separate fields;
 `authorized` and `external_action_authorized` remain false. This read establishes
 current owner eligibility under the declared contracts, not semantic truth or
 permission to publish outside the workspace.
+
+
+API version 42 / operation matrix version 25 adds
+session.brief(format="structured") and ws.strict.brief_schemas().
+The argument-free structured default is a caller-owned
+research-current-brief/v1; format="markdown" returns
+research-brief-markdown/v1 with exact UTF-8 output and structured-content
+digests. Both read the installed current resolution under private native
+closing custody. Findings and inferences retain their typed qualification,
+scope, time, units, evidence, premises and calculation references; every
+original/derived unresolved outcome and limitation remains explicit. Markdown
+uses fixed headings and literal content escaping, with no recommendation or
+substantive prose generation. Oversized complete content refuses rather than
+being silently shortened. Native verification/global material commitments,
+historical lifecycle and external-action authority remain separate.
+
+The public and inner read grants are research_session.brief and
+brief_operations.current, alongside research_session.resolution and
+resolution_operations.current. A read never starts or renews model work.
+Schema discovery is inert and follows the existing Workspace lifetime.
+
+Optional ReadabilityPlan selects execution-profile/v11 and a distinct exact
+critic/evaluator configuration, controller, immutable
+ReadabilityCalibrationSelection and ReadabilityInputHandoff. Freeze the final
+profile and all role/model/settings/rubric/reference selections before either
+ordinary or readability qualification and session construction. Omission
+preserves older profile documents. The existing CalibrationAuthority issues a
+readability-specific protected report with readability=True; an ordinary
+reviewer or auxiliary-adjudicator report cannot qualify this purpose. Protected
+references reproduce finite printable-ASCII scalar/presentation associations,
+including qualification, scope, time, units, evidence, limitations and unresolved
+outcomes. This scope does not qualify unrestricted language quality, real
+provider consumption or scientific truth. Unsupported scalar/context scope
+produces a bounded unresolved outcome.
+
+The core brief retains the resolution's bound of 100 original questions. A
+selected critic's complete job scope is limited to 64 originals by the native
+job contract; larger inventories refuse that critic operation without
+partitioning, dropping originals or implying qualification of a subset.
+
+For legacy ordinary qualifications, CalibratedEvaluators can explicitly compose
+one protected readability report with legacy=an_exact_QualifiedEvaluators.
+Its identity binds that immutable owner and preserves the original ordinary
+qualification rules; it does not relabel or promote an old certificate. This
+combination requires the explicit readability plan and profile.calibration=None.
+With protected ordinary calibration, use the existing CalibrationPlan and
+distinct readability selection instead. Actual current credentials, issuer
+record expiry and correlated host configuration remain required independently.
+
+Configured execution schedules readability before terminal release or bounded
+soft exhaustion of a permitted derived subset. It uses the same HMAC journal,
+actual reservation/intake, model/tool/cost/time caps and original accounting.
+The worker receives a complete masked permitted inventory and the same content
+presentation as the public formatter, with parent keys, alias maps, prior
+reviewer identities/verdict details and diagnostic prose withheld. Output is
+research-readability-issues/v1: bounded enum codes, existing field pointers and
+exact field hashes, or explicit abstention. Replacement prose, grants,
+recommendations and approval are rejected.
+
+Only the exact bundled BoundedSubprocessExecutor can perform a new protected
+readability invocation through its typed native stdin lease. Final serialized
+worker bytes are bounded; actual executing-thread source-use custody,
+current material, terminal state, credentials/qualification and finite
+wall/monotonic deadlines are checked through delivery and closure. Generic
+invoke refuses the readability purpose. Completion is transport evidence, not
+model comprehension or current acceptance.
+
+The native owner prepares protected critic input only for the exact newly
+reserved job. Its pending usage remains unknown and its maximum reservation
+counts against committed budgets. Public resolution and brief reads continue
+to withhold pending work; existing attempts reconcile rather than dispatch again.
+The first dispatch observes the exact job's configured service before source
+custody, then obtains fresh input proof. The original delivery deadline includes
+that observation and all opening, transfer and closing checks. An application
+report uses its own retained observation; an unrelated later observation cannot
+renew it. New work and application require that short observation to be live.
+A completed application binds its actual check time into the authenticated
+journal. Later reads validate the original configuration observation at that
+check time, while checking issuer expiry, credentials, plan, program, content,
+strict eligibility and source rights at the current time. This historical
+execution configuration does not report current remote service availability.
+Older application records without an authenticated check time cannot supply
+current readability qualification.
+
+The selected critic's complete persisted input must also fit the existing
+65,536-character canonical storage field and 262,144-byte escaped journal
+record. These storage limits may refuse an input below the worker's byte cap;
+complete input is never truncated to fit.
+
+After external wait, a fresh full current resolution and purpose qualification
+must reproduce the exact scientific content and private binding before semantic
+application or current reporting. Authenticated usage settlement remains
+separate from permission to apply a result.
+Claim issues enter existing stable-target/peer-preserving repair, then require
+fresh ordinary independent actual-target reviews and a new current brief.
+Non-claim/global issues re-evaluate their owner or refuse formatting; they
+cannot invent a repair target. Unknown delivery, effects or billing retain
+occupied reservations and reconcile without redispatch. Structured reads show
+pending/refused critic state; a configured required critic must be currently
+observed before Markdown is returned. Final dedicated issuer, authenticated
+application configuration and credential checks occur after native resolution
+work and at the observed return boundary.
+Historical terminal acceptance never restores current eligibility or grants
+external delivery.
+
+If parent intake is interrupted after protected critic delivery, the same live
+bundled executor can recover its exact authenticated first dispatch receipt.
+This private retention is bounded to eight MiB per executor. Exhausted or lost
+retention, including host restart, stays unavailable; it never proves dispatch
+absent. Missing intermediate observations remain unknown until authentic
+receipts arrive. Recovery settles history without resending input or renewing
+current qualification, source rights or semantic eligibility.

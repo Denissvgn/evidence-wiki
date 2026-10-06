@@ -273,6 +273,18 @@ def schemas() -> dict[str, dict[str, Any]]:
     for branch in job_v4["anyOf"]:
         branch["properties"]["schema_version"] = {"const": JOB_V4}
         branch["properties"]["task_role"]["enum"].append("calculation")
+    # A whole-brief purpose has no claim target. Keep old job branches intact
+    # and add two closed scoped evaluator alternatives, never an open payload.
+    evaluation = next(branch for branch in job_v3["anyOf"]
+        if branch["properties"]["operation"].get("const") == "evaluate")
+    for calibration in (False, True):
+        branch = copy.deepcopy(evaluation)
+        branch["properties"]["task_role"] = {"const": "critic"}
+        fields = {"qualification_purpose": {"const": "readability"}}
+        if calibration:
+            fields["calibration_case_id"] = _string(128)
+        branch["properties"]["payload"] = _object(**fields)
+        job_v3["anyOf"].append(branch)
     return copy.deepcopy({name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
                           for name, shape in ((JOB, job), (JOB_V2, job_v2), (JOB_V3, job_v3), (JOB_V4, job_v4), (RESULT, result), (DECISION, decision))})
 

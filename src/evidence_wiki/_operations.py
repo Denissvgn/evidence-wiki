@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "24"
+OPERATION_MATRIX_VERSION = "25"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -57,7 +57,9 @@ _ROWS = (
     ("strict.packet_schemas", None, "none; closed inert packet and delivery contracts", "none", "none"),
     ("strict.register_review", "evidence-wiki strict review", "authenticated review events in private host state", "canonical exclusive host state lock, checkpoint and request identity", "none"),
     ("strict.resolution_schemas", None, "none; closed bounded current resolution shape", "none", "none"),
+    ("strict.brief_schemas", None, "none; closed current brief and literal Markdown shapes", "none", "none"),
     ("research.session.resolution", None, "none; all-original current eligibility distinct from lifecycle", "held native usage plus fresh private current proof epochs", "none; no executor or approval callbacks"),
+    ("research.session.brief", None, "none; current permitted structured content or deterministic Markdown", "held native resolution source custody and private fresh closing proof", "none; no implicit critic dispatch"),
     ("strict.repair_schemas", None, "none; closed bounded repair shapes", "none", "none"),
     ("research.session.repair_progress", None, "none; historical effects separated from current native eligibility", "held current protected usage, source/host scope and closing journal/config/root checks", "none; no repair or approval callback"),
     ("strict.service_schemas", None, "none; closed inert service declarations/reports", "none", "none"),

@@ -23,6 +23,7 @@ from evidence_wiki.run_policy import RunPolicy
 SUITE = "research-calibration-suite/v1"
 REPORT = "research-calibration-report/v1"
 REPORT_AUXILIARY = "research-auxiliary-calibration-report/v1"
+REPORT_READABILITY = "research-readability-calibration-report/v1"
 AXES = ("meaning", "repeat", "identity", "position", "verbosity")
 ORACLE_TIERS = ("executable_oracle", "controlled_mutation", "fixed_reference")
 CASE_FIELDS = {"case_id", "unit_ref", "family_id", "domain_ref", "kind", "base_case_id",
@@ -232,7 +233,7 @@ class CalibrationAuthority:
         object.__setattr__(self, "_key", key)
 
     def issue(self, policy, profile, config_ref, suite, observations, executor, *, expires_utc,
-              observed_utc=None, verification_seconds=5, auxiliary=False):
+              observed_utc=None, verification_seconds=5, auxiliary=False, readability=False):
         """Score protected references using finite selected host verification.
 
         The executor's calibration_configuration(config_ref) must attest its
@@ -255,13 +256,18 @@ class CalibrationAuthority:
         role, frozen = profile.role(config_ref), policy.to_dict()
         from .review_service_policy import approved_profiles
         required = [row for row in approved_profiles(frozen, profile) if row["profile_ref"] == config_ref]
-        if type(auxiliary) is not bool:
+        if type(auxiliary) is not bool or type(readability) is not bool or auxiliary and readability:
             fail("role_invalid")
         if auxiliary:
             if profile.disagreement is None:
                 fail("role_invalid")
             selected = profile.disagreement.auxiliary_profile(policy, profile)
             required = [selected] if selected is not None and selected["profile_ref"] == config_ref else []
+        if readability:
+            if profile.readability is None:
+                fail("role_invalid")
+            selected = profile.readability.selected_profile(policy, profile)
+            required = [selected] if selected["profile_ref"] == config_ref else []
         if (role.role != "evaluator" or len(required) != 1 or required[0]["controller_ref"] != role.controller_ref
                 or required[0]["human_required"]):
             fail("role_invalid")
@@ -274,8 +280,10 @@ class CalibrationAuthority:
                    "scope_id": digest(frozen["scope"]), "domains": suite["domains"], "drift_ref": suite["drift_ref"]}
         if auxiliary:
             binding["qualification_purpose"] = "auxiliary_adjudication"
-        if profile.calibration is not None:
-            selection = profile.calibration.selection(config_ref).document()
+        if readability:
+            binding["qualification_purpose"] = "readability"
+        if profile.calibration is not None or readability:
+            selection = (profile.readability.selection if readability else profile.calibration.selection(config_ref)).document()
             if suite["suite_sha256"] != selection["suite_sha256"]:
                 fail("selected_suite_changed")
             binding.update(model_revision=selection["model_revision"],
@@ -297,7 +305,7 @@ class CalibrationAuthority:
         expected_configuration = {key: binding[key] for key in ("execution_profile_sha256", "config_ref", "controller_ref",
             "model_ref", "prompt_version", "model_settings_sha256", "rubric_sha256", "domains")}
         expected_configuration.update(suite_sha256=suite["suite_sha256"], split_ref=suite["split_ref"])
-        if profile.calibration is not None:
+        if profile.calibration is not None or readability:
             expected_configuration.update({key: binding[key] for key in
                 ("model_revision", "reference_assessment_ref", "domain_descriptor_sha256")})
         if configured is None:
@@ -369,16 +377,32 @@ class CalibrationAuthority:
                     or not _utc(attempt.job["issued_utc"]) <= _utc(observed["started_utc"]) <= _utc(observed["completed_utc"])
                     or not _utc(observed["completed_utc"]) <= _utc(observed["observed_utc"]) <= _utc(now)
                     or _utc(observed["completed_utc"]) > _utc(attempt.job["deadline_utc"])
-                    or type(output) is not dict or set(output) != {"case_id", "label"}
-                    or type(output["label"]) is not str or output["label"] not in {"accept", "reject", "unknown"}):
+                    or type(output) is not dict
+                    or not readability and (set(output) != {"case_id", "label"}
+                        or type(output["label"]) is not str or output["label"] not in {"accept", "reject", "unknown"})):
                 fail("judgment_invalid")
-            case = lookup.get(output["case_id"] if type(output["case_id"]) is str else None)
+            if readability:
+                payload = attempt.job["payload"]
+                if type(payload) is not dict or set(payload) != {"qualification_purpose", "calibration_case_id"} or payload["qualification_purpose"] != "readability":
+                    fail("case_binding_invalid")
+                case_id = payload["calibration_case_id"]
+            else:
+                case_id = output["case_id"]
+            case = lookup.get(case_id if type(case_id) is str else None)
             if case is None or case["case_id"] in results or attempt.input_document != case["input_document"]:
                 fail("case_binding_invalid")
             if case["reference"]["tier"] in ORACLE_TIERS and (observed["reason"] == "offline_fixture"
                     or observed["observed_usage"]["model_calls"] in (None, 0)):
                 reasons.append("model_execution_unobserved")
-            results[case["case_id"]] = output["label"]
+            if readability:
+                from .readability_reference import score_output
+                try:
+                    label = score_output(case["input_document"], output)
+                except (Exception, SystemExit):
+                    fail("judgment_invalid")
+            else:
+                label = output["label"]
+            results[case["case_id"]] = label
             refs.append({"case_id": case["case_id"], "attempt_id": attempt.attempt_id,
                          "observation_sha256": digest(observed), "input_sha256": attempt.input_sha256})
         if probe() != configured:
@@ -401,7 +425,7 @@ class CalibrationAuthority:
             state = "unknown"
         else:
             state = "qualified"
-        result = {"schema_version": REPORT_AUXILIARY if auxiliary else REPORT, "issuer_ref": self.issuer_ref, "binding": binding,
+        result = {"schema_version": REPORT_READABILITY if readability else REPORT_AUXILIARY if auxiliary else REPORT, "issuer_ref": self.issuer_ref, "binding": binding,
                   "suite_ref": suite["suite_ref"], "split_ref": suite["split_ref"], "suite_sha256": suite["suite_sha256"],
                   "issued_utc": now, "expires_utc": expires_utc, "state": state, "independent": independent,
                   "reasons": sorted(set(reasons)), "domains": domains, "families": families,
@@ -421,7 +445,7 @@ class CalibrationAuthority:
         if type(value) is not dict:
             fail("record_invalid")
         signature = value.pop("authentication", None)
-        if (value.get("schema_version") not in {REPORT, REPORT_AUXILIARY} or value.get("issuer_ref") != self.issuer_ref
+        if (value.get("schema_version") not in {REPORT, REPORT_AUXILIARY, REPORT_READABILITY} or value.get("issuer_ref") != self.issuer_ref
                 or type(signature) is not str or not hmac.compare_digest(signature,
                     hmac.new(self._key, b"research-calibration/v1\0" + canonical(value), hashlib.sha256).hexdigest())):
             fail("authentication_refused")
@@ -432,7 +456,7 @@ class CalibrationAuthority:
         return value
 
     def current(self, value, *, policy, profile, config_ref, rubric, model_settings, domain_ref, now_utc,
-                drift_ref=None, revoked=False, auxiliary=False):
+                drift_ref=None, revoked=False, auxiliary=False, readability=False):
         value = self.verify(value)
         role = profile.role(config_ref)
         wanted = {"policy_id": policy.policy_id, "execution_profile_sha256": profile.sha256, "config_ref": config_ref,
@@ -440,11 +464,16 @@ class CalibrationAuthority:
                   "rubric_sha256": digest(rubric), "model_settings_sha256": digest(model_settings),
                   "scope_id": digest(policy.to_dict()["scope"]), "drift_ref": drift_ref}
         reasons = []
-        if (type(auxiliary) is not bool or value["schema_version"] != (REPORT_AUXILIARY if auxiliary else REPORT)
-                or (value["binding"].get("qualification_purpose") == "auxiliary_adjudication") != auxiliary):
+        if (type(auxiliary) is not bool or type(readability) is not bool or auxiliary and readability
+                or value["schema_version"] != (REPORT_READABILITY if readability else REPORT_AUXILIARY if auxiliary else REPORT)
+                or value["binding"].get("qualification_purpose") != ("readability" if readability else "auxiliary_adjudication" if auxiliary else None)):
             reasons.append("qualification_purpose_mismatch")
         if auxiliary:
             selected = None if profile.disagreement is None else profile.disagreement.auxiliary_profile(policy, profile)
+            if selected is None or selected["profile_ref"] != config_ref:
+                reasons.append("qualification_purpose_mismatch")
+        if readability:
+            selected = None if profile.readability is None else profile.readability.selected_profile(policy, profile)
             if selected is None or selected["profile_ref"] != config_ref:
                 reasons.append("qualification_purpose_mismatch")
         if revoked:

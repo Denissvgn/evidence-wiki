@@ -69,6 +69,29 @@ def _credential(session, identity, authority, trust, now, task_role):
     return digest(proof)
 
 
+def readability_credential(session):
+    """Challenge the distinct selected critic without ordinary review enrollment."""
+    session._check("current")
+    session.context.require_grant("service_authentication.status")
+    plan = session.execution.profile.readability
+    if plan is None:
+        refuse("readability_not_configured")
+    plan.selected_profile(session.policy, session.execution.profile)
+    matches = [identity for identity in session.execution.review_signer.reviewers if identity.config_ref == plan.config_ref]
+    if len(matches) != 1:
+        refuse("readability_native_credential_missing")
+    config = owner("_strict_evidence").configuration(session.root)
+    authority = owner("_evidence_authority")
+    now = datetime.now(timezone.utc)
+    trust = authority.load_trust(session.root, config, now)
+    reference = _credential(session, matches[0], authority, trust, now, "critic")
+    closing = datetime.now(timezone.utc)
+    if (closing < now or authority.load_trust(session.root, config, closing)["content_hash"] != trust["content_hash"]
+            or owner("_strict_evidence").configuration(session.root) != config):
+        refuse("readability_current_credential_changed")
+    return reference
+
+
 def status(session, *, plan=None):
     """Read configured parent credentials; actual service execution is a separate fact."""
     if type(session) is not ResearchSession or session.execution is None:
@@ -93,9 +116,8 @@ def status(session, *, plan=None):
     try:
         trust = authority.load_trust(session.root, config, now)
     except (Exception, SystemExit):
-        signer = session.execution.review_signer
         missing = []
-        for identity in (signer.generator, *signer.reviewers):
+        for identity in _ordinary_identities(session):
             scope = session.execution.profile.role_scopes.scope(identity.config_ref)
             missing.append({"config_ref": identity.config_ref, "slot_ref": None if identity.role == "generator" else identity.config_ref,
                 "task_role": scope.task_role, "principal": None, "controller_ref": identity.controller_ref,
@@ -107,14 +129,13 @@ def status(session, *, plan=None):
             "authority_id": None, "observed_at": now.isoformat(), "state": "blocked", "reason": "native_authority_unavailable",
             "services": missing, "credential_probe": "parent_native_credential_challenge", "execution_probe": "existing_correlated_owned_attempts_only",
             "enrollment": "not_performed", "authorized": False, "evidence_accepted": False})
-    signer = session.execution.review_signer
     required = {row["profile_ref"]: row for row in session.policy.to_dict()["required_evaluators"]}
     qualifications = {row["profile_ref"]: row for row in before["qualification"]["profiles"]}
     route_slots = ({config: route.slot_ref for route in plan.routes for config in route.config_refs}
         if plan is not None else {config: config for config in required})
     records = session.execution.records(session)
     rows = []
-    for identity in (signer.generator, *signer.reviewers):
+    for identity in _ordinary_identities(session):
         registry = session.execution.profile.role_scopes
         scope = registry.scope(identity.config_ref) if registry is not None else None
         task_role = scope.task_role if scope is not None else "host_worker" if identity.role == "generator" else "evaluator"
@@ -168,6 +189,13 @@ def status(session, *, plan=None):
         "reason": "required_credentials_and_qualification_current" if ready else "credential_qualification_or_policy_unavailable",
         "services": rows, "credential_probe": "parent_native_credential_challenge", "execution_probe": "existing_correlated_owned_attempts_only",
         "enrollment": "not_performed", "authorized": False, "evidence_accepted": False})
+
+
+def _ordinary_identities(session):
+    signer = session.execution.review_signer
+    optional = getattr(session.execution.profile, "readability", None)
+    return (signer.generator, *(identity for identity in signer.reviewers
+        if optional is None or identity.config_ref != optional.config_ref))
 
 
 def require_output(session, attempt, observation, prepared):

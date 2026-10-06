@@ -99,6 +99,14 @@ class StrictNamespace(Namespace):
         from ..resolution_contracts import schemas
         return schemas()
 
+    def brief_schemas(self):
+        """Return closed current brief and deterministic Markdown shapes."""
+        self._workspace._check_open()
+        from ..brief_contracts import schemas
+        from ..readability_contracts import schemas as critic_schemas
+        from ..readability_plan import schemas as plan_schemas
+        return {**schemas(), **critic_schemas(), **plan_schemas()}
+
     def repair_schemas(self):
         """Return bounded repair diff/progress and immutable service binding shapes."""
         self._workspace._check_open()

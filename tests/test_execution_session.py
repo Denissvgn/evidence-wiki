@@ -143,6 +143,10 @@ def fixture(tmp_path, monkeypatch, request=None):
         authority.policy["principals"]["backup-reviewer"] = {"controller": "backup-controller", "roles": ["evaluator"],
             "keys": {"backup-key": "55" * 32}}
         authority.save_policy()
+    if options.get("readability"):
+        authority.policy["principals"]["readability-reviewer"] = {"controller": "readability-controller", "roles": ["evaluator"],
+            "keys": {"readability-key": "88" * 32}}
+        authority.save_policy()
     authority.root = root
     authority.binding = identifier("evidence-host-workspace/v1", {"root": str(root)})
     local_config = yaml.safe_load((root / "research.yml").read_bytes())
@@ -268,6 +272,10 @@ def fixture(tmp_path, monkeypatch, request=None):
             "offline/" + role.model_ref if role.config_ref == "profile-b" else role.model_ref,
             role.prompt_version) for role in roles)
     selected_meter = HostProtocolSimulationMeter if options.get("simulated_model_usage") else LocalMeter
+    readability, readability_suite = None, None
+    if options.get("readability"):
+        from tests._readability_fixture import select
+        roles, registry, readability, readability_suite = select(roles, registry, options)
     if options.get("service_zero_critic"):
         class ZeroCriticMeter(HostProtocolSimulationMeter):
             def finalize(self, attempt, summary):
@@ -278,7 +286,8 @@ def fixture(tmp_path, monkeypatch, request=None):
         review_delivery=ReviewDelivery(**options.get("review_delivery_limits", {})) if options.get("review_delivery") else None,
         review_services=service_plan, service_repair=ServiceRepairBinding(service_plan.sha256,
             "sha256:" + disagreement.sha256) if options.get("service_repair") else None,
-        input_handoff=NativeInputHandoff() if options.get("repair") and options.get("disagreement") else None)
+        input_handoff=NativeInputHandoff() if (options.get("repair") or options.get("readability")) and options.get("disagreement") else None,
+        readability=readability)
     generated = {"proposal": proposal, "coverage_links": [{"slug": "q", "facet_id": "primary", "source_ids": [source_id]}]}
     generator = "import json,sys; json.load(sys.stdin); print(" + repr(json.dumps(generated)) + ")"
     if options.get("acquisition_choice"):
@@ -309,6 +318,12 @@ def fixture(tmp_path, monkeypatch, request=None):
             "r['verdicts'].update(support='fail',scope='fail') if 'packet' in d and 'always' in d['packet']['claim']['text'] else None; "
             "print(json.dumps(r))"
         )
+    if options.get("readability_material"):
+        generator = ("import json,sys,copy; d=json.load(sys.stdin)['input']; g=" + repr(generated) + "; "
+            "g['proposal']['inventory']=copy.deepcopy(d['repair_scope']['before_inventory']) if d['purpose']=='repair' else g['proposal']['inventory']; "
+            "target=next((c for c in g['proposal']['inventory']['claims'] if c['id']==d.get('repair_scope',{}).get('target_claim_id')),None); "
+            "target['limitations'].append('This is a single retained measurement.') if target is not None else None; "
+            "g.update(coverage_links=[]) if d['purpose']=='repair' else None; print(json.dumps(g))")
     worker = tmp_path / "workers"
     worker.mkdir()
     commands = {"researcher": (sys.executable, "-c", generator), "profile-a": (sys.executable, "-c", evaluator)}
@@ -335,6 +350,9 @@ def fixture(tmp_path, monkeypatch, request=None):
         commands["profile-b"] = (sys.executable, "-c", critic)
     if service_plan is not None:
         commands["profile-a-backup"] = (sys.executable, "-c", evaluator)
+    if readability is not None:
+        from tests._readability_fixture import command
+        commands["readability"] = command(worker, material=options.get("readability_material", False), hostile=options.get("readability_hostile", False))
     executor = BoundedSubprocessExecutor(profile, commands=commands,
         cwd=worker, receipt_key=b"e" * 32, meter=selected_meter())
     from evidence_wiki.review_service_policy import approved_profiles
@@ -388,11 +406,18 @@ def fixture(tmp_path, monkeypatch, request=None):
             bytes.fromhex("66" * 32 if options.get("service_wrong_key") and config_ref == "profile-a" else KEYS["evaluator"] if config_ref == "profile-a" else "44" * 32)))
     signer = HostReviewSigner("lab-authority", "1", SigningIdentity("researcher", "runner", "runner-key", "runner", "generator", bytes.fromhex(KEYS["runner"])),
         reviewers, "2027-01-01T00:00:00Z")
-    execution = ResearchExecution(executor, qualifications=QualifiedEvaluators(qualifications, issuer), review_signer=signer, observer_key=b"o" * 32)
+    registry_owner = QualifiedEvaluators(qualifications, issuer)
+    if readability is not None:
+        from tests._readability_fixture import qualify
+        registry_owner = qualify(profile, policy, readability_suite, registry_owner, executor, worker, selected_meter)
+        reviewers.append(SigningIdentity("readability", "readability-reviewer", "readability-key", "readability-controller", "evaluator", bytes.fromhex("88" * 32)))
+        signer = HostReviewSigner("lab-authority", "1", signer.generator, reviewers, "2027-01-01T00:00:00Z")
+    execution = ResearchExecution(executor, qualifications=registry_owner, review_signer=signer, observer_key=b"o" * 32)
     context = HostContext([root], GRANTS | ({"review_page_operations.prepare", "review_page_operations.page",
         "review_page_session.assembled", "review_packet_execution.bind", "review_packet_execution.reserve",
         "coverage_observation.observe", "research_session.assemble_review_packet"} if options.get("review_delivery") else set())
-        | ({"research_session.review_services", "service_authentication.status"} if options.get("review_services") else set()) | ({"research_session.repair_progress", "repair_progress_owner.current"} if options.get("service_repair") else set()), "caller", [root], authority_file=authority.policy_path,
+        | ({"research_session.review_services", "service_authentication.status"} if options.get("review_services") else set()) | ({"research_session.repair_progress", "repair_progress_owner.current"} if options.get("service_repair") else set())
+        | ({"research_session.brief", "brief_operations.current", "research_session.resolution", "resolution_operations.current", "service_authentication.status"} if readability is not None else set()), "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
         controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
         role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())

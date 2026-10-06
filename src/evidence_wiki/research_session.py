@@ -652,6 +652,13 @@ class ResearchSession:
         return propose(self, request_id=request_id, original_id=original_id, config_ref=config_ref, as_of=as_of)
 
     @_boundary
+    def brief(self, *, format="structured"):
+        """Read current permitted content or its deterministic literal Markdown."""
+        self._check("brief")
+        from .brief_operations import current
+        return current(self, format=format)
+
+    @_boundary
     def resolution(self):
         """Read current eligible questions and every unresolved original outcome."""
         self._check("resolution")

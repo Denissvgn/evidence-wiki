@@ -12,6 +12,28 @@ if str(SRC_ROOT) not in sys.path:
 from evidence_wiki import _script_host, cli, resources
 
 
+def test_tree_signature_preserves_files_symlinks_and_content_change(tmp_path):
+    import os
+    loader = _script_host._load_workspace_loader(REPO_ROOT / "workspace-template/scripts")
+    source = tmp_path / "a.py"
+    source.write_text("value=1\n")
+    (tmp_path / "alias.py").symlink_to(source)
+    (tmp_path / "missing.py").symlink_to(tmp_path / "absent")
+    (tmp_path / "directory.py").mkdir()
+    (tmp_path / "irrelevant.txt").write_text("ignored")
+    expected = []
+    for path in sorted(tmp_path.glob("*.py")):
+        if path.is_file():
+            observed = path.stat()
+            expected.append((path.name, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns, observed.st_ino))
+    assert loader._tree_signature(tmp_path) == tuple(expected)
+    before = loader._tree_hash(tmp_path)
+    stamp = source.stat()
+    source.write_text("value=2\n")
+    os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    assert loader._tree_hash(tmp_path) != before
+
+
 class ScriptHostReExportTests(unittest.TestCase):
     """``cli`` kept its loader names after the move, and they are the same objects."""
 

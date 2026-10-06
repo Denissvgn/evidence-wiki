@@ -19,10 +19,20 @@ _HOST_CALL_CAPACITY = threading.BoundedSemaphore(16)
 
 def bounded_host_call(function, arguments, timeout_seconds):
     """Bound a host wait; timed-out effects remain externally uncertain."""
+    from .execution_session import invalidate_current_facts
+    from .readability_execution import enter_input_host_call
+    from .readability_probes import invalidate as invalidate_readability_probe
+    admission = enter_input_host_call(function, arguments)
+    invalidate_current_facts()
+    invalidate_readability_probe()
     if timeout_seconds <= 0:
+        if admission is not None:
+            admission.host_call_failed()
         return None, "host_wait_expired"
     capacity = _HOST_CALL_CAPACITY
     if not capacity.acquire(blocking=False):
+        if admission is not None:
+            admission.host_call_failed()
         return None, "host_observation_capacity_exhausted"
     finished = threading.Event()
     result = []
@@ -38,9 +48,15 @@ def bounded_host_call(function, arguments, timeout_seconds):
         threading.Thread(target=invoke, daemon=True, name="research-host-observation").start()
     except RuntimeError:
         capacity.release()
+        if admission is not None:
+            admission.host_call_failed()
         return None, "host_observation_failed"
     if not finished.wait(timeout_seconds):
+        if admission is not None:
+            admission.host_call_failed()
         return None, "host_wait_expired"
+    if not result[0][0] and admission is not None:
+        admission.host_call_failed()
     return result[0][1], None if result[0][0] else "host_observation_failed"
 
 
@@ -65,7 +81,12 @@ class ResearchExecution:
                 or not 32 <= len(observer_key) <= 128 or type(qualifications) not in {QualifiedEvaluators, CalibratedEvaluators}
                 or type(review_signer) is not HostReviewSigner):
             refuse("EXECUTION_CONFIG_INVALID")
-        if (executor.profile.calibration is None) != (type(qualifications) is QualifiedEvaluators):
+        composed = (executor.profile.readability is not None and executor.profile.calibration is None
+            and type(qualifications) is CalibratedEvaluators and type(qualifications._legacy) is QualifiedEvaluators)
+        if (type(qualifications) is CalibratedEvaluators and qualifications._legacy is not None and not composed
+                or executor.profile.readability is not None and type(qualifications) is not CalibratedEvaluators):
+            refuse("CALIBRATION_REGISTRY_REQUIRED")
+        if not composed and (executor.profile.calibration is None) != (type(qualifications) is QualifiedEvaluators):
             refuse("CALIBRATION_REGISTRY_REQUIRED")
         try:
             generator_role = executor.profile.role(review_signer.generator.config_ref)
@@ -163,10 +184,13 @@ class ResearchExecution:
         return result
 
     def attempt(self, document):
+        from .readability_contracts import restored_input, stored_attempt
+        supplied_input = restored_input(document, self.profile)
         attempt = ExecutionAttempt.create(attempt_id=document["attempt_id"], nonce=document["nonce"],
             run_id=document["run_id"], binding_id=document["binding_id"], profile=self.profile,
-            config_ref=document["config_ref"], job=document["job"], input_document=document["input"])
-        if attempt.document() != document:
+            config_ref=document["config_ref"], job=document["job"], input_document=supplied_input)
+        encoded = type(document["input"]) is dict and document["input"].get("schema_version") == "research-readability-sealed-input/v1"
+        if (stored_attempt(attempt, self.profile) if encoded else attempt.document()) != document:
             refuse("EXECUTION_ATTEMPT_CHANGED")
         return attempt
 

@@ -415,12 +415,13 @@ def validate_targeted_repair(previous_claims, proposed_claims, *, target_claim_i
         _fail("repair_peer_changed")
 
 
-def driver_action(session, projection, *, gates, original_id):
+def driver_action(session, projection, *, gates, original_id, presentation_defects=None):
     """Return named proposals for the driver; caller still reserves/checks effects."""
     decision = disagreement_action(policy=session.policy, claim_id=projection["claim_id"], basis_id=projection["basis_id"],
         generator_controller_ref=session.execution.review_signer.generator.controller_ref,
         reviews=projection["reviews"], history=projection["history"], gates=gates,
-        service_profile=session.execution.profile if getattr(session.execution.profile, "service_repair", None) is not None else None)
+        service_profile=session.execution.profile if getattr(session.execution.profile, "service_repair", None) is not None else None,
+        presentation_defects=presentation_defects)
     operation = decision["operation"]
     result = {"operation": operation, "original_id": _ref(original_id), "claim_id": projection["claim_id"],
         "reason": decision["reason"], "disagreement_decision": decision}
@@ -445,6 +446,8 @@ def driver_action(session, projection, *, gates, original_id):
             result.update(operation="evaluate", purpose="evaluate", config_ref=missing["profile_ref"])
     elif operation == "repair":
         result.update(purpose="repair", defects=projection["reviews"], target_claim_id=projection["claim_id"])
+        if presentation_defects:
+            result["presentation_defects"] = detached(presentation_defects)
     elif operation == "adjudicate":
         result.update(purpose="adjudicate", first_passes=projection["reviews"])
     elif operation == "acquire":

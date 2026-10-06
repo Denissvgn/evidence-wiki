@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "41"
+LIBRARY_API_VERSION = "42"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -105,9 +105,11 @@ LIBRARY_API_SURFACE = (
     "strict.service_schemas",
     "strict.repair_schemas",
     "strict.resolution_schemas",
+    "strict.brief_schemas",
     "research.session.review_services",
     "research.session.repair_progress",
     "research.session.resolution",
+    "research.session.brief",
     "strict.review_status",
     "strict.machine_compatibility",
     "strict.supersede_review",
@@ -495,6 +497,19 @@ def contract() -> dict:
             "basis": "permitted-content domain commitment or null; native global material and review commitments remain private",
             "effects": "read-only; lifecycle and external-action authority are separate",
             "limits": {"originals": 100, "questions": 300, "bytes": 1048576}},
+        "research_brief": {"schemas": ["research-current-brief/v1", "research-brief-markdown/v1"],
+            "method": "research.session.brief", "schema_method": "strict.brief_schemas",
+            "formats": ["structured", "markdown"], "maximum_bytes": 1048576,
+            "source": "installed current resolution under native private closing custody",
+            "effects": "read-only; no implicit critic dispatch or external action",
+            "rendering": "fixed literal projection; no recommendation or substantive edit",
+            "readability": {"profile": "research-execution-profile/v11", "purpose": "readability",
+                "schemas": ["research-readability-input/v1", "research-readability-issues/v1", "research-readability-plan/v1", "research-readability-input-handoff/v1"],
+                "qualification": "distinct protected finite scalar preservation; not general language or semantic truth",
+                "input": "complete blind permitted inventory and shared fixed presentation; parent keys and prior verdict details withheld",
+                "output": "bounded enum existing-field pointers and exact hashes; no prose edits or approval",
+                "effects": "explicit configured preterminal execution; material issues require scoped repair and fresh ordinary reviews",
+                "custody": "exact bundled non-repair stdin lease; unknown effects retained for reconciliation"}},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),

@@ -123,7 +123,8 @@ def _gates(values):
 
 
 def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, generator_controller_ref: str,
-                        reviews: list[dict[str, Any]], history: list[dict[str, Any]], gates: dict[str, Any], service_profile=None) -> dict[str, Any]:
+                        reviews: list[dict[str, Any]], history: list[dict[str, Any]], gates: dict[str, Any], service_profile=None,
+                        presentation_defects=None) -> dict[str, Any]:
     """Choose a bounded proposal; adjudication never resolves native eligibility.
 
     History includes reserved attempts, including failed attempts, from the
@@ -172,6 +173,16 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
         canonical_gates = _gates(gates)
         current = [row for row in _reviews(reviews, required, generator_controller_ref, service_profile, frozen) if row["basis_id"] == basis_id]
         retained = _history(history, claim_id)
+        if presentation_defects is not None:
+            from .readability_contracts import ISSUES
+            if (type(presentation_defects) is not list or not 1 <= len(presentation_defects) <= 32
+                    or any(type(row) is not dict or set(row) != {"code", "field", "field_sha256", "report_ref"}
+                        or row["code"] not in ISSUES or type(row["field"]) is not str or not row["field"].startswith("/")
+                        or len(row["field"]) > 1024 for row in presentation_defects)):
+                raise ExecutionError("presentation_defect_invalid")
+            for row in presentation_defects:
+                _hash(row["field_sha256"])
+                _hash(row["report_ref"])
     except (ExecutionError, MutationError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
         return terminal("rejected", "untrusted_observation", "invalid_scoped_input")
     if canonical_gates["authentication"] != "pass":
@@ -215,6 +226,9 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
         "objection_refs": row["objection_refs"]} for row in sorted(current, key=lambda item: item["profile_ref"])]
     defect_sha256 = "sha256:" + hashlib.sha256(canonical({"claim_id": claim_id, "findings": fingerprints,
         "mechanical": canonical_gates["mechanical"], "source_gap_ref": canonical_gates["source_gap_ref"]})).hexdigest()
+    if presentation_defects:
+        defect_sha256 = "sha256:" + hashlib.sha256(canonical({"native_defect_sha256": defect_sha256,
+            "presentation_defects": presentation_defects})).hexdigest()
 
     def permitted(effect):
         return effect in frozen["allowed_effects"] and frozen["host_capability_refs"].get(effect) is not None
@@ -262,6 +276,9 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
             "abstained", "review_disagreement", "adjudication_cannot_approve_original_basis")
     failed = [row for row in current if any(value == "fail" for value in row["verdicts"].values()) or row["objection_refs"]]
     if not failed:
+        if presentation_defects:
+            return repair("unsupported_claim", "scoped_presentation_defect_repair") or terminal(
+                "abstained", "unsupported_claim", "presentation_repair_allowance_exhausted")
         return action("return_gate", None, "current_outcomes", "first_passes_complete")
     disagree = any(len({row["verdicts"][key] for row in by_profile.values()}) > 1 for key in CRITERIA)
     if (disagree and permitted("model") and permitted("adjudicate") and canonical_gates["model_available"]

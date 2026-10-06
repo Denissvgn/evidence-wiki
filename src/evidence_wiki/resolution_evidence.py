@@ -10,10 +10,10 @@ from evidence_wiki.service_authentication import correlated
 
 class _Pass:
     """A private per-call owner cache; no opening facts survive into closing."""
-    def __init__(self, session, config):
+    def __init__(self, session, config, *, packets=None):
         self.session, self.config = session, config
         self.policy = owner("_strict_evidence").resolve_policy(session.root, config)
-        self._packets = None
+        self._packets = packets
         self._prepared = {}
 
     def packets(self):
@@ -26,6 +26,60 @@ class _Pass:
             self._prepared[claim_id] = owner("strict_evidence").prepare_review(self.session.root, claim_id)
         return self._prepared[claim_id]
 
+
+class _InputPass(_Pass):
+    """Only the actual input owner can select accounting-independent evidence."""
+    def __init__(self, session, config, admission, *, packets):
+        admission.held(session)
+        super().__init__(session, config, packets=packets)
+        self.admission = admission
+
+
+def _input_claim_ready(session, current, claim_id, facts):
+    """Recheck material/current votes; confer no final continuation decision."""
+    facts.admission.held(session)
+    from .execution_continuations import authenticated_gates, claim_sources, current_gates
+    from .execution_disagreement import project_claim
+    prepared = facts.prepared(claim_id)
+    sources = claim_sources(prepared, facts.packets())
+    projection = project_claim(session, claim_id=claim_id, prepared=prepared, sources=sources)
+    gates = authenticated_gates(session, projection, current_gates(session, current, prepared, sources), prepared=prepared)
+    if (gates["authentication"] != "pass" or gates["mechanical"] != "pass"
+            or any(gates[name] is not True for name in ("context_complete", "source_present", "qualified", "authority_granted"))):
+        return False
+    policy = session.policy.to_dict()
+    required = {row["profile_ref"]: row for row in policy["required_evaluators"]}
+    if {row["role"] for row in required.values()} != {"evaluator", "critic"}:
+        return False
+    current_reviews = [row for row in projection["reviews"] if row["basis_id"] == projection["basis_id"]]
+    actual = {}
+    for review in current_reviews:
+        key = review.get("service_slot_ref", review["profile_ref"])
+        wanted = required.get(key)
+        if (wanted is None or review["role"] != wanted["role"] or review["objection_refs"]
+                or any(value != "pass" for value in review["verdicts"].values())
+                or review["controller_ref"] == session.execution.review_signer.generator.controller_ref):
+            return False
+        if key in actual and (actual[key]["verdicts"] != review["verdicts"] or actual[key]["objection_refs"] != review["objection_refs"]):
+            return False
+        actual[key] = review
+    if set(actual) != set(required) or len({row["controller_ref"] for row in actual.values()}) != len(actual):
+        return False
+    history = projection["history"]
+    if any(row["action"] == "adjudicate" and row["basis_id"] == projection["basis_id"] for row in history):
+        return False
+    material = [row for row in history if row["action"] in {"repair", "acquire"}]
+    if material and (material[-1]["result_basis_id"] is None or material[-1]["result_basis_id"] == material[-1]["basis_id"]
+            or projection["basis_id"] in {row["basis_id"] for row in material}):
+        return False
+    limits = policy["continuation_limits"]
+    claim_limits = session.execution.profile.disagreement.document()
+    for action, counter in (("repair", "repair_cycles"), ("adjudicate", "adjudication_cycles"), ("acquire", "acquisition_attempts")):
+        count = sum(row["action"] == action for row in history)
+        claim_max = claim_limits["claim_repair_limit"] if action == "repair" else claim_limits["claim_adjudication_limit"] if action == "adjudicate" else limits[counter]
+        if count > min(limits[counter], claim_max) or current["usage"][counter] is None or count > current["usage"][counter]:
+            return False
+    return True
 
 def _local_rejection(session, current, question, facts):
     """An authenticated current claim gate may reject; reason text cannot."""
@@ -67,8 +121,9 @@ def questions(session, current, records, *, usage_view=None, facts):
                 from evidence_wiki.execution_continuations import claim_action
                 packets = facts.packets()
                 try:
-                    gate = claim_action(session, current, claim["id"], question["original_id"], packets)
-                    if gate["operation"] != "return_gate":
+                    ready = (_input_claim_ready(session, current, claim["id"], facts) if type(facts) is _InputPass else
+                        claim_action(session, current, claim["id"], question["original_id"], packets)["operation"] == "return_gate")
+                    if not ready:
                         reasons.append("claim_continuation_not_at_gate")
                 except ExecutionError:
                     reasons.append("claim_continuation_unknown")

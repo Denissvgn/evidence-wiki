@@ -52,6 +52,35 @@ def executor(tmp_path, script, selected=None, **changes):
                                     commands={"researcher": (sys.executable, "-c", script)}, cwd=tmp_path, **changes)
 
 
+def test_live_executor_retains_exact_first_receipt_without_regeneration(tmp_path):
+    host = executor(tmp_path, "import time; time.sleep(0.05); print('{}')")
+    selected = attempt(host.profile)
+    first = host.invoke(selected)
+    expected = copy.deepcopy(first)
+    first["reason"] = "caller-mutated"
+    assert host._attempts[selected.attempt_id].finished.wait(2)
+    host.poll(selected)
+    retained = host._dispatch_observation(selected)
+    assert retained == expected and retained["sequence"] == 1
+    assert host.authenticate(retained, selected) == expected
+    retained["reason"] = "caller-mutated-again"
+    assert host._dispatch_observation(selected) == expected
+    with pytest.raises(ExecutionError, match="conflict"):
+        host._dispatch_observation(attempt(host.profile, nonce="different"))
+
+
+def test_retention_exhaustion_or_new_host_never_infers_dispatch(tmp_path):
+    host = executor(tmp_path, "print('{}')")
+    selected = attempt(host.profile)
+    host._dispatch_retained_bytes = 8 * 1024 * 1024 - 1
+    assert host.invoke(selected)["sequence"] == 1
+    assert host._attempts[selected.attempt_id].finished.wait(2)
+    assert host.poll(selected)["sequence"] == 2
+    assert host._dispatch_observation(selected) is None
+    restarted = executor(tmp_path, "print('{}')")
+    assert restarted._dispatch_observation(selected) is None
+
+
 def final(host, value, timeout=4):
     until = time.monotonic() + timeout
     while time.monotonic() < until:

@@ -156,6 +156,8 @@ def _automatic(session, *, request_id, expected_basis_id):
             return None
         old = next((row["data"] for row in records if row["kind"] == "execution_advance" and row["data"]["advance_id"] == request_id), None)
         action = old["action"] if old is not None else native._action(session, view, records)
+        if action.get("retry_purpose", action.get("purpose")) == "readability":
+            return None
         if action["operation"] != "evaluate":
             return None
         config_ref = action.get("config_ref")

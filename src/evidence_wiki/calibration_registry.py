@@ -86,21 +86,35 @@ class CalibratedEvaluators:
 
     authority: CalibrationAuthority = field(repr=False)
     _records: bytes = field(repr=False)
+    _legacy: object | None = field(default=None, repr=False)
 
-    def __init__(self, records, authority):
-        if type(authority) is not CalibrationAuthority or type(records) not in (list, tuple) or len(records) > 8:
+    def __init__(self, records, authority, *, legacy=None):
+        from .agent_qualification import QualifiedEvaluators
+        if type(authority) is not CalibrationAuthority or type(records) not in (list, tuple) or len(records) > 9:
             raise ExecutionError("calibration_registry_invalid")
+        if legacy is not None and (type(legacy) is not QualifiedEvaluators
+                or legacy.authority.generator_controller_ref != authority.generator_controller_ref):
+            raise ExecutionError("calibration_legacy_owner_invalid")
         verified = [authority.verify(row) for row in records]
+        readability = [row for row in verified if row["binding"].get("qualification_purpose") == "readability"]
+        if len(readability) > 1 or len(verified) - len(readability) > 8:
+            raise ExecutionError("calibration_registry_invalid")
+        if legacy is not None and (len(verified) != 1 or len(readability) != 1):
+            raise ExecutionError("calibration_legacy_purpose_invalid")
         if len({row["binding"]["config_ref"] for row in verified}) != len(verified):
             raise ExecutionError("calibration_registry_duplicate")
         object.__setattr__(self, "authority", authority)
         object.__setattr__(self, "_records", _json(verified))
+        object.__setattr__(self, "_legacy", legacy)
 
     @property
     def sha256(self):
-        return digest({"records_sha256": hashlib.sha256(self._records).hexdigest(),
+        value = {"records_sha256": hashlib.sha256(self._records).hexdigest(),
             "issuer_ref": self.authority.issuer_ref, "generator_controller_ref": self.authority.generator_controller_ref,
-            "authority_key_sha256": hashlib.sha256(self.authority._key).hexdigest()})
+            "authority_key_sha256": hashlib.sha256(self.authority._key).hexdigest()}
+        if self._legacy is not None:
+            value["legacy_owner_sha256"] = self._legacy.sha256
+        return digest(value)
 
     def observations(self, policy, profile, now_utc, rubric_id, *, rubric_sha256=None,
                      domain=None, probe=None, rubric=None, selected_profiles=None, auxiliary=False, **_):
@@ -111,6 +125,11 @@ class CalibratedEvaluators:
         from .review_service_policy import approved_profiles
         required_profiles = approved_profiles(frozen, profile)
         selected_profiles = required_profiles if selected_profiles is None else selected_profiles
+        if self._legacy is not None:
+            if profile.calibration is not None or profile.readability is None or auxiliary or selected_profiles != required_profiles:
+                raise ExecutionError("calibration_legacy_scope_changed")
+            profile.readability.selected_profile(policy, profile)
+            return self._legacy.observations(policy, profile, now_utc, rubric_id, rubric_sha256=rubric_sha256)
         if auxiliary:
             expected = None if profile.disagreement is None else profile.disagreement.auxiliary_profile(policy, profile)
             if expected is None or selected_profiles != [expected]:
@@ -169,4 +188,67 @@ class CalibratedEvaluators:
                     positive_acceptance=metrics["metrics"]["positive_acceptance"],
                     meaning_preserving_flip=metrics["axes"]["meaning"]["flip_rate"])
             result.append(row)
+        return detached(result)
+
+    def readability_observation(self, policy, profile, now_utc, *, domain, probe):
+        """Distinct protected purpose over native current brief and held host probe."""
+        return self._readability_at(policy, profile, now_utc, domain=domain, probe=probe, configuration_utc=now_utc)
+
+    def readability_application_observation(self, policy, profile, now_utc, *, domain, probe, checked_utc):
+        """Current issuer qualification, with historical execution configuration.
+
+        The native application owner supplies its authenticated check time.
+        This reports no current remote service availability and grants no
+        authority to apply, dispatch, release, or consume source material.
+        """
+        if _utc(checked_utc) > _utc(now_utc):
+            return {"state": "unknown", "qualified": None, "independent": None,
+                "qualification_ref": None, "reason": "readability_qualification_unknown"}
+        return self._readability_at(policy, profile, now_utc, domain=domain, probe=probe, configuration_utc=checked_utc)
+
+    def _readability_at(self, policy, profile, now_utc, *, domain, probe, configuration_utc):
+        from .readability_reference import DOMAIN as READABILITY_DOMAIN
+        from .readability_reference import program_identity as readability_program
+        plan = profile.readability
+        result = {"state": "unknown", "qualified": None, "independent": None,
+            "qualification_ref": None, "reason": "readability_qualification_unknown"}
+        if plan is None:
+            return result
+        wanted = plan.selected_profile(policy, profile)
+        selected = plan.selection.document()
+        records = [self.authority.verify(row) for row in json.loads(self._records)
+            if row["binding"].get("qualification_purpose") == "readability"
+            and row["binding"]["config_ref"] == plan.config_ref]
+        if len(records) != 1:
+            return result
+        record = records[0]
+        if (selected["reference_assessment"]["program"] != readability_program()
+                or selected["scorer_source_sha256"] != hashlib.sha256(Path(__file__).with_name("qualification_calibration.py").read_bytes()).hexdigest()
+                or selected["classifier_source_sha256"] != hashlib.sha256(Path(__file__).with_name("readability_reference.py").read_bytes()).hexdigest()
+                or not domain or domain.get("state") != "observed" or domain.get("domain_ref") != READABILITY_DOMAIN
+                or not probe or probe.get("reasons") or probe.get("semantic_basis_id") != domain["semantic_basis_id"]
+                or probe.get("profile_sha256") != profile.sha256 or probe.get("registry_sha256") != self.sha256
+                or not _utc(probe["observed_utc"]) <= _utc(configuration_utc) < _utc(probe["expires_utc"])):
+            return result
+        role = profile.role(plan.config_ref)
+        expected = {"execution_profile_sha256": profile.sha256, "config_ref": plan.config_ref,
+            "controller_ref": role.controller_ref, "model_ref": role.model_ref, "prompt_version": role.prompt_version,
+            "model_revision": selected["model_revision"], "model_settings_sha256": digest(selected["model_settings"]),
+            "rubric_sha256": selected["rubric_sha256"], "suite_sha256": selected["suite_sha256"], "split_ref": selected["split_ref"],
+            "reference_assessment_ref": selected["reference_assessment"]["assessment_ref"],
+            "domain_descriptor_sha256": digest(selected["domain_descriptor"]), "active": True, "execution_kind": "model"}
+        actual = probe.get("configuration")
+        if (type(actual) is not dict or type(actual.get("active")) is not bool
+                or any(actual.get(key) != value for key, value in expected.items())
+                or record["suite_sha256"] != selected["suite_sha256"] or record["split_ref"] != selected["split_ref"]
+                or any(record["binding"].get(key) != value for key, value in
+                    {"model_revision": selected["model_revision"], "reference_assessment_ref": selected["reference_assessment"]["assessment_ref"],
+                     "domain_descriptor_sha256": digest(selected["domain_descriptor"])}.items())):
+            return result
+        current = self.authority.current(record, policy=policy, profile=profile, config_ref=plan.config_ref,
+            rubric=selected["rubric"], model_settings=selected["model_settings"], domain_ref=READABILITY_DOMAIN,
+            now_utc=now_utc, drift_ref=selected["drift_ref"], readability=True)
+        if current["state"] == "qualified" and record["independent"] is True and wanted["controller_ref"] == role.controller_ref:
+            result.update(state="qualified", qualified=True, independent=True,
+                qualification_ref="calibration-" + record["record_ref"], reason="current_readability_reference_purpose")
         return detached(result)

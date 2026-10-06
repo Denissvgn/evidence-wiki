@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
+import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +29,79 @@ from .research_session_contracts import CURRENT_V2, NEXT_V2, NEXT_V3, NEXT_V4, S
 from .review_context import ReviewContext, create_review_context
 from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, POLICY_V3, validate_document
 from .workflow_contracts import EXECUTION_OBSERVATION, JOB_V2, JOB_V3, JOB_V4, WorkflowContractError, validate_job
+
+_CURRENT_FACTS = ContextVar("held_native_current_facts", default=None)
+
+
+class _CurrentFacts:
+    """Actual owner observations live only in one effect-free proof pass."""
+
+    def __init__(self, session):
+        self.session = session
+        self.view, self.observed, self.packets, self.records = _observe_current(session)
+        self.thread = threading.get_ident()
+        self.invalidated = False
+
+    def require(self, session):
+        if (_CURRENT_FACTS.get() is not self or session is not self.session
+                or self.thread != threading.get_ident() or self.invalidated
+                or retained(session) != self.records):
+            refuse("CURRENT_OWNER_EPOCH_CHANGED")
+        session._check("resolution")
+        self.observed.finish()
+        controls = owner("_caller_context").capture(session.root)
+        if controls != self.observed.controls.get("result"):
+            refuse("CURRENT_OWNER_EPOCH_CHANGED")
+        usage = owner("_evidence_usage")
+        if usage.configured(self.observed.config):
+            with usage.current_view(session.root, self.observed.config) as live:
+                publication = owner("_publication_usage")
+                try:
+                    qualified = publication.qualify_capture(self.observed.capture.files,
+                        self.observed.config, live, purpose="qa-export", consumer="evidence-wiki")
+                except publication.EvidenceInvalid as error:
+                    reason = error.args[0] if len(error.args) == 1 else None
+                    if type(reason) is not str or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) is None:
+                        reason = "source_usage_unavailable"
+                    raise owner("strict_evidence").refusal(reason) from None
+                if (qualified.get("complete") is not True
+                        or any(packet["source_id"] not in qualified["selected"] for packet in self.packets)):
+                    refuse("CURRENT_OWNER_EPOCH_CHANGED")
+                live.revalidate(session.root, self.observed.config)
+
+
+@contextmanager
+def _current_facts(session):
+    """Create facts through the native owner, never from a supplied view/hash."""
+    if _CURRENT_FACTS.get() is not None:
+        refuse("CURRENT_OWNER_EPOCH_NESTED")
+    facts = _CurrentFacts(session)
+    token = _CURRENT_FACTS.set(facts)
+    try:
+        yield facts
+        facts.require(session)
+    finally:
+        facts.invalidated = True
+        _CURRENT_FACTS.reset(token)
+
+
+def invalidate_current_facts():
+    """No captured acceptance facts survive an external wait or journal effect."""
+    facts = _CURRENT_FACTS.get()
+    if facts is not None:
+        facts.invalidated = True
+    from .readability_execution import invalidate_input_dispatch
+    invalidate_input_dispatch()
+
+
+def current_qualifications(session):
+    """Refresh current qualifications inside a real epoch; otherwise read fully."""
+    facts = _CURRENT_FACTS.get()
+    if facts is None:
+        return current(session)["qualification"]
+    facts.require(session)
+    return _qualifications(session, facts.observed,
+        originals=facts.view["accounting"]["original_outcomes"], packets=facts.packets, records=facts.records)
 
 
 def child_id(identifier, label):
@@ -48,6 +124,9 @@ def retained(session):
 def append(session, kind, request_id, data):
     from .research_session import _owner
 
+    invalidate_current_facts()
+    from .readability_probes import invalidate as invalidate_readability_probe
+    invalidate_readability_probe()
     records = retained(session)
     saved = next((row for row in records if row["request_id"] == request_id), None)
     if saved is not None:
@@ -188,6 +267,10 @@ def current(session):
 
 
 def _current_owned(session):
+    return _observe_current(session)[0]
+
+
+def _observe_current(session):
     from .research_session import _current_observation
 
     records = retained(session)
@@ -234,7 +317,7 @@ def _current_owned(session):
     view["limitations"].extend(["Execution meters cover session work; setup/calibration, control-plane reads and host human activity are outside this scope.",
         "Native effects have no incremental provider charge; executor billing follows the frozen host pricing selection.",
         "Subprocess execution bounds do not by themselves establish malicious-worker OS isolation."])
-    return checked(CURRENT_V2, view)
+    return checked(CURRENT_V2, view), observed, packets, records
 
 
 def _pending(records, projection=None):
@@ -306,7 +389,14 @@ def policy_observation(session, view):
         for claim in claims:
             if getattr(session.execution.profile, "disagreement", None) is not None:
                 from .execution_continuations import claim_action
-                packets, _ = _sources(session)
+                facts = _CURRENT_FACTS.get()
+                if facts is None:
+                    packets, _ = _sources(session)
+                else:
+                    if view is not facts.view:
+                        refuse("CURRENT_OWNER_EPOCH_CHANGED")
+                    facts.require(session)
+                    packets = detached(facts.packets)
                 try:
                     action = claim_action(session, view, claim["id"], original["original_id"], packets)
                     independent = independent and action["operation"] == "return_gate"
@@ -437,6 +527,9 @@ def _owner_action(session, view, records, *, resuming=False):
         if pending["state"] == "succeeded":
             return {"operation": "admit", "attempt_id": pending["attempt_id"], "reason": "eligible_result_intake"}
         prior = _attempt_rows(records)[pending["attempt_id"]]
+        if prior.get("retry_purpose", prior.get("purpose")) == "readability":
+            from .readability_execution import next_action
+            return next_action(session, view, records)
         if session.execution.profile.review_services is not None and prior.get("service_slot_ref") is not None:
             from .review_service_routing import selected
             prepared = owner("strict_evidence").prepare_review(session.root, prior["claim_id"])
@@ -516,6 +609,11 @@ def _owner_action(session, view, records, *, resuming=False):
             examination = next_examination(session, view, records, original_ids=selected)
             if examination is not None:
                 return examination
+            if profile.readability is not None:
+                from .readability_execution import next_action
+                readability = next_action(session, view, records)
+                if readability is not None:
+                    return readability
             return {"operation": "release", "reason": decision["reason"], "decision": decision}
         if decision["terminal"] and getattr(profile, "disagreement", None) is None:
             return {"operation": "terminal", "reason": decision["reason"], "decision": decision, "decision_input": observation}
@@ -642,7 +740,7 @@ def _owner_action(session, view, records, *, resuming=False):
         examination = next_examination(session, view, records, original_ids=[original["original_id"]])
         if examination is not None:
             return examination
-        if any(questions[slug]["status"] != "answered" for slug in slugs):
+        if _resolution_targets(original, strict, allow_partial=frozen["source_rules"]["allow_partial"]):
             return {"operation": "resolve", "original_id": original["original_id"], "reason": "reviewed_question_resolution"}
         return _terminal_action(session, view, "abstained", "current_outcomes")
     return _terminal_action(session, view, "abstained", "current_outcomes")
@@ -670,6 +768,11 @@ def _action(session, view, records, *, resuming=False):
                 "original_id": pending_row["original_id"], "examination_request_id": retained_request,
                 "reason": "retained_examination_reconciliation"}
     action = _owner_action(session, view, records, resuming=resuming)
+    if session.execution.profile.readability is not None and action["operation"] == "terminal":
+        from .readability_execution import before_soft_terminal
+        action = before_soft_terminal(session, view, records, action)
+    if action.get("purpose") == "readability" or action.get("presentation_defects"):
+        return action
     if action.get("retry_purpose") == "plan" and action["operation"] != "reconcile":
         prior = _attempt_rows(records)[view["execution"]["pending"]["attempt_id"]]
         return {**action, "operation": "plan", "owner_action": detached(prior["owner_action"]),
@@ -713,6 +816,9 @@ def reserve(session, request_id, action, view):
     operation = "evaluate" if action["operation"] in {"evaluate", "adjudicate"} else "generate"
     session.context.require_grant("research_session.host_job." + operation)
     purpose = action.get("retry_purpose", action.get("purpose", operation))
+    if purpose == "readability":
+        from .readability_execution import reserve as reserve_readability
+        return reserve_readability(session, request_id, action, view)
     if purpose == "repair" and session.execution.profile.disagreement is not None and owner("_evidence_usage").configured(owner("_strict_evidence").configuration(session.root)):
         from .agent_execution import BoundedSubprocessExecutor
         from .protected_handoff import NativeInputHandoff
@@ -852,6 +958,13 @@ def reserve(session, request_id, action, view):
                 "claims": detached(worker_before["claims"]),
                 "defect_evidence": repair_evidence(session, target, target_prepared, claim_sources(target_prepared, packets)),
                 "instructions": "Preserve every claim identity, question association and peer claim exactly. Change only the targeted claim to address retained defects. Return no coverage changes. A bookkeeping-only change is not progress."}
+            if action.get("presentation_defects"):
+                from .readability_execution import repair_defects
+                actual = repair_defects(session, target)
+                if actual != action["presentation_defects"]:
+                    refuse("READABILITY_DEFECT_CHANGED")
+                input_document["repair_scope"]["defect_evidence"]["presentation_findings"] = [
+                    {"code": row["code"], "field": row["field"]} for row in actual]
         input_document["output_contract"] = {"proposal": "closed unaccepted proposal", "coverage_links":
             "omit or return an empty list; no coverage changes allowed" if purpose == "repair"
             and getattr(session.execution.profile, "disagreement", None) is not None else "optional declared facet/source links"}
@@ -1295,12 +1408,30 @@ def intake(session, observation, *, request_id):
         records = retained(session)
         if any(item["kind"] == "execution_observation" and item["data"]["observation"] == verified for item in records):
             return detached(verified)
-        if _attempt_rows(records).get(attempt.attempt_id, {}).get("attempt") != attempt.document():
+        from .readability_contracts import stored_attempt
+        actual_document = stored_attempt(attempt, session.execution.profile) if attempt.input_document.get("purpose") == "readability" else attempt.document()
+        if _attempt_rows(records).get(attempt.attempt_id, {}).get("attempt") != actual_document:
             refuse("EXECUTION_ATTEMPT_CHANGED")
         plan = session.execution.ledger(session, records)
         accounting.observe_attempt(plan, session.execution.accounting_observation(attempt, verified, authenticated=True), session.execution.verifier())
         append(session, "execution_observation", request_id, {"attempt_id": attempt.attempt_id, "observation": verified})
         return detached(verified)
+
+
+def _recover_dispatch_observation(session, attempt):
+    """Recover only the bundled owner's actual missing first purpose receipt."""
+    from .agent_execution import BoundedSubprocessExecutor
+    if type(session.execution.executor) is not BoundedSubprocessExecutor or attempt.input_document.get("purpose") != "readability":
+        return
+    records = retained(session)
+    if any(row["kind"] == "execution_observation" and row["data"]["attempt_id"] == attempt.attempt_id
+            and row["data"]["observation"]["sequence"] == 1 for row in records):
+        return
+    original = BoundedSubprocessExecutor._dispatch_observation(session.execution.executor, attempt)
+    if original is not None:
+        if original["sequence"] != 1:
+            refuse("EXECUTION_OBSERVATION_UNAUTHENTICATED")
+        intake(session, original, request_id=child_id(attempt.attempt_id, "retained_dispatch"))
 
 
 def _semantic_required(session, attempt):
@@ -1466,6 +1597,9 @@ def _apply_owned(session, attempt_id):
 
     records = retained(session)
     row = _attempt_rows(records)[attempt_id]
+    if row.get("retry_purpose", row.get("purpose")) == "readability":
+        from .readability_execution import apply as apply_readability
+        return apply_readability(session, attempt_id)
     attempt = session.execution.attempt(row["attempt"])
     observation = session.execution.authenticate(_latest_observation(records, attempt_id), attempt)
     application = next((item["data"] for item in records if item["kind"] == "execution_application"
@@ -1651,6 +1785,18 @@ def _counter_stop(session, *, question_slug=None, original_ids=None):
     return stop(session, question_slug=question_slug, original_ids=original_ids)
 
 
+def _resolution_targets(original, strict, *, allow_partial):
+    """Unsupported siblings stay unresolved under an explicit partial policy."""
+    result = []
+    for question in original["questions"]:
+        if question["status"] == "answered":
+            continue
+        rows = [row for row in strict.get("claims", []) if row["claim"]["question_slug"] == question["slug"]]
+        if allow_partial is not True or rows and all(row["accepted"] is True for row in rows):
+            result.append(question["slug"])
+    return result
+
+
 def _resolve(session, original_id):
     from ._facades._base import call_seam
     from .research_session import _load
@@ -1658,8 +1804,9 @@ def _resolve(session, original_id):
     observed = ResearchObservation(session.root, run_id=session.run_id)
     strict = observed.strict.get("result", {})
     original = next(row for row in current(session)["accounting"]["original_outcomes"] if row["original_id"] == original_id)
+    selected = _resolution_targets(original, strict, allow_partial=session.policy.to_dict()["source_rules"]["allow_partial"])
     for question in original["questions"]:
-        if question["status"] == "answered":
+        if question["slug"] not in selected:
             continue
         rows = [row for row in strict.get("claims", []) if row["claim"]["question_slug"] == question["slug"]]
         if not rows or any(not row["accepted"] for row in rows):
@@ -1693,6 +1840,38 @@ def _external(session, method, attempt, *, cleanup=False):
         timeout = max(0, remaining) if method == "invoke" else min(max(0, remaining), session.execution.profile.cleanup_timeout_seconds)
     if timeout <= 0:
         return None, "host_wait_expired"
+    if method == "invoke" and attempt.input_document.get("purpose") == "readability":
+        from .agent_execution import BoundedSubprocessExecutor
+        from .readability_execution import take_input_dispatch
+        from .readability_handoff import ReadabilityHandoffLease
+        if type(session.execution.executor) is not BoundedSubprocessExecutor or session.execution.profile.readability is None:
+            return None, "readability_handoff_unsupported"
+        admission = take_input_dispatch(session, attempt)
+        lease = ReadabilityHandoffLease(session, attempt, wait_seconds=timeout, started_monotonic=started_monotonic, admission=admission)
+        try:
+            lease.observe_configuration()
+            lease.ready_guard()
+            result, reason = bounded_host_call(session.execution.executor.invoke_readability_guarded, (attempt, lease),
+                min(timeout, max(0, lease._deadline - time.monotonic())))
+        except UsageError as error:
+            lease._record_failure(error)
+            result, reason = None, "host_observation_failed"
+        if reason is not None:
+            diagnostic = lease.failure_diagnostic()
+            if diagnostic:
+                with gate(session):
+                    append(session, "execution_readability_handoff_failed", child_id(attempt.attempt_id, "handoff_failure"),
+                        {"attempt_id": attempt.attempt_id, "job_sha256": attempt.job_sha256,
+                            "input_sha256": attempt.input_sha256, **diagnostic})
+        if lease.delivered_sha256 is not None:
+            with gate(session):
+                from .readability_contracts import check_persisted_record
+                handoff = lease.handoff_document()
+                check_persisted_record(session.execution.seal_record(session, "execution_input_handoff",
+                    child_id(attempt.attempt_id, "input_handoff"), handoff))
+                append(session, "execution_input_handoff", child_id(attempt.attempt_id, "input_handoff"),
+                    handoff)
+        return result, reason
     if method == "invoke" and attempt.input_document.get("purpose") == "repair" and session.execution.profile.disagreement is not None:
         from .agent_execution import BoundedSubprocessExecutor
         from .execution_handoff import NativeHandoffLease
@@ -1754,6 +1933,14 @@ def _close(session, step):
 def advance(session, *, request_id, expected_basis_id):
     request_id = validate_request_id(request_id)
     session.context.require_grant("research_session.intake_observation")
+    if session.execution.profile.readability is not None:
+        from .readability_execution import prefix_attempt
+        with gate(session):
+            existing_readability = prefix_attempt(session, request_id, expected_basis_id)
+        if existing_readability is not None:
+            return _complete_advance(session, request_id, expected_basis_id,
+                {"operation": "reconcile", "attempt_id": existing_readability.attempt_id,
+                    "reason": "retained_attempt_reconciliation"}, existing_readability)
     if getattr(getattr(session.execution, "profile", None), "calibration", None) is not None:
         needs_probe = True
         with gate(session):
@@ -1781,6 +1968,17 @@ def advance(session, *, request_id, expected_basis_id):
             from .calibration_probes import refresh
             refresh(session, request_id)
     from .review_packet_execution import automatic
+    if session.execution.profile.readability is not None:
+        with gate(session):
+            existing = retained(session)
+            initialized = any(row["kind"] == "execution_begin" for row in existing)
+            already = any(row["kind"] == "execution_step" and row["data"]["step"]["request_id"] == request_id for row in existing)
+            stopped = initialized and _document(session)["state"]["current"] in owner("run_controller").TERMINAL_STATES
+            candidate = None if not initialized or already or stopped else _action(session, current(session), existing)
+        if candidate is not None and candidate.get("purpose") == "readability":
+            from .readability_execution import prepare_step
+            attempt, action = prepare_step(session, request_id, expected_basis_id)
+            return _complete_advance(session, request_id, expected_basis_id, action, attempt)
     complete_delivery = automatic(session, request_id=request_id, expected_basis_id=expected_basis_id)
     attempt, action, replay = None, None, None
     with gate(session):
@@ -1837,6 +2035,9 @@ def advance(session, *, request_id, expected_basis_id):
             if row["kind"] == "execution_application_failed":
                 action = _terminal_action(session, view, "abstained", "unsupported_claim")
         action = _action(session, view, records, resuming=intent is not None) if action is None else action
+        if session.execution.profile.readability is not None and action["operation"] == "terminal":
+            from .readability_execution import before_soft_terminal
+            action = before_soft_terminal(session, view, records, action)
         if (intent is not None and intent["action"]["operation"] == "admit"
                 and action["operation"] == "terminal" and action["reason"] == "usage_unknown"):
             observed_native = {row["data"]["observation"]["attempt_id"] for row in records
@@ -1884,13 +2085,20 @@ def advance(session, *, request_id, expected_basis_id):
                     code = "execution_reservation_failed"
                 details = getattr(error, "details", {})
                 field = details.get("field") if isinstance(details, dict) else None
+                from .readability_contracts import reservation_diagnostic
                 append(session, "execution_reservation_failed", child_id(request_id, "reservation_failure"),
                     {"operation": action["operation"], "error_code": code[:128],
-                        "field": field[:128] if isinstance(field, str) else None})
+                        "field": field[:128] if isinstance(field, str) else None,
+                        **reservation_diagnostic(error)})
                 reason = "model_budget_exhausted" if getattr(error, "error_code", "").endswith("BUDGET_EXHAUSTED") else "executor_unavailable"
                 action = _terminal_action(session, view, "stop_budget" if reason == "model_budget_exhausted" else "blocked_external", reason)
         elif action["operation"] == "reconcile" and action.get("reason") != "retry_backoff":
             attempt = session.execution.attempt(_attempt_rows(records)[action["attempt_id"]]["attempt"])
+    return _complete_advance(session, request_id, expected_basis_id, action, attempt, intent)
+
+
+def _complete_advance(session, request_id, expected_basis_id, action, attempt, intent=None):
+    """Share unchanged native dispatch/settlement/step accounting across routes."""
     records = retained(session)
     native_observed = {row["data"]["observation"]["attempt_id"] for row in records if row["kind"] == "execution_native_observation"}
     if any(row["kind"] == "execution_native" and row["data"]["reservation"]["attempt_id"] not in native_observed for row in records):
@@ -1914,6 +2122,8 @@ def advance(session, *, request_id, expected_basis_id):
                         {"attempt_id": attempt.attempt_id, "method": method, "reason": reason})
                 action = _terminal_action(session, current(session), "blocked_external", "executor_unavailable")
             else:
+                if method == "poll":
+                    _recover_dispatch_observation(session, attempt)
                 intake(session, observation, request_id=child_id(request_id, "observation"))
         elif operation == "calculate":
             from .calculation_agent import propose

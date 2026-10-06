@@ -46,6 +46,7 @@ PROFILE_V7 = "research-execution-profile/v7"
 PROFILE_V8 = "research-execution-profile/v8"
 PROFILE_V9 = "research-execution-profile/v9"
 PROFILE_V10 = "research-execution-profile/v10"
+PROFILE_V11 = "research-execution-profile/v11"
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -263,6 +264,7 @@ class ExecutionProfile:
     review_services: ReviewServicePlan | None = None
     service_repair: object | None = None
     input_handoff: object | None = None
+    readability: object | None = None
 
     def __post_init__(self) -> None:
         if self.input_handoff is not None:
@@ -319,7 +321,8 @@ class ExecutionProfile:
 
             if (type(self.calibration) is not CalibrationPlan or self.role_scopes is None
                     or {row.config_ref for row in self.calibration.selections}
-                    != {role.config_ref for role in roles if role.role == "evaluator"}):
+                    != {role.config_ref for role in roles if role.role == "evaluator"
+                        and role.config_ref != getattr(self.readability, "config_ref", None)}):
                 raise ExecutionError("calibration_profile_incomplete")
         if self.disagreement is not None:
             from .disagreement_configuration import DisagreementPlan
@@ -343,6 +346,11 @@ class ExecutionProfile:
             self.review_services.check_profile(self)
         elif self.service_repair is not None:
             raise ExecutionError("service_repair_plan_required")
+        if self.readability is not None:
+            from .readability_plan import ReadabilityPlan
+            if type(self.readability) is not ReadabilityPlan:
+                raise ExecutionError("readability_plan_invalid")
+            self.readability.check_profile(self)
 
     def document(self) -> dict[str, Any]:
         result = {
@@ -372,6 +380,8 @@ class ExecutionProfile:
             result.update(schema_version=PROFILE_V9, service_repair=self.service_repair.document())
         if self.input_handoff is not None:
             result.update(schema_version=PROFILE_V10, input_handoff=self.input_handoff.document())
+        if self.readability is not None:
+            result.update(schema_version=PROFILE_V11, readability=self.readability.document())
         return result
 
     @property
@@ -399,6 +409,28 @@ class ExecutionProfile:
         if job["packet_sha256"] != _digest(input_document):
             raise ExecutionError("execution_context_mismatch")
         packet = input_document.get("packet")
+        if self.readability is not None and config_ref == self.readability.config_ref and input_document.get("purpose") not in {"readability", "readability_calibration"}:
+            raise ExecutionError("execution_context_mismatch")
+        if job.get("payload", {}).get("qualification_purpose") == "readability" and input_document.get("purpose") not in {"readability", "readability_calibration"}:
+            raise ExecutionError("execution_context_mismatch")
+        if input_document.get("purpose") in {"readability", "readability_calibration"}:
+            from .readability_context import input_document as readability_input
+            if (self.readability is None or config_ref != self.readability.config_ref or type(packet) is not dict
+                    or packet.get("context_id") != job["context_id"] or packet.get("task_role") != job["task_role"]
+                    or job["task_role"] != "critic" or set(input_document) != {"purpose", "packet"}):
+                raise ExecutionError("execution_context_mismatch")
+            if job["payload"].get("qualification_purpose") != "readability":
+                raise ExecutionError("execution_context_mismatch")
+            if input_document["purpose"] == "readability":
+                readability_input(packet, max_input_bytes=self.readability.max_input_bytes)
+            else:
+                from .readability_reference import reference_document
+                reference_document(input_document)
+                case_id = job["payload"].get("calibration_case_id")
+                matches = [row for row in self.readability.selection.document()["reference_assessment"]["results"]
+                    if row["case_id"] == case_id and row["input_sha256"] == "sha256:" + _digest(input_document)]
+                if len(matches) != 1:
+                    raise ExecutionError("execution_context_mismatch")
         if type(packet) is dict and packet.get("schema_version") in {"research-review-context/v1", "research-review-context/v2"}:
             if packet.get("context_id") != job["context_id"] or packet.get("task_role") != job["task_role"]:
                 raise ExecutionError("execution_context_mismatch")
@@ -527,6 +559,7 @@ class _Running:
     handoff_complete: Any = field(default_factory=threading.Event)
     handoff_decided: Any = field(default_factory=threading.Event)
     handoff_deadline: float | None = None
+    dispatch_observation: bytes | None = None
 
 
 def _usage(value: Any) -> dict[str, Any]:
@@ -649,6 +682,8 @@ class BoundedSubprocessExecutor:
             raise ExecutionError("execution_output_limit_invalid")
         self._max_output = max_output_bytes
         self._attempts: dict[str, _Running] = {}
+        self._dispatch_retained_bytes = 0
+        self._dispatch_retention_lock = threading.Lock()
         self._lock = threading.RLock()
 
     def _check(self, attempt: ExecutionAttempt) -> ExecutionRole:
@@ -674,6 +709,8 @@ class BoundedSubprocessExecutor:
         return value
 
     def invoke(self, attempt: ExecutionAttempt) -> dict[str, Any]:
+        if self.profile.readability is not None and attempt.input_document.get("purpose") == "readability":
+            raise ExecutionError("readability_guarded_handoff_required")
         if self.profile.input_handoff is not None and attempt.input_document.get("purpose") == "repair":
             raise ExecutionError("protected_handoff_custody_required")
         return self._invoke(attempt)
@@ -682,6 +719,16 @@ class BoundedSubprocessExecutor:
         from .execution_handoff import NativeHandoffLease
         if type(self) is not BoundedSubprocessExecutor or type(lease) is not NativeHandoffLease or lease.attempt.document() != attempt.document():
             raise ExecutionError("protected_handoff_adapter_unsupported")
+        return self._invoke_owned_lease(attempt, lease)
+
+    def invoke_readability_guarded(self, attempt: ExecutionAttempt, lease) -> dict[str, Any]:
+        from .readability_handoff import ReadabilityHandoffLease
+        if type(self) is not BoundedSubprocessExecutor or type(lease) is not ReadabilityHandoffLease or lease.attempt.document() != attempt.document():
+            raise ExecutionError("readability_handoff_adapter_unsupported")
+        lease._bind_executor(self)
+        return self._invoke_owned_lease(attempt, lease)
+
+    def _invoke_owned_lease(self, attempt, lease):
         payload = _json(attempt.worker_document())
         try:
             with lease.custody(payload):
@@ -701,7 +748,11 @@ class BoundedSubprocessExecutor:
             raise
 
     def _invoke(self, attempt: ExecutionAttempt, lease=None) -> dict[str, Any]:
+        from .readability_handoff import ReadabilityHandoffLease
+        readability = type(lease) is ReadabilityHandoffLease
         with self._lock:
+            if readability:
+                lease._before_start(self)
             existing = self._stored(attempt)
             if existing is not None:
                 return self._observe(existing)
@@ -733,6 +784,8 @@ class BoundedSubprocessExecutor:
             if lease is None:
                 threading.Thread(target=self._write, args=(running, payload), daemon=True).start()
             threading.Thread(target=self._watch, args=(running,), daemon=True).start()
+            if readability:
+                lease._started(self, running)
         if lease is not None:
             try:
                 self._write_guarded(running, payload, lease)
@@ -918,8 +971,28 @@ class BoundedSubprocessExecutor:
                                    "model_calls": None, "tool_calls": 1, "tokens": None, "cost": None},
                 "final_accounting": False, "cancellation_confirmed": False,
             }
-            return self._envelope(running.attempt, sequence=running.sequence, started_utc=running.started_utc,
-                                  details=details)
+            value = self._envelope(running.attempt, sequence=running.sequence, started_utc=running.started_utc,
+                                   details=details)
+            if running.sequence == 1:
+                encoded = _json(value)
+                with self._dispatch_retention_lock:
+                    if self._dispatch_retained_bytes + len(encoded) <= 8 * 1024 * 1024:
+                        running.dispatch_observation = encoded
+                        self._dispatch_retained_bytes += len(encoded)
+            return value
+
+    def _dispatch_observation(self, attempt):
+        """Read exact retained first receipt, never synthesize or renew dispatch.
+
+        Retention is bounded to eight MiB per live executor. Missing history,
+        retention exhaustion and host restart remain unavailable observations.
+        """
+        with self._lock:
+            running = self._stored(attempt)
+            if running is None:
+                return None
+            with running.lock:
+                return None if running.dispatch_observation is None else json.loads(running.dispatch_observation)
 
     def poll(self, attempt: ExecutionAttempt) -> dict[str, Any]:
         with self._lock:

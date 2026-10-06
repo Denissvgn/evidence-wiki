@@ -15,7 +15,7 @@ def verify_controller(session, attempt):
     selected = session.execution.profile.role(attempt.config_ref)
     if selected.role != "evaluator":
         fail("counter_evaluator_required")
-    qualification = native.current(session)["qualification"]
+    qualification = native.current_qualifications(session)
     profiles = [row for row in qualification["profiles"] if row.get("profile_ref") == attempt.config_ref]
     if qualification["state"] != "qualified" or len(profiles) != 1 or profiles[0].get("qualified") is not True or profiles[0].get("independent") is not True:
         fail("counter_current_role_qualification_unknown")

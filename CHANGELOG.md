@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Current structured research briefs and deterministic literal Markdown preserve every original outcome, reviewed finding/inference, evidence, limitation and unresolved question. Optional protected readability inspection reports only bounded field issues and uses existing scoped repair and fresh independent reviews.
+
 - Add bounded read-only per-original resolution with current native publication,
   authenticated mandatory reviews and exact frozen policy checks. Partial derived
   credit preserves original accounting, private review commitments stay withheld,

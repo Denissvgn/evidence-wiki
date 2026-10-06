@@ -16,9 +16,10 @@ def refuse(reason):
         details={"reason": reason}, recoverable=False)
 
 
-def _eligible_shape():
-    from .pack_discovery import owner
-    native = owner("_strict_contract").schema_documents()
+def _eligible_shape(native=None):
+    if native is None:
+        from .pack_discovery import owner
+        native = owner("_strict_contract").schema_documents()
     question = deepcopy(native["evidence-strict-publication/v1"]["properties"]["questions"]["items"])
     claims = []
     for version in ("evidence-strict-publication/v1", "evidence-strict-publication/v2"):
@@ -30,7 +31,7 @@ def _eligible_shape():
     return question
 
 
-def schema_document():
+def _schema_document(native=None):
     def obj(**fields):
         return {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
     def text(size=256):
@@ -48,7 +49,7 @@ def schema_document():
             actual_target_qualification={"const": "current"},
             producer_and_context={"const": "current_owned_proof"})))
     original = obj(original_id=text(), original_text=nullable(text(65536)), outcome=verdict,
-        questions=array(question), eligible_questions=array(_eligible_shape()),
+        questions=array(question), eligible_questions=array(_eligible_shape(native)),
         missing_question_ids=array(text()), reasons=array(text(4096), 512))
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", **obj(
         schema_version={"const": RESOLUTION}, run_id=text(), binding_id=hashed,
@@ -60,6 +61,10 @@ def schema_document():
         resolution_owner={"const": "current_strict_publication_and_authenticated_run_policy"},
         external_action_authorized={"const": False}, authorized={"const": False},
         limitations=array(text(4096), 32))}
+
+
+def schema_document():
+    return _schema_document()
 
 
 def checked(value):
