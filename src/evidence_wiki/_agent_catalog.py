@@ -52,7 +52,7 @@ def resource_paths() -> dict[str, str]:
         paths[f"script/{stem}/v1"] = f"workspace-template/scripts/{stem}.py"
     for name in ("strict-policy", "init-profile", "pack"):
         paths[f"example/{name}/v1"] = f"workspace-template/docs/agent-resources/{name}.json"
-    for name in ("sample-benchmark", "sample-portfolio", "sample-filing"):
+    for name in ("sample-benchmark", "sample-portfolio", "sample-filing", "unattended-host"):
         paths[f"example/{name}/v1"] = f"workspace-template/docs/agent-resources/{name}.json"
     paths.update({
         "framework/compatibility/v1": "workspace-template/docs/frameworks/compatibility.json",

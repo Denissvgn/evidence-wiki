@@ -123,11 +123,11 @@ def exports() -> dict[str, bytes]:
     }}
     initializer.validate_profile(profile["workspace_init"])
     output[paths["example/init-profile/v1"]] = encoded(profile)
-    for name, directory in [("pack", ROOT / "domain-packs/general-science"), *(
+    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), *(
             (name, ROOT / "workspace-template/docs/computation-examples" / name)
             for name in ("sample-benchmark", "sample-portfolio", "sample-filing"))]:
         files = {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")
-                 for p in sorted(directory.rglob("*")) if p.is_file()}
+                 for p in sorted(directory.rglob("*")) if p.is_file() and '__pycache__' not in p.parts and p.suffix!='.pyc'}
         output[paths[f"example/{name}/v1"]] = encoded({"files": files})
     metadata = yaml.safe_load((ROOT / "workspace-template/workspace-system.yml").read_text(encoding="utf-8"))["workspace_system"]
     entries = {}

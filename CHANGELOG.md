@@ -4,6 +4,12 @@
 
 ### Added
 
+- Publish an installed unattended Python host example using public setup, source
+  admission, generation, independent review, bounded repair/abstention, current
+  export and refresh APIs. Fixture mechanics and authority stay separate from
+  explicitly selected live services; missing capabilities return terminal data
+  without prompts, credential provisioning or production qualification claims.
+
 - Expose the autonomous research journey through startup-scoped MCP tools sharing
   public Python/CLI dispatch, explicit native runtime and machine policy. Setup,
   intake, bounded research, current outputs, refresh and pending recovery need no

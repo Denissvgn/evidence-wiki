@@ -2900,3 +2900,18 @@ clock. Reconnect preserves native original deadlines and consumed allowances.
 See [scoped autonomous research tools](../workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools)
 for startup, schemas, no-elicitation behavior and explicit capability limits.
 The legacy workspace MCP protocol is unchanged.
+
+
+Version `54` adds the installed `example/unattended-host/v1` resource bundle.
+Retrieve it through `Onboarding.resource` and save its public host application in
+a caller-selected new directory. The [unattended Python example](../examples/unattended-host/README.md)
+uses public APIs for setup, exact source admission, independent review, native
+bounded repair/abstention, current structured export and explicit refresh.
+Deterministic mechanics use isolated fixture authority and visibly simulated
+model accounting; fixture grades cannot authenticate existing production policy.
+Live mode selects an owner-private runtime or trusted public service factory,
+refuses simulated/offline model identities and preserves terminal native outcomes
+without semantic prompts or credential setup. A separate bounded refresh allowance
+keeps the first terminal result distinct from the new run; original budgets remain
+native owner facts. No new executor, qualification or scientific acceptance owner
+is introduced by the application.
