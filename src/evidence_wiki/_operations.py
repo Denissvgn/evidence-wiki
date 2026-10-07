@@ -7,10 +7,15 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "32"
+OPERATION_MATRIX_VERSION = "33"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("research.refresh_schedule_schemas", None, "none; detached host schedule schemas", "parent workspace lifetime", "none"),
+    ("research.schedule_refresh", None, "private frozen host schedule registration", "native control workspace gate, authenticated separate schedule slot", "none"),
+    ("research.schedule_refresh.current", None, "none; current host queue and authenticated event cursor", "read-only native private slot and current authority", "none"),
+    ("research.schedule_refresh.poll", None, "bounded notice ingestion, coalescing and queued-job cancellation", "native private slot CAS; current native observation", "none"),
+    ("research.schedule_refresh.advance", None, "same queue reconciliation plus one reserved native refresh or protected recovery", "independent dispatch lease; workspace gate released before work", "configured native refresh services only"),
     ("research.refresh_schemas", None, "none; detached terminal report schema", "parent workspace lifetime", "none"),
     ("research.refresh", None, "bounded new run, retained refresh preimages, question lifecycle and superseding decisions", "native session, mutation and usage owners; terminal parent preserved", "configured scoped planner/research/evaluator and approved acquisition hosts"),
     ("research.session.refresh", None, "same bounded superseding workflow as research.refresh", "authenticated terminal parent, immutable new-run intent and canonical effect owners", "configured host services only"),

@@ -4,6 +4,12 @@
 
 ### Added
 
+- Expose finite host scheduled refresh requests with stored policy, stable notice
+  identities and signed event cursors. Current native checks detect missing hints;
+  queued changes coalesce and obsolete jobs cancel. Explicit host advancement
+  reserves work before dispatch and reconciles retained runs without budget reset
+  or background daemon creation.
+
 - Refresh decisions through a bounded authenticated planner and a new run linked
   to retained terminal history. Permitted updates use existing acquisition owners;
   unique material invalidation forces fresh drafts and mandatory reviews. Current

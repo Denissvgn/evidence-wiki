@@ -81,6 +81,25 @@ class ResearchNamespace(Namespace):
         with self.session(policy, run_id=run_id, execution=execution) as selected:
             return selected.reconcile_recovery(request_id=request_id, expected_basis_id=expected_basis_id)
 
+    def refresh_schedule_schemas(self):
+        """Return detached host scheduling shapes without registering work."""
+        self._workspace._check_open()
+        from ..refresh_schedule_contracts import schemas
+        return schemas()
+
+    def schedule_refresh(self, policy, *, schedule_id, previous_run_id, execution, planner_config_ref,
+                         interval_seconds, expires_at, max_runs=1, max_steps=64, max_notices=64, source_updates=()):
+        """Register or reopen an explicit bounded external host schedule."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import refresh_scheduling
+            return refresh_scheduling
+        return call_seam(load, "refresh_scheduling", "register", self._root, policy,
+            workspace=self._workspace, schedule_id=schedule_id, previous_run_id=previous_run_id,
+            execution=execution, planner_config_ref=planner_config_ref, interval_seconds=interval_seconds,
+            expires_at=expires_at, max_runs=max_runs, max_steps=max_steps, max_notices=max_notices,
+            source_updates=source_updates)
+
     def refresh_schemas(self):
         """Return the detached terminal refresh report schema."""
         self._workspace._check_open()

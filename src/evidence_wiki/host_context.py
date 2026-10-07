@@ -598,6 +598,8 @@ def checked_operation(stem: str, seam: str, args: tuple[Any, ...], kwargs: Mappi
         write = effect == "review"
     elif stem == "mutation_operations" and seam in {"revision", "prepare_request", "submit", "inspect", "reconcile"}:
         write = seam in {"submit", "reconcile"}
+    elif stem == "refresh_scheduling" and seam in {"register", "current", "poll", "advance"}:
+        write = seam != "current"
     elif stem == "research_session" and seam in {"current", "next_work", "session", "advance", "run_until_terminal", "run_cycle", "refresh", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "examine_coverage", "examine_counterevidence", "calculate", "propose_calculation", "assemble_review_packet", "recovery_status", "review_services", "repair_progress", "resolution", "brief", "prepare_delivery", "deliver", "delivery_status", "reconcile_delivery", "reconcile_recovery", "host_job",
                                                "pending", "reconcile_pending", "cancel_pending", "intake_observation", "report", "prepare_acquisition"}:
         write = seam in {"refresh", "deliver", "reconcile_delivery", "advance", "run_until_terminal", "run_cycle", "acquire", "acquire_evidence", "choose_acquisition", "run_acquisition", "examine_coverage", "examine_counterevidence", "calculate", "propose_calculation", "assemble_review_packet", "reconcile_recovery", "host_job", "reconcile_pending", "cancel_pending", "intake_observation"}

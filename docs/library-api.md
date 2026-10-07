@@ -196,6 +196,10 @@ Version `49` adds bounded autonomous `workspace.research.refresh`,
 `32`. A fresh run supersedes an authenticated terminal parent without reusing
 its acceptance or resetting its accounting.
 
+Version `50` adds `research.schedule_refresh`, detached scheduling schemas and
+explicit host schedule current/poll/advance operations, with matrix `33`.
+No schedule registration starts a background daemon.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -2633,3 +2637,84 @@ completion. Partial or uncertain publication never grants review acceptance or
 justifies redispatch; it can leave the refresh blocked. The report grants no
 external action authority. `refresh_schemas()` returns its detached schema without
 performing refresh work.
+
+
+### External host scheduled refresh
+
+```python
+from datetime import datetime, timedelta, timezone
+
+schedule = workspace.research.schedule_refresh(
+    policy,
+    schedule_id="weekly-check",
+    previous_run_id="original-decision",
+    execution=execution,
+    planner_config_ref="change-planner",
+    interval_seconds=3600,
+    expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+    max_runs=2,
+    max_steps=64,
+    max_notices=64,
+    source_updates=(),
+)
+status = schedule.poll(request_id="poll-1", notices=())
+result = schedule.advance(request_id="dispatch-1")
+page = schedule.current(cursor=status["cursor"], max_events=16)
+```
+
+An external host supplies the wake-up mechanism and stable command IDs. Registration
+stores the exact `RunPolicy`, approved acquisitions, execution/qualification/signer/
+observer identities, current host selection, owner generation and root/control
+identities. It authenticates the original terminal parent and signed closure.
+Reopening the same registration retains its counters, frozen policy and deadline;
+changed configuration refuses. The owning Workspace lifetime applies to every
+handle call. No daemon, timer, notification sink or provider is discovered or started.
+
+`refresh_schedule_schemas()` returns the detached plan, notice, status and cursor
+schemas. A notice contains `schema_version="research-refresh-notice/v1"`,
+`notice_id`, `source_id`, positive per-source `sequence`, and nullable `revision_id`.
+The revision is an inert hint, not an attestation. A batch contains at most 32
+notices. IDs deduplicate exact payloads; conflicting duplicates refuse. Older
+source sequence numbers are retained as ignored observations. Current permitted
+source packets determine which hints can affect the queue. Notices cannot supply
+URLs, paths, acquisition metadata, policies, new controllers or grants.
+
+Polling also examines native material identity, current native ineligibility and
+the stored due time. Missing or out-of-order delivery cannot make stale evidence
+eligible. Multiple changes coalesce into one queued native refresh; an obsolete
+queued job is cancelled before replacement. Already reserved or uncertain work
+retains its identity and allocation. `current()` is an effect-free queue read;
+`poll()` reconciles queue data without dispatching, and `advance()` performs that
+reconciliation and at most one new reserved refresh allocation. Duplicate advancing
+command IDs cannot invoke another run. Historical cursor pages describe control
+observations rather than current evidence eligibility.
+
+Advance requires `refresh_scheduling.advance` and the existing native refresh
+and current-brief grants. Registration, queue polling and reads require respectively
+`refresh_scheduling.register`, `refresh_scheduling.poll` and
+`refresh_scheduling.current`, alongside the existing scoped session/native read
+requirements. Current policy compatibility, qualified evaluator services, terminal
+grants and immutable host/execution selection remain required. Losing native
+scope blocks dispatch and cancels queued work; changing the bound host identity
+refuses the handle. Scheduler status grants no authority and exports no protected
+evidence or retained acquisition receipts. `recorded_usage` distinguishes known
+scheduled-dispatch totals from accounting completeness.
+
+The private schedule namespace uses native descriptor custody and atomic authenticated
+state comparison. Its dispatch lease stays separate from the workspace gate;
+research and worker calls occur after that gate is released. A lost host return
+can reconcile only the same existing canonical refresh. If dispatch was reserved
+but no native run is retained, the schedule exhausts with unknown accounting and
+never redispatches or creates a replacement run. Missing/corrupt schedule retention
+is a refusal, not a new ledger. An external host should retain the returned signed
+cursor; forged, cross-binding or unavailable cursor prefixes refuse.
+
+A registration bounds new work to at most eight explicitly allocated runs, each
+under the stored policy and at most 64 cycle steps. It retains at most 64 distinct
+notices, 128 distinct control commands and 256 events; pages contain at most 32
+events. Run/notice/command/event exhaustion is terminal. The expiry must initially
+be in the next 30 days and stops new allocations. Already reserved work can only
+be reconciled within its original native deadline and budget. Unknown accounting
+in the parent refresh ancestry or a dispatch blocks further work. A later fresh
+allocation is an explicit host decision; delivery cannot renew old budgets or
+acceptance.

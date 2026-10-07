@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "49"
+LIBRARY_API_VERSION = "50"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -94,6 +94,11 @@ LIBRARY_API_SURFACE = (
     "research.requirements.current",
     "research.changes",
     "research.impact",
+    "research.schedule_refresh",
+    "research.refresh_schedule_schemas",
+    "research.schedule_refresh.current",
+    "research.schedule_refresh.poll",
+    "research.schedule_refresh.advance",
     "research.refresh",
     "research.refresh_schemas",
     "research.session.refresh",
@@ -535,6 +540,13 @@ def contract() -> dict:
             "unknown": "a linked file without completed owner checks remains uncertain",
             "limits": {"artifact_bytes": 1048576, "destinations": 16, "live_writers": 16},
             "remote_delivery": "unsupported"},
+        "research_refresh_schedule": {
+            "schema": "research-refresh-schedule-status/v1", "factory": "research.schedule_refresh",
+            "daemon": "none; explicit external host poll/advance only",
+            "policy": "stored immutable RunPolicy, profile, authority and owner generation",
+            "notices": "inert hints; deduplicated IDs, per-source sequence ordering, current source permissions",
+            "reconciliation": "same native refresh identity only; unknown dispatch never starts another run",
+            "limits": {"runs": 8, "notices": 64, "commands": 128, "events": 256, "page": 32}},
         "research_refresh": {
             "schema": "research-refresh-result/v1", "method": "research.refresh",
             "session_method": "research.session.refresh", "planner": "scoped planner selects exact native refresh preparation",
