@@ -8,7 +8,7 @@ import pytest
 
 from evidence_wiki import Workspace
 from evidence_wiki import execution_session as native
-from evidence_wiki.errors import UsageError
+from evidence_wiki.errors import EvidenceWikiError, UsageError
 from tests.test_execution_session import fixture
 
 
@@ -128,6 +128,56 @@ def test_current_native_brief_is_published_once_before_terminal(tmp_path, monkey
             assert {key: value for key, value in replay.items() if key != "historical"} == {
                 key: value for key, value in terminal.items() if key != "historical"}
             assert native.retained(session) == records and output.read_bytes() == raw
+            if interruption is None:
+                traced = workspace.research.history(run_id=session.run_id, execution=execution)
+                assert traced["complete"] and traced["history_only"] and traced["effects_executed"] == 0
+                assert all(row["current_eligibility"] == "not_evaluated" and not row["evidence_accepted"] for row in traced["records"])
+                assert {row["kind"] for row in traced["records"] if row["availability"] == "available"} == {
+                    "source", "claim", "review", "brief"}, traced
+                historic_brief = next(row["payload"] for row in traced["records"] if row["kind"] == "brief")
+                assert historic_brief["markdown"].encode() == raw
+                assert native.retained(session) == records and output.read_bytes() == raw
+                from evidence_wiki.pack_discovery import owner
+                config = owner("_strict_evidence").configuration(root)
+                source_row = next(row["payload"] for row in traced["records"] if row["kind"] == "source")
+                normalized = root / owner("_usage_gate").normalized_relative(config, source_row["source_id"])
+                claims = root / owner("_strict_evidence").resolve_policy(root, config)["claims_path"]
+                prior_source, prior_claims = normalized.read_bytes(), claims.read_bytes()
+                normalized.write_bytes(prior_source + b"\nA later unapproved local edit.\n")
+                changed = json.loads(prior_claims)
+                changed["claims"][0]["text"] += " A later claim edit."
+                claims.write_text(json.dumps(changed))
+                edited_history = workspace.research.history(run_id=session.run_id, execution=execution)
+                assert edited_history == traced
+                try:
+                    current_brief = session.brief()
+                except EvidenceWikiError:
+                    current_brief = None
+                assert current_brief is None or current_brief["verdict"] != "accept"
+                normalized.write_bytes(prior_source)
+                claims.write_bytes(prior_claims)
+                assert workspace.research.history(run_id=session.run_id, execution=execution) == traced
+                page = workspace.research.history(run_id=session.run_id, execution=execution, max_records=1)
+                assert not page["complete"] and page["next_index"] == 1
+                assert page["returned_records"] == 1 and page["truncated"]
+                with pytest.raises(UsageError) as stale_cursor:
+                    workspace.research.history(run_id=session.run_id, execution=execution,
+                        after_index=page["next_index"], expected_history_basis_id="sha256:" + "0" * 64)
+                assert stale_cursor.value.details["reason"] == "history_basis_changed"
+                assert workspace.research.history(run_id=session.run_id, execution=execution,
+                    after_index=page["next_index"], expected_history_basis_id=page["history_basis_id"])["complete"]
+                usage = owner("_evidence_usage")
+                from tests._execution_fixture import authenticate
+                with usage.current_view(root, config) as live:
+                    checkpoint = live.state.checkpoint
+                usage.transact(root, config, authenticate({"schema_version": "evidence-usage-command/v1",
+                    "state_id": usage.selection(config), "workspace_binding": usage.workspace_binding(root),
+                    "request_id": "withdraw-history-source", "expected_checkpoint": checkpoint, "action": "revoke",
+                    "body": {"source_id": source_row["source_id"], "source_revision": source_row["source_revision"],
+                        "scope": "revision", "reason": "owner-withdrawal"}}, "owner", "revocation"))
+                denied_history = workspace.research.history(run_id=session.run_id, execution=execution)
+                assert all(row["availability"] == "denied" and row["payload"] is None for row in denied_history["records"])
+                assert native.retained(session) == records and output.read_bytes() == raw
             if interruption == "lost_usage":
                 from evidence_wiki.mutation_contracts import canonical
                 from evidence_wiki.pack_discovery import owner

@@ -229,11 +229,12 @@ class MutationStore:
                 _private(current, directory=stat.S_ISDIR(held.st_mode))
 
     def _directory(self, parent: int, name: str) -> int:
-        try:
-            os.mkdir(name, 0o700, dir_fd=parent)
-            os.fsync(parent)
-        except FileExistsError:
-            pass
+        if not self._historical_readonly:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent)
+                os.fsync(parent)
+            except FileExistsError:
+                pass
         descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
         self._fds.append(descriptor)
         _private(os.fstat(descriptor), directory=True)
@@ -241,11 +242,14 @@ class MutationStore:
         return descriptor
 
     def _lock_file(self, directory: int, name: str) -> int:
-        try:
-            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-            os.fsync(directory)
-        except FileExistsError:
-            descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        if self._historical_readonly:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        else:
+            try:
+                descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                os.fsync(directory)
+            except FileExistsError:
+                descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         self._fds.append(descriptor)
         info = os.fstat(descriptor)
         _private(info)

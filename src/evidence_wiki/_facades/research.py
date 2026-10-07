@@ -45,6 +45,16 @@ class ResearchNamespace(Namespace):
         return call_seam(load, "impact_operations", "current", self._root, pairs=pairs,
             before_requirements_revision_id=before_requirements_revision_id)
 
+    def history(self, *, run_id, execution, kind=None, after_index=0, max_records=16, expected_history_basis_id=None):
+        """Read retained decisions under current rights without a live run handle."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import history_operations
+            return history_operations
+        return call_seam(load, "history_operations", "current", self._root,
+            run_id=run_id, execution=execution, kind=kind, after_index=after_index, max_records=max_records,
+            expected_history_basis_id=expected_history_basis_id)
+
     def current(self, policy, *, run_id=None, execution=None):
         return self._invoke("current", policy, run_id=run_id, execution=execution)
 

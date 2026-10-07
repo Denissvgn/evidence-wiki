@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "47"
+LIBRARY_API_VERSION = "48"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -94,6 +94,7 @@ LIBRARY_API_SURFACE = (
     "research.requirements.current",
     "research.changes",
     "research.impact",
+    "research.history",
     "research.requirements.prepare_revision",
     "research.requirements.revise",
     "strict.check",
@@ -538,6 +539,16 @@ def contract() -> dict:
             "dependencies": "sources, transitive premises, calculations, questions, policy, permission, implementation and time",
             "legacy_assessments": "separate refresh contract; never strict approval",
             "limits": {"claims": 100, "bytes": 1048576}, "effects": "read_only_no_remote_refresh"},
+        "research_history": {
+            "schema": "research-decision-history/v1", "method": "research.history",
+            "kinds": ["claim", "source", "review", "brief"],
+            "authentication": "original host observer authenticates retained native binding and journal",
+            "authority": "current host roots, protected original source scope and current retained revision rights",
+            "qualification": "historical host records establish no current eligibility or semantic truth",
+            "limits": {"records_per_page": 32, "source_bytes": 65536, "result_bytes": 1048576},
+            "effects": "read-only; no run, provider, review, delivery, deletion or restoration",
+            "retention": "host-managed native journal and protected source/delivery stores",
+            "continuation": "next_index and required expected_history_basis_id pin an opaque authenticated journal basis; pages never establish acceptance"},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),

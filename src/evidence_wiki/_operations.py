@@ -7,10 +7,11 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "30"
+OPERATION_MATRIX_VERSION = "31"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("research.history", None, "none; bounded permission-filtered retained claim/source/review/brief material", "authenticated original native journal, current scope and held source use with closing checks", "none; no executor invocation or restoration"),
     ("research.session.delivery_status", None, "none; protected history with current identity eligibility checked separately", "original bound journal, private immutable receipt and fresh current source closure", "none"),
     ("research.session.reconcile_delivery", None, "receipt-backed accounting observation only; no artifact write or retry", "original native reservation and exact protected committed owner receipt", "none"),
     ("research.session.prepare_delivery", None, "none; current exact artifact metadata and approved opaque destinations", "held current native brief with closing proof", "none"),

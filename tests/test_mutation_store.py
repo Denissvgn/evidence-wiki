@@ -51,6 +51,41 @@ def request_directory(root, workspace, request_id="request"):
     return root / "mutations/workspaces" / hashlib.sha256(str(workspace.resolve()).encode()).hexdigest() / "requests" / hashlib.sha256(request_id.encode()).hexdigest()
 
 
+@pytest.mark.parametrize("missing", ["namespace", "request", "workspace_lock", "request_lock"])
+def test_historical_reads_never_recreate_deleted_custody(roots, missing):
+    workspace, control = roots
+    if missing != "namespace":
+        original = intent(workspace)
+        with MutationStore(workspace, control, original).locked() as store:
+            store.prepare(original)
+        request = request_directory(control, workspace)
+        if missing == "request":
+            import shutil
+            shutil.rmtree(request)
+        else:
+            selected = request / "request.lock" if missing == "request_lock" else request.parent.parent / "workspace.lock"
+            selected.unlink()
+    before = {p.relative_to(control).as_posix(): p.read_bytes() if p.is_file() else None for p in control.rglob("*")}
+    with pytest.raises(MutationStoreError):
+        with MutationStore(workspace, control).historical_locked("request"):
+            pytest.fail("Missing historical custody was recreated.")
+    assert {p.relative_to(control).as_posix(): p.read_bytes() if p.is_file() else None for p in control.rglob("*")} == before
+
+
+def test_retained_historical_read_preserves_bytes_and_refuses_publication(roots):
+    workspace, control = roots
+    original = intent(workspace)
+    with MutationStore(workspace, control, original).locked() as store:
+        store.prepare(original)
+    before = {p.relative_to(control).as_posix(): p.read_bytes() if p.is_file() else None for p in control.rglob("*")}
+    with MutationStore(workspace, control).historical_locked("request") as store:
+        assert store._read("intent.json") == original
+        with pytest.raises(MutationStoreError) as caught:
+            store.write(state(original))
+        assert caught.value.details["reason"] == "historical_read_only"
+    assert {p.relative_to(control).as_posix(): p.read_bytes() if p.is_file() else None for p in control.rglob("*")} == before
+
+
 def test_exact_intent_and_receipt_replay_precede_current_workspace_preconditions(roots):
     workspace, control = roots
     original = intent(workspace)

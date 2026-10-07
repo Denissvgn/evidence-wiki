@@ -187,6 +187,10 @@ Version `47` adds `workspace.research.impact` with operation matrix `30`.
 Current native strict evaluation owns eligibility; declared dependencies explain
 known effects while whole-workspace review bases require conservative invalidation.
 
+Version `48` adds permission-filtered retained decision history through
+`workspace.research.history`, with operation matrix `31`. Historical native
+records establish neither current eligibility nor semantic truth.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -2397,6 +2401,48 @@ absent. Missing intermediate observations remain unknown until authentic
 receipts arrive. Recovery settles history without resending input or renewing
 current qualification, source rights or semantic eligibility.
 
+
+### Retained decision history
+
+`workspace.research.history(run_id=..., execution=..., kind=None,
+after_index=0, max_records=16, expected_history_basis_id=None)` reads recorded claim inventories, retained
+normalized sources, signed review snapshots and completed literal briefs.
+It requires `history_operations.current`, current host roots, protected
+original source scope and the original observer identity supplied through
+`ResearchExecution`. It invokes no executor, model, review signer or provider; the original observer
+authenticates the continuation basis locally.
+The read is independent of a live session's current original-question mapping;
+the original workspace identity and authenticated journal must still match.
+An unchanged protected legacy declaration supports read-only scope when its
+exact original instruction hash and request schema validate. This compatibility
+path grants no requirements revision, canonical planning or recovery authority;
+append-only declarations continue to require their protected native lineage.
+
+Each row identifies historical qualification as authenticated native recording,
+which establishes no semantic truth or current approval. Native application
+recording remains separate from an inert proposal. Every row reports current
+eligibility as `not_evaluated` and keeps authorization and evidence acceptance
+false. Current acceptance requires an ordinary fresh resolution or brief read.
+
+Current source scope and retrieval/export rights are checked for the exact
+retained revisions under both research and export purposes. Material edits
+need not erase permitted history. Denied records withhold payload and historical
+application/qualification details. Missing, expired, deleted or unsupported
+retention produces unavailable evidence or a typed refusal. Older unsupported
+journal encodings are not treated as empty successful history. Brief history
+uses a conservative closure of recorded scientific sources; ambiguous revision
+closure remains unavailable rather than authorizing disclosure. Claim premises
+and computational snapshots with unsupported dependency closure are unavailable.
+
+Pages contain at most 32 records and one MiB; a normalized source is at most
+65,536 bytes. Continuation requires the returned opaque `history_basis_id` as
+`expected_history_basis_id`; a changed authenticated journal or selection refuses
+the cursor. Pages report exact total and returned counts and truncation.
+`next_index` is explicit continuation, and page completeness is
+history inventory coverage rather than research acceptance. Retained content is
+never truncated to fit an accepted result. Host services own retention, deletion,
+backup and restoration of the native journal and protected source/delivery
+stores. This read creates no replacement snapshots or recovery authority.
 
 ### Checked local delivery
 

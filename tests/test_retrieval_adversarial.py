@@ -60,6 +60,8 @@ def test_cache_virtual_views_are_never_hydrated(roots,relation):
 
 def test_historical_standalone_native_gate_cannot_publish(roots):
     source_id,_,_=normalize(roots,b"Current measured reflectance 0.74 ratio.\n","plain_text")
+    with MutationStore(*roots).locked("historical"):
+        pass
     with selected(roots).activate(),MutationStore(*roots).historical_locked("historical"):
         with pytest.raises(EvidenceWikiError) as caught:
             retrieval.build_index(roots[0],source_ids=[source_id])
@@ -69,6 +71,8 @@ def test_historical_standalone_native_gate_cannot_publish(roots):
 
 def test_historical_borrowed_native_read_scope_cannot_publish(roots):
     source_id,_,_=normalize(roots,b"Current measured reflectance 0.74 ratio.\n","plain_text")
+    with MutationStore(*roots).locked("historical"):
+        pass
     with selected(roots).activate(),MutationStore(*roots).workspace_locked():
         with MutationStore(*roots).historical_locked("historical",borrow_workspace=True):
             with pytest.raises(EvidenceWikiError):

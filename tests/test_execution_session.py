@@ -431,7 +431,7 @@ def fixture(tmp_path, monkeypatch, request=None):
         | ({"research_session.brief", "brief_operations.current", "research_session.resolution", "resolution_operations.current", "service_authentication.status"} if readability is not None or artifact_delivery is not None else set())
         | ({"research_session.prepare_delivery", "research_session.deliver", "artifact_delivery_operations.prepare", "artifact_delivery_operations.deliver",
             "research_session.delivery_status", "research_session.reconcile_delivery",
-            "artifact_delivery_operations.delivery_status", "artifact_delivery_operations.reconcile_delivery"} if artifact_delivery is not None else set()), "caller", [root], authority_file=authority.policy_path,
+            "artifact_delivery_operations.delivery_status", "artifact_delivery_operations.reconcile_delivery", "history_operations.current"} if artifact_delivery is not None else set()), "caller", [root], authority_file=authority.policy_path,
         state_directory=authority.host, mutation_control_directory=control,
         controller_refs={"host_worker": "runner", "generator": "runner", "evaluator": "evaluator"},
         role_controller_refs=tuple((role.config_ref, role.role, role.controller_ref) for role in roles) if registry else ())

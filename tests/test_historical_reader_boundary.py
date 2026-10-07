@@ -15,8 +15,14 @@ def context(roots):
     return HostContext([roots[0]],GRANTS|{"question_claim.run_claim","source_requests.run_add_request"},"caller",[roots[0]],mutation_control_directory=roots[1])
 
 
+def retain_gate(roots):
+    with MutationStore(*roots).locked("read"):
+        pass
+
+
 @pytest.mark.parametrize("operation",["claim","request"])
 def test_borrowed_reader_denies_other_canonical_writers_then_parent_write_restored(roots,operation):
+    retain_gate(roots)
     with context(roots).activate(),MutationStore(*roots).workspace_locked(),Workspace.open(roots[0]) as workspace:
         with MutationStore(*roots).historical_locked("read",borrow_workspace=True):
             with pytest.raises(EvidenceWikiError) as caught:
@@ -32,6 +38,7 @@ def test_borrowed_reader_denies_other_canonical_writers_then_parent_write_restor
 
 
 def test_no_context_historical_native_reader_cannot_write_through_legacy_seam(roots):
+    retain_gate(roots)
     with MutationStore(*roots).historical_locked("read"),Workspace.open(roots[0]) as workspace:
         with pytest.raises(EvidenceWikiError):
             workspace.questions.claim(slug="sample",agent_id="caller")
@@ -39,6 +46,7 @@ def test_no_context_historical_native_reader_cannot_write_through_legacy_seam(ro
 
 
 def test_exception_exit_restores_parent_writer_scope(roots):
+    retain_gate(roots)
     with context(roots).activate(),MutationStore(*roots).workspace_locked(),Workspace.open(roots[0]) as workspace:
         with pytest.raises(RuntimeError,match="exit"):
             with MutationStore(*roots).historical_locked("read",borrow_workspace=True):
@@ -48,6 +56,7 @@ def test_exception_exit_restores_parent_writer_scope(roots):
 
 
 def test_historical_status_requires_explicit_no_cache_even_without_host_context(roots):
+    retain_gate(roots)
     before = owner("_evidence_revision").capture_workspace(roots[0]).revision_id
     with MutationStore(*roots).historical_locked("read"), Workspace.open(roots[0]) as workspace:
         with pytest.raises(EvidenceWikiError) as refused:
