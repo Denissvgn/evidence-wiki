@@ -7,12 +7,12 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "35"
+OPERATION_MATRIX_VERSION = "36"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
     ("research.command_schemas", "evidence-wiki agent command-schemas", "none; detached transport shapes", "parent workspace lifetime", "none"),
-    ("research.command", "evidence-wiki agent run-cycle / refresh / current / next-work / brief / resolution / recovery-status / changes / impact / history", "selected public operation only; run-cycle/refresh retain native effects", "same public facade owners and runtime HostContext", "same explicit configured host services; no user stdin or implicit credential probes"),
+    ("research.command", "evidence-wiki agent run-cycle / refresh / advance / pending / reconcile-recovery and the closed research operation family", "selected public operation only; explicit write/read definitions retain native effects", "same public facade owners and runtime HostContext; optional host operation control", "same explicit configured host services; no user stdin or implicit credential probes"),
     ("research.performance_schemas", None, "none; detached performance shapes", "parent workspace lifetime", "none"),
     ("research.qualify_performance", None, "private frozen performance reservations and measured qualification; scientific state unchanged", "private native CAS and independent lease; workspace gate released before calls", "configured workload/critic agents and fixed fresh-interpreter native codec probes"),
     ("research.refresh_schedule_schemas", None, "none; detached host schedule schemas", "parent workspace lifetime", "none"),

@@ -25,7 +25,9 @@ def _terminal(records):
         and row["data"]["step"]["terminal"]), None)
 
 
-def refresh(session, *, request_id, previous_run_id, max_steps=64, planner_config_ref=None, source_updates=()):
+def refresh(session, *, request_id, previous_run_id, max_steps=64, planner_config_ref=None, source_updates=(), operation_control=None):
+    from .operation_control import checkpoint
+    checkpoint(operation_control, "research_refresh_start")
     session._check("refresh", write=True)
     if session.execution is None:
         refuse("EXECUTION_CONFIG_INVALID")
@@ -88,7 +90,7 @@ def refresh(session, *, request_id, previous_run_id, max_steps=64, planner_confi
             native._begin(session)
             native.append(session, "execution_refresh", request_id, previous)
     cycle = session.run_cycle(request_id=native.child_id(request_id, "cycle"), max_steps=max_steps,
-        planner_config_ref=planner_config_ref)
+        planner_config_ref=planner_config_ref, operation_control=operation_control)
     from .brief_operations import _held_brief
     try:
         with _held_brief(session) as (brief, resolution):

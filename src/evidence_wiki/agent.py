@@ -20,6 +20,8 @@ from .agent_resources import (
 )
 from .errors import EvidenceWikiError, UsageError
 from .onboarding_contract import encode_document
+from .research_command_definitions import OPERATIONS as RESEARCH_COMMANDS
+from .research_command_definitions import WRITE_OPERATIONS as RESEARCH_WRITES
 
 SUMMARY_BYTES = 32_768
 RESEARCH_OPERATIONS = ("next", "start", "resume", "heartbeat", "acquire", "ingest", "research-export", "progress", "research-guide", "research-schemas")
@@ -44,8 +46,7 @@ OPERATIONS = (
     ("agent apply", "write", False), ("agent setup-guide", "read", False), ("agent setup-schemas", "read", False),
     ("agent plan-schemas", "read", False), ("agent plan-guide", "read", False),
     *(("agent " + name, effect, True) for name, effect in (("next", "read"), ("start", "write"), ("resume", "read"), ("research-export", "read"), ("progress", "depends_on_options"))),
-    *(("agent "+name, "write" if name in {"run-cycle", "refresh"} else "read", True) for name in
-      ("run-cycle", "refresh", "current", "next-work", "brief", "resolution", "recovery-status", "changes", "impact", "history")),
+    *(("agent "+name, "write" if name in RESEARCH_WRITES else "read", True) for name in RESEARCH_COMMANDS),
     ("agent command-schemas", "read", False),
     ("agent research-guide", "read", False), ("agent research-schemas", "read", False),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
@@ -250,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
             return error.exit_code
         print(json.dumps(schemas(), ensure_ascii=False, separators=(",", ":")))
         return 0
-    if argv and argv[0] in {"run-cycle", "refresh", "current", "next-work", "brief", "resolution", "recovery-status", "changes", "impact", "history"}:
+    if argv and argv[0] in RESEARCH_COMMANDS:
         from .autonomous_commands import main as autonomous_main
         return autonomous_main(argv[0], argv[1:])
     if argv and argv[0] in RESEARCH_OPERATIONS:

@@ -56,6 +56,10 @@ class OperationControl:
     def checkpoint(self, name: str) -> None:
         _translate(self._native.checkpoint, name)
 
+    def close(self) -> None:
+        """Release the completed host cancellation probe without renewing its clock."""
+        _translate(self._native.close)
+
     def remaining_seconds(self, name: str = "remaining") -> float:
         return _translate(self._native.remaining_seconds, name)
 
@@ -69,6 +73,9 @@ class OperationControl:
             controller = self
 
             class BoundControl(native_class):
+                def close(self):
+                    controller.close()
+
                 def checkpoint(self, name):
                     controller._native.checkpoint(name)
 

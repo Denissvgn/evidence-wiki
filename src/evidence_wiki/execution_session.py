@@ -2214,7 +2214,9 @@ def _complete_advance(session, request_id, expected_basis_id, action, attempt, i
         return checked(STEP_V2, step)
 
 
-def run_until_terminal(session, *, request_id, expected_basis_id, max_steps):
+def run_until_terminal(session, *, request_id, expected_basis_id, max_steps, operation_control=None):
+    from .operation_control import checkpoint
+    checkpoint(operation_control, "research_drive_start")
     if type(max_steps) is not int or not 1 <= max_steps <= 64:
         refuse("LIMIT", "/max_steps")
     request_id = validate_request_id(request_id)
@@ -2232,6 +2234,7 @@ def run_until_terminal(session, *, request_id, expected_basis_id, max_steps):
             append(session, "execution_drive", request_id, data)
     result = None
     for index in range(max_steps):
+        checkpoint(operation_control, "research_drive_step")
         identifier = child_id(request_id, "advance." + str(index))
         records = retained(session)
         previous = next((row["data"]["step"] for row in records if row["kind"] == "execution_step"

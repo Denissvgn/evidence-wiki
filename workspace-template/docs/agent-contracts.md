@@ -552,3 +552,103 @@ After setup completes, retained state supports audit, not control of future
 research. Canonical workspace owners govern subsequent changes. Cleanup of
 receipts, observations or abandoned targets is an explicit retention action;
 successful setup never deletes them implicitly.
+
+## Scoped autonomous research tools
+
+The optional `serve-onboarding-mcp` transport combines its existing scoped setup,
+source intake and computation tools with `scoped-research-tools/v1`. It uses the
+same public `Workspace.research.command` dispatcher as Python and the research
+CLI. The separate `serve-mcp --target WORKSPACE` workspace protocol is preserved.
+The server negotiates MCP `2024-11-05`, advertises tools and installed resources,
+and never requests sampling, elicitation, credentials or routine operator signoff.
+A client with empty capabilities can use the supported journey.
+
+```bash
+evidence-wiki serve-onboarding-mcp --allow-root WORKSPACE \
+  --research-runtime PRIVATE_RUNTIME.json \
+  --allow-research-operation run-cycle \
+  --allow-research-operation refresh \
+  --allow-research-operation cancel-pending \
+  --allow-research-operation reconcile-pending \
+  --allow-research-operation reconcile-recovery
+```
+
+The host selects roots, legacy onboarding mutation grants, research write grants
+and runtime services at startup. Read tools are discoverable by default but
+still require a startup root, native runtime rights and source permissions.
+`--allow-operation apply` or `capture` grants the corresponding existing setup
+or intake tool. A parent directory selected before setup must already exist;
+those tools can create the selected child workspace. `--research-runtime` uses
+an owner-private stable `HostRuntime` JSON file; it is not a client argument.
+The file supports native signed qualification records and profile versions v1-v3;
+unsupported services return explicit terminal refusal data. An embedded host can
+supply complete existing services without serializing private keys:
+
+```python
+from evidence_wiki import HostRuntime
+from evidence_wiki.onboarding_mcp import OnboardingMcpServer
+
+server = OnboardingMcpServer(
+    allowed_roots=[workspace_root],
+    runtime=HostRuntime.from_services(policy, context, execution),
+    research_allow=["run-cycle", "refresh", "cancel-pending", "reconcile-recovery"],
+)
+server.serve(input_stream, output_stream)
+```
+
+`policy`, `context` and `execution` are host-provisioned native public services.
+Tool arguments cannot select a runtime, change policy/grants or issue a machine
+qualification. Config references select only the already frozen host roles;
+worker proposals and client declarations cannot become review authority.
+The optional local-process meter is suitable only for commands without provider
+calls; unknown execution or usage never becomes qualified review or acceptance.
+
+Tools/list publishes exact startup-selected input shapes. Research tool names use
+`research_` plus the operation name with underscores, such as
+`research_run_cycle`, `research_current` and `research_reconcile_recovery`.
+Arguments contain `target` and the operation's public fields:
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"research_run_cycle","arguments":{"target":"WORKSPACE","run_id":"study","request_id":"drive","max_steps":64}}}
+```
+
+| Journey | Tools and retained behavior |
+| --- | --- |
+| Setup and sources | Existing `onboarding_plan`, `onboarding_apply`, `onboarding_capture`, `onboarding_research_acquire` and `onboarding_research_ingest` use scoped public owners. Setup readiness and source capture do not approve claims. |
+| Policy, budgets and roles | `research_current` and `research_next_work` return native policy/usage/current work. Supply an explicit stable `run_id`, including before a run starts; reads do not create it. |
+| Autonomous research | `research_run_cycle`, `research_advance` and `research_run_until_terminal` execute the frozen host workflow. Native mandatory review, repair, qualification, source and budget gates decide outcomes. |
+| Current outputs | `research_brief`, `research_resolution`, `research_report`, `research_history`, `research_changes`, `research_impact`, `research_repair_progress` and `research_review_services` retain current permission and bounded output checks. |
+| Refresh | `research_refresh` links an explicit new run to retained terminal history, selected planner and permitted updates. Previous accounting is preserved and approval is never reused. |
+| Pending and restart custody | `research_pending`, `research_cancel_pending`, `research_reconcile_pending`, `research_recovery_status` and `research_reconcile_recovery` inspect or reconcile native retained work without renewing its lease or budget. A pending read returns `{"pending":null}` when none exists. |
+| Optional scoped role work | Acquisition preparation/choice/run/dispatch, coverage/counterevidence examination, calculation/proposal, complete review-packet assembly and local artifact delivery/status/reconciliation tools delegate their existing public session methods. Unsupported profile capabilities refuse explicitly. |
+
+Research tool content contains the unchanged bounded public command envelope.
+Successful transport can report accepted, partial, abstained, blocked or budget
+outcomes; capability/argument/authority refusals set `isError` and preserve typed
+error fields. Missing runtime never fabricates a completed run. Ungranted tools
+are absent from discovery and refuse as unknown/ungranted if called. Canonical
+mutations require both the server write grant and the native host/policy grants.
+
+Only one research request executes at a time. Additional tool calls during active
+research receive JSON-RPC `-32001`; retry after the request settles, keeping the
+same business request IDs. Framing remains responsive to ping and cancellation,
+with a bounded 16-frame queue, 1 MiB input frames and 4 MiB responses including the
+terminating newline. EOF closes the handle after finite in-flight work settles.
+Stdout belongs to the protocol; library diagnostics stay separate.
+
+An MCP `notifications/cancelled` notification targets the active RPC ID, not its
+business `request_id`. Cooperative `OperationControl` checkpoints stop further
+run-cycle, refresh or bounded drive work and suppress the cancelled RPC response.
+Atomic steps can finish and pending effects can remain uncertain. Cancellation
+never rolls back accepted writes, claims external termination, resets consumed
+usage or grants approval. Native owner deadlines remain authoritative across
+fresh per-RPC waiting allowances. Idle cancellation probes close after the call;
+arbitrary blocked callback code is not claimed terminated.
+
+Reconnect with the same startup roots, policy, role/service identities and business
+request IDs. Read `research_recovery_status` or `research_pending`, then explicitly
+reconcile or request native pending cancellation within startup grants. Replaying
+an immutable request returns retained evidence; changing its parameters conflicts.
+A historical result does not renew current evidence acceptance. The server never
+installs a daemon or asks the client to escape to a shell to complete these tools.
+This follows the [MCP cancellation contract](https://modelcontextprotocol.io/specification/2024-11-05/basic/utilities/cancellation).

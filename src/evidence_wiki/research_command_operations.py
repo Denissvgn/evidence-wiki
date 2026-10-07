@@ -1,42 +1,43 @@
 """Transport-independent dispatch through public facades with exact typed errors."""
 
 from .errors import ConfigError, EvidenceWikiError, UsageError
+from .mutation_contracts import MutationError, _shape
+from .operation_control import checkpoint
 from .research_command_contracts import OPERATIONS, REQUEST, RESULT, checked, error_document
+from .research_command_definitions import DEFINITIONS, WRITE_OPERATIONS
 from .runtime_configuration import HostRuntime
 
-ARGUMENTS = {
-    "run-cycle": {"run_id", "request_id", "expected_basis_id", "max_steps", "planner_config_ref"},
-    "refresh": {"run_id", "request_id", "previous_run_id", "max_steps", "planner_config_ref", "source_updates"},
-    "current": {"run_id"}, "next-work": {"run_id"}, "brief": {"run_id", "format"}, "resolution": {"run_id"},
-    "recovery-status": {"run_id", "after_sequence", "max_effects"},
-    "history": {"run_id", "kind", "after_index", "max_records", "expected_history_basis_id"},
-    "changes": {"pairs", "before_requirements_revision_id"}, "impact": {"pairs", "before_requirements_revision_id"},
-}
+ARGUMENTS = {name: set(row["schema"]["properties"]) for name, row in DEFINITIONS.items()}
 
 
-def invoke(workspace, request, *, runtime=None):
+def invoke(workspace, request, *, runtime=None, operation_control=None):
     workspace._check_open()
     if type(request) is not dict or request.get("operation") not in OPERATIONS:
         checked(REQUEST, request)
     operation = request["operation"]
     try:
+        checkpoint(operation_control, "research_command_start")
         request = checked(REQUEST, request)
         arguments = request["arguments"]
         if set(arguments)-ARGUMENTS[operation]:
             raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Command arguments do not match the public operation.", recoverable=False)
+        try:
+            _shape(arguments, DEFINITIONS[operation]["schema"])
+        except MutationError:
+            raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Command arguments do not match the public operation.", recoverable=False) from None
         if type(runtime) is not HostRuntime:
             raise ConfigError("RESEARCH_EXECUTION_CONFIG_INVALID", "An explicit host runtime is required for this operation.",
                 recoverable=False, remediation="Provide configured host policy, grants and execution services; the command never provisions credentials or prompts.")
         with runtime.context.activate():
-            root = runtime.context.require_path(workspace.root, write=operation in {"run-cycle", "refresh"})
+            root = runtime.context.require_path(workspace.root, write=operation in WRITE_OPERATIONS)
             if root.resolve() != workspace.root:
                 raise ConfigError("RESEARCH_COMMAND_TARGET_INVALID", "The command target differs from its public workspace handle.", recoverable=False)
             namespace = workspace.research
             shared = {"execution": runtime.execution}
             if operation == "run-cycle":
-                result = namespace.run_cycle(runtime.policy, **shared, **arguments)
+                result = namespace.run_cycle(runtime.policy, **shared, **arguments, operation_control=operation_control)
             elif operation == "refresh":
-                result = namespace.refresh(runtime.policy, **shared, **arguments)
+                result = namespace.refresh(runtime.policy, **shared, **arguments, operation_control=operation_control)
             elif operation in {"current", "next-work"}:
                 result = getattr(namespace, "current" if operation == "current" else "next")(runtime.policy, **shared, **arguments)
             elif operation in {"changes", "impact"}:
@@ -47,7 +48,11 @@ def invoke(workspace, request, *, runtime=None):
                 selected = dict(arguments)
                 run_id = selected.pop("run_id")
                 with namespace.session(runtime.policy, run_id=run_id, **shared) as session:
-                    result = getattr(session, operation.replace("-", "_"))(**selected)
+                    if operation == "run-until-terminal":
+                        selected["operation_control"] = operation_control
+                    result = getattr(session, DEFINITIONS[operation]["method"])(**selected)
+                    if operation == "pending":
+                        result = {"pending": result}
         exit_code = 3 if (result.get("outcome") in {"abstained", "rejected", "stop_budget", "blocked_external", "policy_incompatible"}
             or result.get("verdict") in {"abstain", "reject"}) else 0
         return checked(RESULT, {"schema_version": RESULT, "operation": operation, "terminal": True, "status": "returned",

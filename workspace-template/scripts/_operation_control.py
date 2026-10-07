@@ -49,6 +49,8 @@ class OperationControl:
         self._probe_started = False
         self._cancel_unknown = False
         self._cancelled = False
+        self._closed = threading.Event()
+        self._probe_thread = None
 
     @staticmethod
     def _refuse(code: str, checkpoint: str) -> None:
@@ -56,6 +58,8 @@ class OperationControl:
                             exit_code=2, recoverable=False, details={"checkpoint": checkpoint})
 
     def checkpoint(self, name: str) -> None:
+        if self._closed.is_set():
+            self._refuse("OPERATION_CONTROL_CLOSED", name)
         now = datetime.now(timezone.utc)
         if now < self._last_utc:
             self._refuse("OPERATION_CLOCK_REGRESSION", name)
@@ -74,6 +78,8 @@ class OperationControl:
     def _probe_cancellation(self) -> None:
         """Reuse one host-only daemon; a blocked probe never starts another."""
         while True:
+            if self._closed.is_set():
+                return
             remaining = self._end - time.monotonic()
             if remaining <= 0:
                 return
@@ -81,10 +87,14 @@ class OperationControl:
                 self._probe_requests.get(timeout=remaining)
             except queue.Empty:
                 return
+            if self._closed.is_set():
+                return
             try:
                 observed = self._cancel_requested()
             except BaseException:
                 observed = None
+            if self._closed.is_set():
+                return
             self._probe_results.put(observed)
             if type(observed) is not bool or observed:
                 return
@@ -102,7 +112,9 @@ class OperationControl:
         try:
             if not self._probe_started:
                 self._probe_started = True
-                threading.Thread(target=self._probe_cancellation, daemon=True).start()
+                self._probe_thread = threading.Thread(target=self._probe_cancellation, daemon=True,
+                    name="evidence-operation-cancellation")
+                self._probe_thread.start()
             try:
                 self._probe_requests.put_nowait(None)
                 observed = self._probe_results.get(timeout=max(0.0, allowance - (time.monotonic() - started)))
@@ -123,6 +135,17 @@ class OperationControl:
     def remaining_seconds(self, name: str = "remaining") -> float:
         self.checkpoint(name)
         return max(0.0, self._end - time.monotonic())
+
+    def close(self) -> None:
+        """Release the idle host probe; arbitrary blocked callback code stays uncertain."""
+        self._closed.set()
+        try:
+            self._probe_requests.put_nowait(None)
+        except queue.Full:
+            pass
+        thread = self._probe_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.05)
 
     def snapshot(self) -> dict[str, str | float]:
         """Describe the fixed boundary without granting a fresh allowance."""

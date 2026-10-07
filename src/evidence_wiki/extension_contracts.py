@@ -67,6 +67,8 @@ def index():
         "guide": "guide/contracts/v1", "schema_ids": list(schemas()), "allowed_roots_maximum": 16,
         "authority": "explicit host roots and operation grants; ordinary local observations, no OS isolation claim",
         "preserved_surfaces": ["Workspace", "serve-mcp"], "python_api_version": LIBRARY_API_VERSION,
+        "research_capability": "scoped-research-tools/v1",
+        "research_runtime": "startup-selected public HostRuntime services or owner-private file; no client authority inputs",
         "commands": ["pack migration-plan", "pack migration-apply", "pack compose-plan", "pack compose",
             "pack fleet-plan", "pack fleet-apply", "agent transition-plan", "agent transition-apply",
             "agent recipes", "agent instructions-plan", "agent instructions-apply", "agent instructions-remove"],

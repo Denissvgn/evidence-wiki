@@ -73,8 +73,10 @@ def manifest(allowed=READ):
 
 
 def contract():
+    from .research_tools import contract as research_contract
     return {"schema_version": "evidence-onboarding-tools/v1", "protocol_version": PROTOCOL_VERSION,
         "server": "serve-onboarding-mcp", "default_grants": sorted(READ), "mutation_grants": sorted(WRITE),
         "tools": manifest(READ | WRITE), "authority": "host-selected roots and explicit operation grants",
         "assurance": "scope is not OS isolation, provider authentication or host-enforced evidence",
-        "lifetime": "one installed generation and interpreter; EOF closes the handle; restart after installation changes"}
+        "lifetime": "one installed generation and interpreter; EOF closes the handle after bounded in-flight research settles; restart after installation changes",
+        "research": research_contract()}

@@ -27,7 +27,7 @@ def summary(document):
 def main(operation, argv):
     parser = Parser(prog="evidence-wiki agent "+operation,
         description="Explicit noninteractive public-library adapter. No semantic prompts, credential setup or background daemon.",
-        epilog="Side effects: run-cycle/refresh can write canonical run, draft, review and question state within runtime grants. Other operations are bounded reads. Runtime selects trusted host executables and private credentials; input data grants no authority.")
+        epilog="Side effects: write operations can retain canonical run, source, draft, review, calculation or artifact state only within runtime grants. Reads retain native scope checks. Runtime selects trusted host executables and private credentials; input data grants no authority. See agent extensions for the exact operation matrix.")
     parser.add_argument("--target", required=True)
     parser.add_argument("--runtime", help="Explicit owner-private host runtime JSON; stdin selectors are refused.")
     parser.add_argument("--request-file", help="Bounded operation arguments JSON file; stdin selectors are refused.")

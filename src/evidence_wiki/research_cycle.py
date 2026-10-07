@@ -32,9 +32,11 @@ def _originals(current, records, *, terminal):
     return result
 
 
-def drive(session, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
+def drive(session, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None, operation_control=None):
     """Freeze the drive before effects; exhaustion closes through the existing owner."""
     from . import execution_session as native
+    from .operation_control import checkpoint
+    checkpoint(operation_control, "research_cycle_start")
 
     if session.execution is None:
         refuse("EXECUTION_CONFIG_INVALID")
@@ -68,7 +70,8 @@ def drive(session, *, request_id, expected_basis_id=None, max_steps=64, planner_
             native._begin(session)
             native.append(session,"execution_cycle",request_id,initial)
     step = session.run_until_terminal(request_id=native.child_id(request_id,"drive"),
-        expected_basis_id=initial["before_basis_id"],max_steps=max_steps)
+        expected_basis_id=initial["before_basis_id"],max_steps=max_steps,operation_control=operation_control)
+    checkpoint(operation_control, "research_cycle_close")
     if step is None or not step["terminal"]:
         step = native.close_drive_bound(session,request_id=native.child_id(request_id,"bound"))
     current = session.current()

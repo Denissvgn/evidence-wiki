@@ -4,6 +4,13 @@
 
 ### Added
 
+- Expose the autonomous research journey through startup-scoped MCP tools sharing
+  public Python/CLI dispatch, explicit native runtime and machine policy. Setup,
+  intake, bounded research, current outputs, refresh and pending recovery need no
+  shell escape or elicitation. Cooperative cancellation retains effects and
+  original budgets; request probes close after completion. The legacy workspace
+  MCP contract remains separate.
+
 - Share autonomous research CLI dispatch with the public Python facade, with
   explicit private host runtime selection, bounded terminal JSON, exact typed
   errors and concise summaries. Caller research commands use scoped library

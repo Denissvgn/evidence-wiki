@@ -731,6 +731,7 @@ def _print_help() -> None:
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
         "  evidence-wiki serve-onboarding-mcp [--allow-root PATH] [--allow-operation NAME]\n"
+        "    [--research-runtime PRIVATE.json] [--allow-research-operation NAME]\n"
         "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
         "  evidence-wiki computation schemas|check|aggregate|evaluate|verify|schedule|write|apply-warnings|dispatch [options]\n"
         "  evidence-wiki orchestrate start|next|submit|status|abandon|retire|cleanup-claims [options]\n"

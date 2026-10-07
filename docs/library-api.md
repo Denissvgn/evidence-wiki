@@ -2881,3 +2881,22 @@ remain false. No operation reads user stdin or prompts for semantic choices,
 review or signoff; `--noninteractive` states the behavior already always enabled.
 Stdin file selectors (`-`) are refused. Canonical research acceptance remains
 separate from command transport success and retained historical replay.
+
+
+Version `53` adds `scoped-research-tools/v1` to the optional scoped onboarding
+MCP server, with operation matrix version `36`. Its finite tools share the public
+research command definitions and dispatcher with Python and CLI. Startup selects
+roots, mutation grants and native `HostRuntime`; tool arguments cannot create
+credentials, policy, grants or machine qualification. Current/next execution
+reads require an explicit stable run ID, even before the run starts.
+
+The command family also includes public session role steps, acquisition,
+calculation, review-packet assembly, artifact delivery, pending/cancel/reconcile,
+repair/service observations and current recovery. Optional host-selected
+`OperationControl` passes through command/run-cycle/refresh/bounded drives for
+cooperative safe cancellation; it never enters request JSON. `close()` releases
+an idle cancellation probe and makes the control terminal without renewing its
+clock. Reconnect preserves native original deadlines and consumed allowances.
+See [scoped autonomous research tools](../workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools)
+for startup, schemas, no-elicitation behavior and explicit capability limits.
+The legacy workspace MCP protocol is unchanged.

@@ -549,12 +549,14 @@ class ResearchSession:
         return checked(STEP, record)
 
     @_boundary
-    def run_until_terminal(self, *, request_id, expected_basis_id, max_steps=1):
+    def run_until_terminal(self, *, request_id, expected_basis_id, max_steps=1, operation_control=None):
+        from .operation_control import checkpoint
+        checkpoint(operation_control, "research_drive_start")
         self._check("run_until_terminal", write=True)
         if self.execution is not None:
             from . import execution_session
             return execution_session.run_until_terminal(self, request_id=request_id,
-                expected_basis_id=expected_basis_id, max_steps=max_steps)
+                expected_basis_id=expected_basis_id, max_steps=max_steps, operation_control=operation_control)
         if type(max_steps) is not int or not 1 <= max_steps <= 64:
             refuse("LIMIT", "/max_steps")
         result = self.advance(request_id=request_id, expected_basis_id=expected_basis_id)
@@ -600,20 +602,20 @@ class ResearchSession:
             expected_request_basis=expected_request_basis)
 
     @_boundary
-    def refresh(self, *, request_id, previous_run_id, max_steps=64, planner_config_ref=None, source_updates=()):
+    def refresh(self, *, request_id, previous_run_id, max_steps=64, planner_config_ref=None, source_updates=(), operation_control=None):
         """Start bounded superseding decisions while preserving terminal history."""
         from .refresh_session import refresh
         return refresh(self, request_id=request_id, previous_run_id=previous_run_id,
-            max_steps=max_steps, planner_config_ref=planner_config_ref, source_updates=source_updates)
+            max_steps=max_steps, planner_config_ref=planner_config_ref, source_updates=source_updates, operation_control=operation_control)
 
-    def run_cycle(self, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
+    def run_cycle(self, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None, operation_control=None):
         """Drive one immutable host request to a finite canonical outcome."""
         self._check("run_cycle",write=True)
         for grant in TERMINAL_GRANTS:
             self.context.require_grant(grant)
         from .research_cycle import drive
         return drive(self,request_id=request_id,expected_basis_id=expected_basis_id,
-            max_steps=max_steps,planner_config_ref=planner_config_ref)
+            max_steps=max_steps,planner_config_ref=planner_config_ref,operation_control=operation_control)
 
     @_boundary
     @_serialized
