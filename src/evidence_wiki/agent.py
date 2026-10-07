@@ -44,6 +44,9 @@ OPERATIONS = (
     ("agent apply", "write", False), ("agent setup-guide", "read", False), ("agent setup-schemas", "read", False),
     ("agent plan-schemas", "read", False), ("agent plan-guide", "read", False),
     *(("agent " + name, effect, True) for name, effect in (("next", "read"), ("start", "write"), ("resume", "read"), ("research-export", "read"), ("progress", "depends_on_options"))),
+    *(("agent "+name, "write" if name in {"run-cycle", "refresh"} else "read", True) for name in
+      ("run-cycle", "refresh", "current", "next-work", "brief", "resolution", "recovery-status", "changes", "impact", "history")),
+    ("agent command-schemas", "read", False),
     ("agent research-guide", "read", False), ("agent research-schemas", "read", False),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
     ("strict check", "read", True), ("strict prepare-review", "read", True),
@@ -237,6 +240,19 @@ def main(argv: list[str] | None = None) -> int:
         from .extension_commands import main as extension_main
 
         return extension_main(argv[0], argv[1:])
+    if argv and argv[0] == "command-schemas":
+        from .research_command_contracts import schemas
+        if argv[1:] not in ([], ["--format", "json"]):
+            from .errors import UsageError
+            from .research_command_contracts import error_document
+            error = UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Use command-schemas --format json.", recoverable=False)
+            print(json.dumps(error_document(error), separators=(",", ":")))
+            return error.exit_code
+        print(json.dumps(schemas(), ensure_ascii=False, separators=(",", ":")))
+        return 0
+    if argv and argv[0] in {"run-cycle", "refresh", "current", "next-work", "brief", "resolution", "recovery-status", "changes", "impact", "history"}:
+        from .autonomous_commands import main as autonomous_main
+        return autonomous_main(argv[0], argv[1:])
     if argv and argv[0] in RESEARCH_OPERATIONS:
         from .research_commands import main as research_main
 

@@ -7,7 +7,9 @@ import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 import re
+import stat as stat_module
 import sys
 import threading
 from collections.abc import MutableMapping
@@ -63,15 +65,18 @@ def _tree_signature(script_dir: Path) -> tuple[tuple[str, int, int, int, int], .
     here -- that is the stated limit of a stat signature, not a content promise.
     """
     entries: list[tuple[str, int, int, int, int]] = []
-    for child in sorted(script_dir.glob("*.py"), key=lambda item: item.name):
-        try:
-            stat = child.stat()
-        except OSError:
-            continue
-        if not child.is_file():
-            continue
-        entries.append((child.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino))
-    return tuple(entries)
+    with os.scandir(script_dir) as children:
+        for child in children:
+            if not child.name.endswith(".py"):
+                continue
+            try:
+                observed = child.stat(follow_symlinks=True)
+            except OSError:
+                continue
+            if not stat_module.S_ISREG(observed.st_mode):
+                continue
+            entries.append((child.name, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns, observed.st_ino))
+    return tuple(sorted(entries))
 
 
 def _content_tree_hash(script_dir: Path) -> str:

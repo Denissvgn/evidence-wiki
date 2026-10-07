@@ -81,6 +81,18 @@ class ResearchNamespace(Namespace):
         with self.session(policy, run_id=run_id, execution=execution) as selected:
             return selected.reconcile_recovery(request_id=request_id, expected_basis_id=expected_basis_id)
 
+    def command_schemas(self):
+        """Return detached noninteractive command request/result shapes."""
+        self._workspace._check_open()
+        from ..research_command_contracts import schemas
+        return schemas()
+
+    def command(self, request, *, runtime=None):
+        """Use the same public dispatch and typed terminal responses as the CLI."""
+        self._workspace._check_open()
+        from ..research_command_operations import invoke
+        return invoke(self._workspace, request, runtime=runtime)
+
     def performance_schemas(self):
         """Read detached performance selection, audit and result shapes."""
         self._workspace._check_open()

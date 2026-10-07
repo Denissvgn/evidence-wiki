@@ -30,6 +30,13 @@ def scoped_operation(function):
             from ._facades._base import _process_exit
 
             raise _process_exit(error) from None
+        except Exception as error:
+            from ._facades._base import _translated
+
+            translated = _translated(error)
+            if translated is not None:
+                raise translated from None
+            raise
         finally:
             ACTIVE_SCOPE.reset(token)
     return scoped

@@ -17,9 +17,10 @@ from pathlib import Path, PurePosixPath
 from ._agent_catalog import CATALOG_PATH, resource_paths
 from ._filesystem import os
 from .errors import UsageError
+from .onboarding_schemas import LIMITS
 
 MAX_BYTES = 1_048_576
-MAX_RESOURCES = 96
+MAX_RESOURCES = LIMITS["resources"]
 
 
 def _refuse(reason: str, *, unknown: bool = False) -> None:

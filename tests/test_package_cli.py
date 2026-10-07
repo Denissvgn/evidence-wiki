@@ -328,7 +328,7 @@ class PackageCliTests(unittest.TestCase):
         payload = json.loads(self.run_cli("contract"))
 
         library_api = payload["library_api"]
-        self.assertEqual("26", library_api["version"])
+        self.assertEqual("52", library_api["version"])
         surface = library_api["surface"]
         self.assertIsInstance(surface, list)
         for operation in (

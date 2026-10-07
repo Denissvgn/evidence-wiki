@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     from ._facades.diagnostics import fleet_status as fleet_status
     from ._facades.snapshots import verify_snapshot as verify_snapshot
     from .onboarding import Onboarding as Onboarding
+    from .runtime_configuration import HostRuntime as HostRuntime
     from .workspace import Workspace as Workspace
 
 # Attribute name -> (submodule to import, attribute on it, or ``None`` for the
@@ -40,6 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "Workspace": (".workspace", "Workspace"),
     "Onboarding": (".onboarding", "Onboarding"),
+    "HostRuntime": (".runtime_configuration", "HostRuntime"),
     "RunPolicy": (".run_policy", "RunPolicy"),
     "ResearchExecution": (".research_execution", "ResearchExecution"),
     "OperationControl": (".operation_control", "OperationControl"),

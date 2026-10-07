@@ -2798,3 +2798,86 @@ normalization, status/cache and indexed-query performance. Its fixed profile gat
 also requires complete counts, clean normalization/lint/status/query results and
 finite measured timings, memory and output. That pipeline evidence complements
 the codec report; neither scope substitutes for the other.
+
+
+Version `52` adds `ws.research.command(request, runtime=...)` and
+`command_schemas()`, with operation matrix version `35`. Caller commands `next`,
+`start`, `resume`, `heartbeat`, `acquire`, `ingest`, `research-export` and `progress`
+use scoped `Onboarding` methods. Discovery has finite ceilings of 128 resources
+and 128 operations, shared by its readers and exported schemas. `research_progress` is read-only unless the host
+selects an external output root and grants `research_progress.write`.
+
+The autonomous command adapter shares its public dispatcher with Python:
+
+```python
+from evidence_wiki import HostRuntime, Workspace
+
+runtime = HostRuntime.from_services(policy, context, execution)
+request = {"schema_version": "research-command-request/v1",
+           "operation": "run-cycle",
+           "arguments": {"run_id": "study", "request_id": "drive", "max_steps": 64}}
+with Workspace.open("WORKSPACE") as workspace:
+    response = workspace.research.command(request, runtime=runtime)
+```
+
+```bash
+evidence-wiki agent run-cycle --target WORKSPACE --runtime PRIVATE_RUNTIME.json \
+  --run-id study --request-id drive --max-steps 64 --noninteractive --format json
+evidence-wiki agent command-schemas --format json
+```
+
+`policy`, `context` and `execution` above are existing host-selected `RunPolicy`,
+`HostContext` and `ResearchExecution` services. Python service construction retains
+the full supported execution configuration. The CLI file loader is deliberately
+finite: its `research-host-runtime/v1` object requires `policy`, `context`,
+`profile`, `commands`, `cwd`, `meter`, `keys`, `qualification_authority`,
+`qualification_records` and `review_signer`, alongside `schema_version`.
+`policy` is `RunPolicy.to_dict()`; `profile` is the exact `ExecutionProfile.document()`
+for versions v1-v3, including optional scheduling and role scopes. Advanced profile
+versions and calibrated registry services are refused by this file loader.
+
+`context` supplies the explicit `HostContext` constructor selections, including
+allowed/writable roots, grants, actor/controller references, authority file,
+state directory and mutation control directory. `commands` maps frozen role
+configuration references to executable argument arrays; `cwd` selects their
+working directory. Executables are trusted host selections, never paths selected
+by a worker proposal. `keys` contains lowercase hexadecimal `observer` and
+`receipt` keys; `qualification_authority` supplies `issuer_ref`, `key` and
+`generator_controller_ref`. `qualification_records` contains existing signed
+records, without issuing or promoting qualifications. `review_signer` contains
+`authority_policy_id`, `authority_revision`, `generator`, `reviewers`,
+`expires_utc` and `not_before_utc`. Each signing identity contains `config_ref`,
+`principal`, `key_id`, `controller_ref`, `role` and its hexadecimal `key`.
+Keys must contain 32-64 bytes. Keep the runtime outside worker input paths.
+
+The file must be a regular file owned by the current user, with no group/world
+permissions, no hard links and no symlink components; reads are limited to 1 MiB
+and validate file and directory identity. Unsupported platforms refuse this
+loader. `meter: "native_process"` is the host's explicit selection for local
+executables that make no model/provider calls: it records process seconds, one
+tool call and zero model calls/tokens/provider charge. It cannot meter a process
+that calls a provider. Select `"unobserved"` when that accounting is unavailable;
+unknown observations cannot qualify research. A custom real host meter remains
+available through Python service construction. Runtime loading does not discover
+plugins, provision credentials or create grants.
+
+Operations are `run-cycle`, `refresh`, `current`, `next-work`, `brief`,
+`resolution`, `recovery-status`, `changes`, `impact` and `history`. The shell uses
+`--request-file` for an operation argument object, with `--run-id`, `--request-id`,
+`--previous-run-id`, `--planner-config-ref` and `--max-steps` as common overrides;
+conflicting duplicates refuse. All reads preserve the native scoped permissions.
+`run-cycle` and `refresh` can mutate canonical run, question, draft and review
+state only through the existing owner grants. Refresh requires a retained previous
+run and the same native planner qualification. Neither adapter launches a daemon.
+
+JSON stdout contains exactly one bounded `research-command-result/v1` envelope,
+with either the unchanged public result or exact typed error fields. Typed
+refusals retain their native exit code; returned negative/blocked/budget outcomes
+exit `3`, and accepted or partial outcomes exit `0`. Brief abstention/rejection
+also exits `3`. `--format text` renders a concise summary. The envelope's
+`terminal: true` means the command invocation has settled; a capability refusal
+has not created or completed a research run. `authorized` and `evidence_accepted`
+remain false. No operation reads user stdin or prompts for semantic choices,
+review or signoff; `--noninteractive` states the behavior already always enabled.
+Stdin file selectors (`-`) are refused. Canonical research acceptance remains
+separate from command transport success and retained historical replay.

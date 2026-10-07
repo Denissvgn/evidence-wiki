@@ -48,6 +48,9 @@ def specifications():
     add("reevaluate", "reevaluate", obj(target=text, value=opaque))
     add("research_next", "research_next", optional(obj(target=text, agent_id=string(128), run_id=string(128)), {"agent_id", "run_id"}))
     add("research_export", "research_export", optional(obj(target=text, allow_partial=boolean, run_id=string(128)), {"allow_partial", "run_id"}))
+    add("research_acquire", "research_acquire", obj(target=text, agent_id=string(128), run_id=string(128), request_id=string(128), url=text))
+    add("research_progress", "research_progress", optional(obj(target=text, run_id=string(128), estimates=opaque), {"run_id", "estimates"}))
+    add("research_progress.write", "research_progress", optional(obj(target=text, output=text, run_id=string(128), estimates=opaque), {"run_id", "estimates"}))
     for operation in ("start", "resume", "heartbeat", "ingest"):
         schema = obj(target=text, agent_id=string(128), run_id=string(128))
         if operation == "ingest":

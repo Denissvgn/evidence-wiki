@@ -17,10 +17,10 @@ from .runtime_identity import generation
 READ = frozenset({"bootstrap", "resources", "resource", "recipes", "inspect", "plan", "check_plan",
     "prepare", "setup_status",
     "revision_plan", "revision_status", "migration_plan", "composition_plan", "fleet_plan", "transition_plan",
-    "research_next", "research_export", "computation.check", "computation.aggregate", "computation.evaluate",
+    "research_next", "research_export", "research_progress", "computation.check", "computation.aggregate", "computation.evaluate",
     "computation.verify", "computation.schedule", "instructions_plan", "contracts", "pack_list", "pack_show", "pack_decide"})
 WRITE = frozenset({"apply", "capture", "revision_apply", "migration_apply", "reevaluate", "composition_apply",
-    "fleet_apply", "transition_apply", "research.start", "research.resume", "research.heartbeat", "research.ingest",
+    "fleet_apply", "transition_apply", "research.start", "research.resume", "research.heartbeat", "research.ingest", "research_acquire", "research_progress.write",
     "computation.write", "computation.apply-warnings", "computation.dispatch", "instructions_apply", "instructions_remove", "pack_scaffold", "pack_derive"})
 
 _PROCESS_GENERATION = None
@@ -430,7 +430,7 @@ class Onboarding:
         return self._finish(guidance(target, agent_id=agent_id, run_id=run_id))
 
     @scoped_operation
-    def research(self, target, operation, *, agent_id, run_id, request_id=None, source_id=None, source_path=None):
+    def research(self, target, operation, *, agent_id, run_id, request_id=None, source_id=None, source_path=None, needs_complete=True):
         from .research_operations import ingest, run_operation
 
         self._check("research." + operation)
@@ -438,11 +438,32 @@ class Onboarding:
         self._scope.path(target, write=True)
         if operation == "ingest":
             result = ingest(target, agent_id=agent_id, run_id=run_id, request_id=request_id,
-                            source_id=source_id, source_path=source_path)
+                            source_id=source_id, source_path=source_path, needs_complete=needs_complete)
         elif operation in {"start", "resume", "heartbeat"}:
             result = run_operation(target, operation, agent_id=agent_id, run_id=run_id)
         else:
             refuse("onboarding_research_operation_unknown")
+        return self._finish(result)
+
+    @scoped_operation
+    def research_acquire(self, target, *, agent_id, run_id, request_id, url):
+        from .research_operations import acquire
+        self._check("research_acquire")
+        self._scope.builtin_workspace(target)
+        self._scope.path(target, write=True)
+        return self._finish(acquire(target, agent_id=agent_id, run_id=run_id, request_id=request_id, url=url))
+
+    @scoped_operation
+    def research_progress(self, target, *, run_id=None, estimates=None, output=None):
+        from .research_progress import progress, save_report
+        self._check("research_progress")
+        self._scope.builtin_workspace(target)
+        if output is not None:
+            self._check("research_progress.write")
+        result = progress(target, run_id=run_id, estimates=estimates)
+        if output is not None:
+            self._scope.path(output, write=True)
+            save_report(output, result, target=target)
         return self._finish(result)
 
     @scoped_operation

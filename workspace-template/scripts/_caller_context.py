@@ -101,7 +101,9 @@ def capture(root):
         "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "invocation_id": content_id(
             "caller-interpreter",
-            [str(Path(sys.executable).parent.resolve() / Path(sys.executable).name), str(Path(sys.prefix).resolve())],
+            # Console entry points can use a different symlink to the same interpreter.
+            # Retain the resolved executable and virtual-environment boundary.
+            [str(executable), str(Path(sys.prefix).resolve())],
         ),
         "dependencies": {
             name: importlib.metadata.version(name) for name in ("PyYAML", "pypdf", "ruamel.yaml", "tzdata")

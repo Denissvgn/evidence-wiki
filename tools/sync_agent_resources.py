@@ -42,6 +42,7 @@ from evidence_wiki.recovery_contracts import schema_document as recovery_schema
 from evidence_wiki.refresh_contracts import schemas as refresh_schemas
 from evidence_wiki.refresh_schedule_contracts import schemas as refresh_schedule_schemas
 from evidence_wiki.repair_progress import schema_document as repair_schema
+from evidence_wiki.research_command_contracts import schemas as command_schemas
 from evidence_wiki.resolution_contracts import _schema_document as resolution_schema
 from evidence_wiki.review_packet_contracts import schema_document as review_packet_schema
 from evidence_wiki.review_service_contracts import schemas as service_schemas
@@ -77,6 +78,7 @@ def exports() -> dict[str, bytes]:
     schemas.update(brief_schemas(native_shapes))
     schemas.update(readability_schemas(native_shapes))
     schemas.update(readability_plan_schemas())
+    schemas.update(command_schemas())
     schemas.update(performance_schemas())
     schemas.update(refresh_schedule_schemas())
     schemas.update(delivery_schemas())

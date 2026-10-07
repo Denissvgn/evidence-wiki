@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "51"
+LIBRARY_API_VERSION = "52"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -94,6 +94,8 @@ LIBRARY_API_SURFACE = (
     "research.requirements.current",
     "research.changes",
     "research.impact",
+    "research.command",
+    "research.command_schemas",
     "research.performance_schemas",
     "research.qualify_performance",
     "research.schedule_refresh",
@@ -542,6 +544,12 @@ def contract() -> dict:
             "unknown": "a linked file without completed owner checks remains uncertain",
             "limits": {"artifact_bytes": 1048576, "destinations": 16, "live_writers": 16},
             "remote_delivery": "unsupported"},
+        "research_commands": {
+            "request_schema": "research-command-request/v1", "result_schema": "research-command-result/v1",
+            "method": "research.command", "runtime": "explicit owner-private file or HostRuntime.from_services",
+            "noninteractive": "no user stdin reads, prompts, implicit credentials, daemon or plugin discovery",
+            "scope": "run-cycle/refresh and bounded current/brief/resolution/recovery/history/impact/changes reads",
+            "errors": "exact public typed envelope and exit status; capability refusal is terminal transport data, not a completed research run"},
         "research_performance": {
             "schema": "research-performance-qualification/v1", "method": "research.qualify_performance",
             "scope": "synthetic native strict/assessment/packet/output codec bounds; not publication or evidence acceptance",

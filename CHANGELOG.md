@@ -4,6 +4,12 @@
 
 ### Added
 
+- Share autonomous research CLI dispatch with the public Python facade, with
+  explicit private host runtime selection, bounded terminal JSON, exact typed
+  errors and concise summaries. Caller research commands use scoped library
+  methods; progress report writes require a separate grant. No semantic prompts
+  or implicit credential setup occur, including with closed stdin.
+
 - Qualify native strict, assessment, packet and output bounds through a frozen
   workload catalog, authenticated Benchmark selection, independent accounting
   critique and deterministic performance rules. Fresh/warm/update measurements

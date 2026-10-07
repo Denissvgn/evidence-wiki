@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from evidence_wiki import agent, agent_resources
+from evidence_wiki import Onboarding, agent, agent_resources
 from evidence_wiki._agent_catalog import CATALOG_PATH, resource_paths
 from evidence_wiki._script_host import load_packaged_script
 from evidence_wiki.errors import UsageError
@@ -33,7 +33,7 @@ def test_exports_match_owners_and_all_resources_remain_usable():
     module = load_module("resource_export", ROOT / "tools/sync_agent_resources.py")
     assert all((ROOT / path).read_bytes() == content for path, content in module.exports().items())
     entries = agent_resources.resource_index()["resources"]
-    assert 1 <= len(entries) <= 64
+    assert 1 <= len(entries) <= agent_resources.MAX_RESOURCES
     for entry in entries:
         document = agent_resources.resource_document(entry["id"])
         assert hashlib.sha256(document["content"].encode()).hexdigest() == entry["sha256"]
@@ -263,3 +263,12 @@ def test_schema_exports_and_examples_validate_with_owners(tmp_path):
         if name != "pack":
             config = yaml.safe_load(files["research.overlay.yml"])
             load_packaged_script(ROOT, "_computation_contract").declaration(config["computation"])
+
+
+def test_resource_and_operation_discovery_fit_shared_finite_bounds():
+    from evidence_wiki.onboarding_schemas import LIMITS
+    assert len(resource_paths())<=agent_resources.MAX_RESOURCES==LIMITS['resources']
+    assert len(agent.OPERATIONS)<=LIMITS['operations']
+    with Onboarding.open() as host:
+        assert host.resources()['bounds']['truncated'] is False
+        assert host.bootstrap()['payload']['operations']

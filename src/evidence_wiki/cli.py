@@ -702,6 +702,7 @@ def _print_help() -> None:
         "  evidence-wiki agent transition-plan|transition-apply --from-file DOCUMENT\n"
         "  evidence-wiki agent instructions-plan|instructions-apply|instructions-remove --from-file DOCUMENT\n"
         "  evidence-wiki agent inspect|routes|source-status|capture|source-schemas|source-guide [source options]\n"
+        "  evidence-wiki agent run-cycle|refresh|current|next-work|brief|resolution|recovery-status|changes|impact|history --target WORKSPACE --runtime PRIVATE_JSON [--noninteractive]\n"
         "  evidence-wiki agent next|start|resume|heartbeat|acquire|ingest|research-export|progress|research-guide|research-schemas [research options]\n"
         "  evidence-wiki agent apply --from-file PLAN [--format json|text]\n"
         "  evidence-wiki agent setup-guide|setup-schemas [options]\n"

@@ -27,7 +27,8 @@ LIMITS = {
     "routes": 256,
     "steps": 64,
     "files": 4096,
-    "resources": 96,
+    "resources": 128,
+    "operations": 128,
     "impact_items": 1000,
 }
 
@@ -125,7 +126,7 @@ _CHECKER = _object(available=_BOOL, basis=_text(), runtime_verified={"const": Fa
 _SUMMARY = _object(
     installation=_VERSIONS, resources=_array(_RESOURCE_METADATA, LIMITS["resources"]),
     schema_ids=_array(_text(128), LIMITS["resources"]),
-    operations=_array(_object(name=_text(128), effect=_enum("read", "write", "temporary_write", "depends_on_options"), workspace_required=_BOOL)),
+    operations=_array(_object(name=_text(128), effect=_enum("read", "write", "temporary_write", "depends_on_options"), workspace_required=_BOOL), LIMITS["operations"]),
     strict=_object(
         capability=_text(), schemas=_array(_text(128)), checker=_CHECKER,
         default_request_schema=_text(), assurance_modes=_array(_text(64)),
@@ -187,7 +188,7 @@ _PAYLOADS = {
         installation=_VERSIONS, python_version=_text(64),
         workspace=_enum("absent", "present", "invalid", "not_inspected"),
         guide=_RESOURCE, schema_ids=_array(_text(128), LIMITS["resources"]),
-        supported_operations=_array(_text(128)), limitations=_NOTES,
+        supported_operations=_array(_text(128), LIMITS["operations"]), limitations=_NOTES,
     ),
     "inspection": _object(
         installation=_VERSIONS, target=_nullable(_TARGET),

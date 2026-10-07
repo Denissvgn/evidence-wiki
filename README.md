@@ -189,6 +189,7 @@ evidence immutable and continue with the [research workflow][research-run].
 
 | Mode | Entry point and boundary |
 | --- | --- |
+| Configured autonomous host | `agent run-cycle` / `refresh` share the [public library dispatcher](docs/library-api.md), with explicit private runtime selection and bounded noninteractive execution. |
 | Current caller | `agent research-guide` describes advice, claims, ingestion and controlled export without another model runner. |
 | Managed adapters | `orchestrate run` / `resume` support Codex CLI 0.138+ and Claude Code. Managed Claude is unavailable on native Windows. |
 | External host | `start` / `next` / `submit` / `status` support an operator-controlled host, including OpenCode, Pi, Aider or Gemini CLI. |
