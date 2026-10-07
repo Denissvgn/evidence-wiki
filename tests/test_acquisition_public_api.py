@@ -50,6 +50,8 @@ def test_direct_acquisition_completion_refuses_historical_parent_custody(setup):
 
     root,control,*_=setup
     with selected(setup).activate():
+        with MutationStore(root,control).locked("historical-acquisition"):
+            pass
         with MutationStore(root,control).workspace_locked():
             with MutationStore(root,control).historical_locked("historical-acquisition",borrow_workspace=True):
                 with pytest.raises(UsageError) as caught:

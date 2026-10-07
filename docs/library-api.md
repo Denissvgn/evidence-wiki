@@ -191,6 +191,11 @@ Version `48` adds permission-filtered retained decision history through
 `workspace.research.history`, with operation matrix `31`. Historical native
 records establish neither current eligibility nor semantic truth.
 
+Version `49` adds bounded autonomous `workspace.research.refresh`,
+`session.refresh` and `workspace.research.refresh_schemas`, with operation matrix
+`32`. A fresh run supersedes an authenticated terminal parent without reusing
+its acceptance or resetting its accounting.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -2564,3 +2569,67 @@ remain global dependencies. Legacy assessment refresh retains its own declared
 contract and cannot grant strict approval. The operation performs no remote fetch,
 review registration, assessment refresh or executor invocation. Output is bounded
 to the strict owner's 100 current claims and one MiB; overflow is a refusal.
+
+
+### Autonomous decision refresh
+
+```python
+result = workspace.research.refresh(
+    policy,
+    run_id="updated-decision",
+    previous_run_id="original-decision",
+    execution=execution,
+    request_id="update-request",
+    planner_config_ref="change-planner",
+    max_steps=64,
+    source_updates=(),
+)
+```
+
+The host explicitly allocates the new run and supplies a configured planner with
+`model` and `plan.propose` capabilities. Its authenticated proposal selects the
+exact native preparation action from a bounded packet containing the parent
+link, permitted material changes and immutable acquisition requests. The planner
+cannot expand source scope, controller grants or budgets. The parent must have
+an authenticated terminal decision and closure under the same retained observer
+and execution profile;
+its original question identities must match. Another active run using those
+originals prevents preparation.
+
+Refresh creates a unique material marker, reopens the original questions using
+protected native mutation preimages, admits fresh drafts and obtains fresh
+mandatory independent reviews. Even identical evidence does not revive prior
+acceptance. Previous run files and measured usage remain retained. The new run
+uses the caller's explicit per-run budget allocation; prior unknown external
+accounting blocks work rather than being reset or treated as zero. Existing
+lifecycle, qualification, role, source permission, retry and step bounds apply.
+
+At most sixteen frozen `source_updates` may be provided. Each contains exactly
+`source_request_id`, `expected_request_basis`, `metadata` and a distinct relative
+`path`, using the existing acquisition input contracts. Collection follows the
+existing permitted transport, protected capture, inventory, normalization and
+fulfillment owners before generation. Updates cannot authorize new destinations,
+providers, rights or claims. A refused update remains unresolved in the report.
+
+The host requires `research_session.refresh`, `refresh_owner.apply`,
+`research_session.run_cycle`, `research_session.brief`, `research_session.resolution`,
+`brief_operations.current` and `resolution_operations.current`, alongside the
+existing run, mutation, worker, review and optional acquisition grants. A terminal
+parent is linked to a distinct new run; refresh does not reopen its journal or
+extend its deadline. A changed refresh head refuses a fork. Replaying the same
+new-run request preserves historical cycle identity and re-evaluates the current
+brief; altered arguments refuse.
+
+The checked `research-refresh-result/v1` report includes retained parent outcome,
+reused and changed permitted source identities, new work and previous usage,
+collection status/error summaries, unresolved update requests, and the current
+superseding brief. Historical source IDs are filtered against actual currently
+permitted packets while the native brief remains held through report construction;
+protected retained collection receipts are not exported. Accepted or partial refresh requires a currently eligible native brief;
+a retained successful cycle can subsequently report abstention when current
+eligibility changes. Previous current eligibility is explicitly unevaluated.
+Protected recovery proves exact desired state separately from historical effect
+completion. Partial or uncertain publication never grants review acceptance or
+justifies redispatch; it can leave the refresh blocked. The report grants no
+external action authority. `refresh_schemas()` returns its detached schema without
+performing refresh work.

@@ -19,6 +19,7 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
     CALCULATION_SCHEMAS,
     CATALOG_PATH,
     RECOVERY_SCHEMAS,
+    REFRESH_SCHEMAS,
     REPAIR_SCHEMAS,
     RESOLUTION_SCHEMAS,
     REVIEW_PACKET_SCHEMAS,
@@ -37,6 +38,7 @@ from evidence_wiki.protected_handoff import schema_document as handoff_schema
 from evidence_wiki.readability_contracts import _schemas as readability_schemas
 from evidence_wiki.readability_plan import schemas as readability_plan_schemas
 from evidence_wiki.recovery_contracts import schema_document as recovery_schema
+from evidence_wiki.refresh_contracts import schemas as refresh_schemas
 from evidence_wiki.repair_progress import schema_document as repair_schema
 from evidence_wiki.resolution_contracts import _schema_document as resolution_schema
 from evidence_wiki.review_packet_contracts import schema_document as review_packet_schema
@@ -74,6 +76,7 @@ def exports() -> dict[str, bytes]:
     schemas.update(readability_schemas(native_shapes))
     schemas.update(readability_plan_schemas())
     schemas.update(delivery_schemas())
+    schemas.update({key: refresh_schemas()[key] for key in REFRESH_SCHEMAS})
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
     guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()

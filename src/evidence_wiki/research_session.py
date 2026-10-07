@@ -600,6 +600,12 @@ class ResearchSession:
             expected_request_basis=expected_request_basis)
 
     @_boundary
+    def refresh(self, *, request_id, previous_run_id, max_steps=64, planner_config_ref=None, source_updates=()):
+        """Start bounded superseding decisions while preserving terminal history."""
+        from .refresh_session import refresh
+        return refresh(self, request_id=request_id, previous_run_id=previous_run_id,
+            max_steps=max_steps, planner_config_ref=planner_config_ref, source_updates=source_updates)
+
     def run_cycle(self, *, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
         """Drive one immutable host request to a finite canonical outcome."""
         self._check("run_cycle",write=True)

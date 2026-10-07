@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "48"
+LIBRARY_API_VERSION = "49"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -94,6 +94,9 @@ LIBRARY_API_SURFACE = (
     "research.requirements.current",
     "research.changes",
     "research.impact",
+    "research.refresh",
+    "research.refresh_schemas",
+    "research.session.refresh",
     "research.history",
     "research.requirements.prepare_revision",
     "research.requirements.revise",
@@ -532,6 +535,15 @@ def contract() -> dict:
             "unknown": "a linked file without completed owner checks remains uncertain",
             "limits": {"artifact_bytes": 1048576, "destinations": 16, "live_writers": 16},
             "remote_delivery": "unsupported"},
+        "research_refresh": {
+            "schema": "research-refresh-result/v1", "method": "research.refresh",
+            "session_method": "research.session.refresh", "planner": "scoped planner selects exact native refresh preparation",
+            "lifecycle": "new run linked to an authenticated terminal parent; terminal history remains immutable",
+            "invalidation": "unique native material marker; fresh draft and mandatory review for every original",
+            "budgets": "explicit new-run allocation; prior unknown external accounting blocks refresh",
+            "source_updates": "at most sixteen frozen acquisitions through the existing transport/capture/normalization/fulfillment owners",
+            "historical": "previous recording and material reuse establish no current approval",
+            "limits": {"steps": 64, "result_bytes": 1048576}},
         "research_impact": {
             "schema": "research-current-impact/v1", "method": "research.impact",
             "grant": "impact_operations.current", "comparison_grant": "change_operations.current",

@@ -81,6 +81,19 @@ class ResearchNamespace(Namespace):
         with self.session(policy, run_id=run_id, execution=execution) as selected:
             return selected.reconcile_recovery(request_id=request_id, expected_basis_id=expected_basis_id)
 
+    def refresh_schemas(self):
+        """Return the detached terminal refresh report schema."""
+        self._workspace._check_open()
+        from ..refresh_contracts import schemas
+        return schemas()
+
+    def refresh(self, policy, *, run_id, execution, request_id, previous_run_id,
+                max_steps=64, planner_config_ref=None, source_updates=()):
+        """Drive a bounded new run linked to an authenticated terminal decision."""
+        with self.session(policy, run_id=run_id, execution=execution) as selected:
+            return selected.refresh(request_id=request_id, previous_run_id=previous_run_id,
+                max_steps=max_steps, planner_config_ref=planner_config_ref, source_updates=source_updates)
+
     def run_cycle(self, policy, *, run_id, execution, request_id, expected_basis_id=None, max_steps=64, planner_config_ref=None):
         """One host invocation over existing session and authenticated effect owners."""
         with self.session(policy,run_id=run_id,execution=execution) as selected:

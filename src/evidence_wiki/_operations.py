@@ -7,10 +7,13 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "31"
+OPERATION_MATRIX_VERSION = "32"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("research.refresh_schemas", None, "none; detached terminal report schema", "parent workspace lifetime", "none"),
+    ("research.refresh", None, "bounded new run, retained refresh preimages, question lifecycle and superseding decisions", "native session, mutation and usage owners; terminal parent preserved", "configured scoped planner/research/evaluator and approved acquisition hosts"),
+    ("research.session.refresh", None, "same bounded superseding workflow as research.refresh", "authenticated terminal parent, immutable new-run intent and canonical effect owners", "configured host services only"),
     ("research.history", None, "none; bounded permission-filtered retained claim/source/review/brief material", "authenticated original native journal, current scope and held source use with closing checks", "none; no executor invocation or restoration"),
     ("research.session.delivery_status", None, "none; protected history with current identity eligibility checked separately", "original bound journal, private immutable receipt and fresh current source closure", "none"),
     ("research.session.reconcile_delivery", None, "receipt-backed accounting observation only; no artifact write or retry", "original native reservation and exact protected committed owner receipt", "none"),

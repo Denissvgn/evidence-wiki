@@ -600,6 +600,10 @@ def _owner_action(session, view, records, *, resuming=False):
             return _terminal_action(session, view, "stop_budget", "budget_exhausted")
     if view["qualification"]["state"] != "qualified" and getattr(getattr(session.execution, "profile", None), "calibration", None) is None:
         return _terminal_action(session, view, "blocked_external", "qualification_unknown")
+    from .refresh_session import next_action as refresh_action
+    refreshing = refresh_action(session, view, records)
+    if refreshing is not None:
+        return refreshing
     observation = policy_observation(session, view)
     if observation["selected_outcomes"]:
         decision = session.policy.decide(observation)
@@ -1264,8 +1268,9 @@ def _mutation(session, identifier, operation, arguments, *, effect_deadline=None
 
 def _prepare(session, original_id):
     from ._facades._base import call_seam
+    from .refresh_session import prepare as prepare_refresh
     from .research_session import _load
-
+    prepare_refresh(session, original_id)
     view = current(session)
     original = next(row for row in view["accounting"]["original_outcomes"] if row["original_id"] == original_id)
     for question in original["questions"]:
@@ -2158,6 +2163,9 @@ def _complete_advance(session, request_id, expected_basis_id, action, attempt, i
                 action = _terminal_action(session, current(session), "abstained", "unsupported_claim")
         elif operation == "prepare":
             _prepare(session, action["original_id"])
+        elif operation == "refresh_collect":
+            from .refresh_session import collect
+            collect(session, action["source_update"])
         elif operation == "normalize":
             _source_prepare(session)
         elif operation == "admit":

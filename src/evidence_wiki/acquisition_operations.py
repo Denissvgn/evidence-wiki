@@ -198,7 +198,9 @@ def _fulfillment_result(request_id, mutation_request_id, receipt):
 
 
 def _retained_fulfillment(root, context, outer):
-    with MutationStore(root, context.mutation_control_directory).historical_locked(outer["mutation_request_id"]) as store:
+    # Fulfillment is an authorized write: its first call may create the request
+    # namespace before any protected intent exists. Observation reads stay read-only.
+    with MutationStore(root, context.mutation_control_directory).locked(outer["mutation_request_id"]) as store:
         value = store._read("intent.json")
         if value is None:
             return None

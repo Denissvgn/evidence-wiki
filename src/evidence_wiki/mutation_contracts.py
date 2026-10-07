@@ -32,6 +32,7 @@ OPERATIONS = (
     "source_requests.link_current", "source_requests.fulfill_current",
     "questions.block_current", "questions.reopen_current",
     "sources.build_index",
+    "questions.refresh",
 )
 
 
@@ -77,6 +78,9 @@ def argument_schemas() -> dict[str, dict[str, Any]]:
             blocking_request_ids=selectors, clear_accepted_source_ids=boolean, clear_blocking_request_ids=boolean),
         "coverage.evaluate": _obj(slug=_text(128)),
         "coverage.revision": _obj(request=opaque),
+        "questions.refresh": _obj(run_id=_text(96), previous_run_id=_text(96), request_id=_text(96),
+            expected_basis_id=_text(71), expected_marker_sha256=_null(_text(71)),
+            original_ids=_array(_text(128), 100)),
         "questions.add_batch": _obj(from_file=_text(), dry_run=boolean),
         "source_requests.add": _obj(kind=_text(128), query_or_identifier=_content(), rationale=_content(),
             priority={"enum": ["high", "medium", "low"]}, question_slugs=selectors, scope=_null(scope)),
@@ -112,6 +116,7 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
                           "clear_accepted_source_ids": False, "clear_blocking_request_ids": False},
         "coverage.evaluate": {}, "coverage.revision": {},
         "questions.add_batch": {"dry_run": False},
+        "questions.refresh": {},
         "source_requests.add": {"priority": "medium", "question_slugs": None, "scope": None},
         "source_requests.fulfill": {"match_scope": None, "require_scope": False},
         "source_requests.link_current": {"scope": None},
@@ -136,6 +141,9 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
     _shape(result, argument_schemas()[operation], "/arguments")
     if operation == "questions.add_batch" and result["from_file"] == "-":
         refuse("INPUT_UNBOUND", "/arguments/from_file")
+    if operation == "questions.refresh":
+        for field in ("run_id", "previous_run_id", "request_id"):
+            validate_request_id(result[field])
     if operation == "sources.capture":
         from .source_contracts import DELIVERY, decode
         try:
@@ -178,7 +186,7 @@ def schemas() -> dict[str, dict[str, Any]]:
         operation_outcome={"enum": ["original_unknown", "desired_state_only", "owner_return_success",
             "owner_return_partial", "owner_return_with_inputs_changed", "owner_return_with_transport_uncertainty",
             "authenticated_event"]},
-        proof_kind={"enum": ["none", "owner_return", "capture_pair", "coverage_postconditions", "request_postconditions", "strict_checkpoint", "source_postconditions", "draft_postconditions", "requirements_postconditions"]})
+        proof_kind={"enum": ["none", "owner_return", "capture_pair", "coverage_postconditions", "refresh_postconditions", "request_postconditions", "strict_checkpoint", "source_postconditions", "draft_postconditions", "requirements_postconditions"]})
     common = dict(request_id=identifier, operation={"enum": list(OPERATIONS)}, arguments=opaque,
                   expected_revision=hashed, input_files=_array(file, 64), owner_generation=generation,
                   host_context_sha256=hashed)

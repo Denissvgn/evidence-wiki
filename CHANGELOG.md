@@ -4,6 +4,11 @@
 
 ### Added
 
+- Refresh decisions through a bounded authenticated planner and a new run linked
+  to retained terminal history. Permitted updates use existing acquisition owners;
+  unique material invalidation forces fresh drafts and mandatory reviews. Current
+  briefs own acceptance, while old accounting and unresolved failures remain visible.
+
 - Explain current strict claim dependencies and review eligibility with conservative
   whole-workspace invalidation, current authority checks and optional local source
   comparisons. Legacy assessment status does not confer strict approval.

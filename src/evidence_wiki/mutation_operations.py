@@ -42,6 +42,7 @@ from .operation_control import OperationControl, checkpoint
 # This registry contains known dictionary-return owners, never user callables,
 # module names, shell commands or model-provided argv.
 OWNER_OPERATIONS = {
+    "questions.refresh": ("refresh_owner", "apply"),
     "coverage.init": ("coverage_manifest", "run_init_inline"),
     "coverage.link": ("coverage_manifest", "run_link"),
     "coverage.evaluate": ("coverage_manifest", "run_evaluate_checked"),
@@ -71,10 +72,14 @@ STAGED_DRAFTS = frozenset({"strict.admit"})
 STAGED_REQUIREMENTS = frozenset({"requirements.revise"})
 STAGED_CAPTURES = frozenset({"sources.capture_revision"})
 STAGED_ARTIFACTS = frozenset({"artifact.deliver"})
-STAGED_OPERATIONS = STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS | STAGED_CAPTURES | STAGED_ARTIFACTS
+STAGED_REFRESH = frozenset({"questions.refresh"})
+STAGED_OPERATIONS = STAGED_REFRESH | STAGED_SOURCES | STAGED_COVERAGE | STAGED_DRAFTS | STAGED_REQUIREMENTS | STAGED_CAPTURES | STAGED_ARTIFACTS
 
 
 def _recovery_module(operation):
+    if operation in STAGED_REFRESH:
+        from . import mutation_refresh_recovery
+        return mutation_refresh_recovery
     if operation in STAGED_ARTIFACTS:
         from . import artifact_delivery_recovery
         return artifact_delivery_recovery
@@ -965,6 +970,7 @@ def reconcile(project_root: str | Path, request_id: str, *,
                     if operation in STAGED_OPERATIONS:
                         supported = True
                         kind = ("capture_pair" if operation in STAGED_CAPTURES else
+                                "refresh_postconditions" if operation in STAGED_REFRESH else
                                 "requirements_postconditions" if operation in STAGED_REQUIREMENTS else
                                 "draft_postconditions" if operation in STAGED_DRAFTS else
                                 "source_postconditions" if operation in STAGED_SOURCES else "coverage_postconditions")
