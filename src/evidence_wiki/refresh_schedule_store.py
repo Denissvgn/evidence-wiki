@@ -15,7 +15,10 @@ from .research_session_contracts import refuse
 class ScheduleStore:
     """Separate bounded namespace with atomic state CAS and a native dispatch lease."""
 
-    def __init__(self, root, control, schedule_id):
+    def __init__(self, root, control, schedule_id, *, namespace="refresh-schedules"):
+        if namespace not in {"refresh-schedules", "performance-runs"}:
+            refuse("SCHEDULE_STORE_INVALID")
+        self.namespace = namespace
         self.root, self.control, self.schedule_id = root, control, schedule_id
         self.store = None
         self.new = False
@@ -28,10 +31,10 @@ class ScheduleStore:
         try:
             with store.workspace_locked():
                 try:
-                    os.stat("refresh-schedules", dir_fd=store._workspace, follow_symlinks=False)
+                    os.stat(self.namespace, dir_fd=store._workspace, follow_symlinks=False)
                 except FileNotFoundError:
                     return False
-                schedules = store._directory(store._workspace, "refresh-schedules")
+                schedules = store._directory(store._workspace, self.namespace)
                 try:
                     os.stat(hashlib.sha256(self.schedule_id.encode()).hexdigest(), dir_fd=schedules, follow_symlinks=False)
                     return True
@@ -47,7 +50,7 @@ class ScheduleStore:
         token = _HISTORICAL_READ.set(True) if not write else None
         try:
             with store.workspace_locked():
-                schedules = store._directory(store._workspace, "refresh-schedules")
+                schedules = store._directory(store._workspace, self.namespace)
                 name = hashlib.sha256(self.schedule_id.encode()).hexdigest()
                 try:
                     os.stat(name, dir_fd=schedules, follow_symlinks=False)

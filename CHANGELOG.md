@@ -4,6 +4,13 @@
 
 ### Added
 
+- Qualify native strict, assessment, packet and output bounds through a frozen
+  workload catalog, authenticated Benchmark selection, independent accounting
+  critique and deterministic performance rules. Fresh/warm/update measurements
+  report serialization, hardware, traced memory and RSS, with explicit partition
+  guidance. Missing or unknown measurements never qualify; scientific approval
+  remains separate. Offline scale gates also require complete quality evidence.
+
 - Expose finite host scheduled refresh requests with stored policy, stable notice
   identities and signed event cursors. Current native checks detect missing hints;
   queued changes coalesce and obsolete jobs cancel. Explicit host advancement

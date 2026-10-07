@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "50"
+LIBRARY_API_VERSION = "51"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -94,6 +94,8 @@ LIBRARY_API_SURFACE = (
     "research.requirements.current",
     "research.changes",
     "research.impact",
+    "research.performance_schemas",
+    "research.qualify_performance",
     "research.schedule_refresh",
     "research.refresh_schedule_schemas",
     "research.schedule_refresh.current",
@@ -540,6 +542,13 @@ def contract() -> dict:
             "unknown": "a linked file without completed owner checks remains uncertain",
             "limits": {"artifact_bytes": 1048576, "destinations": 16, "live_writers": 16},
             "remote_delivery": "unsupported"},
+        "research_performance": {
+            "schema": "research-performance-qualification/v1", "method": "research.qualify_performance",
+            "scope": "synthetic native strict/assessment/packet/output codec bounds; not publication or evidence acceptance",
+            "agents": "configured integration workload selector and independent evaluator accounting critic",
+            "measurement": "fresh interpreter first call, warm and repeated updated fixtures; serialization, tracemalloc and RSS",
+            "gate": "fixed thresholds and complete authenticated accounting; unknown/truncated cannot qualify",
+            "limits": {"workloads": 12, "samples_per_workload": 4, "model_attempts": 2, "bytes": 1048576}},
         "research_refresh_schedule": {
             "schema": "research-refresh-schedule-status/v1", "factory": "research.schedule_refresh",
             "daemon": "none; explicit external host poll/advance only",

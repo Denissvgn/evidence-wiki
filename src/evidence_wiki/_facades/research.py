@@ -81,6 +81,21 @@ class ResearchNamespace(Namespace):
         with self.session(policy, run_id=run_id, execution=execution) as selected:
             return selected.reconcile_recovery(request_id=request_id, expected_basis_id=expected_basis_id)
 
+    def performance_schemas(self):
+        """Read detached performance selection, audit and result shapes."""
+        self._workspace._check_open()
+        from ..performance_contracts import schemas
+        return schemas()
+
+    def qualify_performance(self, policy, *, execution, request_id, benchmark_config_ref, critic_config_ref, seed=0):
+        """Qualify bounded synthetic native contracts under frozen host policy."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import performance_qualification
+            return performance_qualification
+        return call_seam(load, "performance_qualification", "run", self._root, policy, execution=execution,
+            request_id=request_id, benchmark_config_ref=benchmark_config_ref, critic_config_ref=critic_config_ref, seed=seed)
+
     def refresh_schedule_schemas(self):
         """Return detached host scheduling shapes without registering work."""
         self._workspace._check_open()

@@ -200,6 +200,10 @@ Version `50` adds `research.schedule_refresh`, detached scheduling schemas and
 explicit host schedule current/poll/advance operations, with matrix `33`.
 No schedule registration starts a background daemon.
 
+Version `51` adds `research.performance_schemas` and
+`research.qualify_performance`, with matrix `34`. Performance qualification is
+bounded synthetic native contract evidence, separate from scientific approval.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -2718,3 +2722,79 @@ be reconciled within its original native deadline and budget. Unknown accounting
 in the parent refresh ancestry or a dispatch blocks further work. A later fresh
 allocation is an explicit host decision; delivery cannot renew old budgets or
 acceptance.
+
+
+### Bounds and performance qualification
+
+```python
+report = workspace.research.qualify_performance(
+    policy,
+    execution=execution,
+    request_id="native-performance-check",
+    benchmark_config_ref="benchmark-worker",
+    critic_config_ref="performance-reviewer",
+    seed=17,
+)
+```
+
+The host explicitly selects a scoped integration worker with `model` and
+`integration.propose`, and an operationally independent evaluator controller with
+`model` and `verdict.propose`. The worker chooses the order of the complete
+frozen twelve-workload catalog; it cannot omit a required case, change thresholds,
+expand input sizes or select arbitrary commands/paths. An authenticated accounting
+critic checks the actual measurement set, and the fixed deterministic gate decides
+`passed`, `failed` or `incomplete`. The method requires
+`performance_qualification.run`, immutable `RunPolicy` permission for model and
+offline checks, current controller mapping and a private mutation control directory.
+Schema discovery is a detached parent-lifetime read and starts no agent or probe.
+
+Workloads include small inputs based on the frozen policy budgets, the native
+boundary and one controlled overflow for strict claims, assessment change hints,
+review packet sources and whole JSON output bytes. These are synthetic native
+codec fixtures, not evidence adoption, semantic review, assessment issuance or
+publication. Current capability limits remain independent: strict claims 100 and
+1 MiB; assessment change hints 128 and 1 MiB with native assessment page bound 32;
+paged review sources 64 and 512 KiB; whole JSON reads 1 MiB with their own text,
+node and depth bounds. No task can raise those native limits.
+
+A fixed fresh child interpreter measures each workload's first call, same-process
+warm repeat and two changed revisions. Descriptor validation precedes the first
+call, so `cache_scope` describes that boundary precisely rather than asserting
+that every imported module/cache is cold. Each sample identifies its canonical
+input hash/size, construction time, validation time, serialization time and Python
+traced peak allocation. The child also reports process RSS high-water; these two
+memory scopes are not whole-system allocation estimates. Hardware records include
+platform, architecture, Python and CPU count. Authenticated agent lifetime and
+usage accounting stay separate from native probe time; provider latency is not
+inferred from a model label or host process time.
+
+Fixed qualification requires all twelve cases, all four samples per case, exact
+expected native boundary outcomes and three distinct material input revisions.
+Per sample, validation and serialization each stay within one second and traced
+peak within 64 MiB; each probe stays within 30 seconds and process peak RSS within
+256 MiB. Missing, unknown, nonfinite, truncated or unaccounted observations cannot
+qualify. Positive measured model use and complete host usage fields are required
+for both agents. The critic's declared completeness cannot replace those owner
+checks, and output decoding reproduces the deterministic gate from recorded data.
+
+Expected overflow includes an explicit maximum-unit/byte partition suggestion.
+It is neither a complete result nor a cursor permitting approval reuse: every
+partition needs native scope and fresh full review. The performance report always
+sets `authorized` and `evidence_accepted` false, even when performance qualifies.
+It does not certify scientific correctness, adversarial worker isolation, genuine
+model quality or every workspace owner flow.
+
+Private authenticated CAS freezes policy, role/service identities, host selection,
+owner generation, root/control identities, seed and workload catalog. Two bounded
+agent reservations are retained before invocation; known-final observations settle
+against original per-job and aggregate policy ceilings. Lost observations can only
+poll the same retained attempt, never reset or redispatch it. Missing existing
+retention refuses. Exact request replay returns retained performance evidence as
+historical; it does not renew the environment or scientific eligibility. Source
+workspace files remain unchanged, and no daemon or external provider is created.
+
+The separate offline scale tool measures generated workspace inventory,
+normalization, status/cache and indexed-query performance. Its fixed profile gate
+also requires complete counts, clean normalization/lint/status/query results and
+finite measured timings, memory and output. That pipeline evidence complements
+the codec report; neither scope substitutes for the other.

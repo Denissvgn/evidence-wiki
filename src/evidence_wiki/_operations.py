@@ -7,10 +7,12 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "33"
+OPERATION_MATRIX_VERSION = "34"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("research.performance_schemas", None, "none; detached performance shapes", "parent workspace lifetime", "none"),
+    ("research.qualify_performance", None, "private frozen performance reservations and measured qualification; scientific state unchanged", "private native CAS and independent lease; workspace gate released before calls", "configured workload/critic agents and fixed fresh-interpreter native codec probes"),
     ("research.refresh_schedule_schemas", None, "none; detached host schedule schemas", "parent workspace lifetime", "none"),
     ("research.schedule_refresh", None, "private frozen host schedule registration", "native control workspace gate, authenticated separate schedule slot", "none"),
     ("research.schedule_refresh.current", None, "none; current host queue and authenticated event cursor", "read-only native private slot and current authority", "none"),

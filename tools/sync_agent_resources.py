@@ -33,6 +33,7 @@ from evidence_wiki.brief_contracts import _schemas as brief_schemas
 from evidence_wiki.calculation_contracts import schema_document as calculation_schema
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
+from evidence_wiki.performance_contracts import schemas as performance_schemas
 from evidence_wiki.protected_handoff import HANDOFF
 from evidence_wiki.protected_handoff import schema_document as handoff_schema
 from evidence_wiki.readability_contracts import _schemas as readability_schemas
@@ -76,6 +77,7 @@ def exports() -> dict[str, bytes]:
     schemas.update(brief_schemas(native_shapes))
     schemas.update(readability_schemas(native_shapes))
     schemas.update(readability_plan_schemas())
+    schemas.update(performance_schemas())
     schemas.update(refresh_schedule_schemas())
     schemas.update(delivery_schemas())
     schemas.update({key: refresh_schemas()[key] for key in REFRESH_SCHEMAS})
