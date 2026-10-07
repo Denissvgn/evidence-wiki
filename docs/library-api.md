@@ -183,6 +183,10 @@ reconciliation, with operation matrix `28`. Optional `ArtifactDeliveryPlan`
 produces execution profile/v12. See [checked local delivery](#checked-local-delivery)
 for destinations, grants, interrupted writes and historical status.
 
+Version `47` adds `workspace.research.impact` with operation matrix `30`.
+Current native strict evaluation owns eligibility; declared dependencies explain
+known effects while whole-workspace review bases require conservative invalidation.
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -2477,3 +2481,40 @@ remain unchanged. At most 32 pairs and 32 distinct source IDs may be selected;
 retained inputs and the output each have a 1 MiB bound. Unsupported original
 path bindings are unavailable. Whole-workspace closing checks refuse concurrent
 changes, and a closed workspace cannot perform the read.
+
+
+### Current strict impact
+
+`workspace.research.impact(pairs=None, before_requirements_revision_id=None)`
+requires a current `HostContext`, `workspace.open` and
+`impact_operations.current`, protected source usage and a configured strict policy.
+It returns `research-current-impact/v1`, recomputing the full strict owner before
+reporting claim acceptance, review reasons and claims requiring review. Missing,
+denied or changing strict inputs return a typed refusal rather than eligible results.
+
+Each current claim exposes its declared direct and transitive source dependencies,
+premise claims and calculation references. Retained native reviews explain known
+claim, premise, question, policy, permission and implementation differences.
+`conservatively_invalidated_claim_ids` identifies latest retained review bases that
+no longer match the current whole-workspace strict basis or whose global review
+authority has changed. Even a claim without a
+known changed source can require review. New current reviews remain subject to
+native acceptance; the dependency map does not enable selective approval reuse.
+
+Optional `pairs` use the same bounded source selectors as `research.changes` and
+additionally require `change_operations.current` and protected original requirements.
+The selected local comparison is joined to the strict evaluation under closing
+workspace and authority checks. Disclosed retained revisions are rechecked in
+the held strict usage view through return. Unknown comparison dimensions remain explicit;
+absence of a selected source change never proves absence of wider effects.
+Pairs between different source IDs remain comparison candidates in
+`comparison_affected_source_ids`; they cannot establish a changed dependency
+through semantic identity inference. Without pairs, source comparison is
+reported as not requested. A requirements
+revision selector requires pairs.
+
+Policy, instructions, questions, permissions, implementation, computation and time
+remain global dependencies. Legacy assessment refresh retains its own declared
+contract and cannot grant strict approval. The operation performs no remote fetch,
+review registration, assessment refresh or executor invocation. Output is bounded
+to the strict owner's 100 current claims and one MiB; overflow is a refusal.

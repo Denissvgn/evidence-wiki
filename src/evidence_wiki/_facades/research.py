@@ -36,6 +36,15 @@ class ResearchNamespace(Namespace):
         return call_seam(load, "change_operations", "current", self._root, pairs=pairs,
             before_requirements_revision_id=before_requirements_revision_id)
 
+    def impact(self, *, pairs=None, before_requirements_revision_id=None):
+        """Explain current strict eligibility with whole-workspace invalidation."""
+        self._workspace._check_open()
+        def load(_stem):
+            from .. import impact_operations
+            return impact_operations
+        return call_seam(load, "impact_operations", "current", self._root, pairs=pairs,
+            before_requirements_revision_id=before_requirements_revision_id)
+
     def current(self, policy, *, run_id=None, execution=None):
         return self._invoke("current", policy, run_id=run_id, execution=execution)
 

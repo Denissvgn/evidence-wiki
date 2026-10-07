@@ -4,6 +4,10 @@
 
 ### Added
 
+- Explain current strict claim dependencies and review eligibility with conservative
+  whole-workspace invalidation, current authority checks and optional local source
+  comparisons. Legacy assessment status does not confer strict approval.
+
 - Add frozen local Markdown artifact destinations, exact scoped Release proposals,
   current evidence checks at publication and protected receipt-only reconciliation.
   Interrupted unchecked writes remain uncertain; historical delivery does not

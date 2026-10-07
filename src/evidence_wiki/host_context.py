@@ -457,6 +457,7 @@ def call_binding() -> Iterator[None]:
 # owners still validate their arguments and authenticate evidence independently.
 _READ_SEAMS = frozenset({
     ("change_operations", "current"),
+    ("impact_operations", "current"),
     ("repair_progress_owner", "current"), ("resolution_operations", "current"), ("brief_operations", "current"),
     ("review_page_operations", "prepare"),
     ("claim_diagnostics", "current"),

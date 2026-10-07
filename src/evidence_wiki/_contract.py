@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "45"
+LIBRARY_API_VERSION = "47"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -93,6 +93,7 @@ LIBRARY_API_SURFACE = (
     "source_requests.fulfill_current",
     "research.requirements.current",
     "research.changes",
+    "research.impact",
     "research.requirements.prepare_revision",
     "research.requirements.revise",
     "strict.check",
@@ -530,6 +531,13 @@ def contract() -> dict:
             "unknown": "a linked file without completed owner checks remains uncertain",
             "limits": {"artifact_bytes": 1048576, "destinations": 16, "live_writers": 16},
             "remote_delivery": "unsupported"},
+        "research_impact": {
+            "schema": "research-current-impact/v1", "method": "research.impact",
+            "grant": "impact_operations.current", "comparison_grant": "change_operations.current",
+            "basis": "native current whole-workspace strict evaluation; declared dependency edges cannot narrow approval reuse",
+            "dependencies": "sources, transitive premises, calculations, questions, policy, permission, implementation and time",
+            "legacy_assessments": "separate refresh contract; never strict approval",
+            "limits": {"claims": 100, "bytes": 1048576}, "effects": "read_only_no_remote_refresh"},
         "strict_evidence": {
             "capability": "strict-evidence/v1",
             "schemas": sorted(strict_contract.schema_documents()),
