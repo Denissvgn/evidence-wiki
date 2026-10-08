@@ -66,6 +66,58 @@ def test_semantic_inputs_and_full_source_bindings_change_semantic_basis(field):
     assert after["semantic_basis_id"] != before
 
 
+def normalized_carrier(payload):
+    return ("# Exact retained observation\n\n## Citation Metadata\n\n- URL: https://example.org/observation\n\n"
+        "## Abstract\n\nNone extracted.\n\n## Outline\n\nNone extracted.\n\n"
+        "## Extracted Text\n\n" + payload + "\n\n## Figures and Tables\n\n- None recorded.\n\n"
+        "## Links\n\n- None recorded.\n\n## Raw Source Paths\n\n- `raw/observation.json`\n\n"
+        "## Parse Warnings\n\n- None recorded.\n")
+
+
+def test_native_normalized_carrier_keeps_whole_material_in_qualified_basis():
+    value = inputs()
+    plain = observe_domain(**value)
+    value["sources"][0]["content"] = normalized_carrier(value["sources"][0]["content"])
+    normalized = observe_domain(**value)
+    assert normalized["state"] == "observed"
+    assert normalized["semantic_basis_id"] != plain["semantic_basis_id"]
+    value["sources"][0]["content"] = value["sources"][0]["content"].replace("example.org/observation", "example.org/another")
+    changed = observe_domain(**value)
+    assert changed["state"] == "observed" and changed["semantic_basis_id"] != normalized["semantic_basis_id"]
+
+
+def test_exact_native_host_custody_boilerplate_is_not_additional_factual_evidence():
+    value = inputs()
+    body = normalized_carrier(value["sources"][0]["content"])
+    body = body.replace("## Abstract\n\nNone extracted.",
+        "## Abstract\n\nHost-provided text with explicit capture qualifications.")
+    body = body.replace("## Parse Warnings\n\n- None recorded.",
+        "## Parse Warnings\n\n- Host origin, scope, completeness and rights are caller declarations; captured bytes are checked independently.")
+    value["sources"][0]["content"] = body
+    assert observe_domain(**value)["state"] == "observed"
+
+
+@pytest.mark.parametrize("change", ["abstract", "outline", "media", "warning", "duplicate", "extra", "preface", "trailing", "fenced"])
+def test_normalized_carrier_cannot_hide_additional_or_ambiguous_facts(change):
+    value = inputs()
+    payload = value["sources"][0]["content"]
+    body = normalized_carrier(payload)
+    replacements = {
+        "abstract": ("## Abstract\n\nNone extracted.", "## Abstract\n\nThe measured value was negated."),
+        "outline": ("## Outline\n\nNone extracted.", "## Outline\n\n- An opposing finding"),
+        "media": ("## Figures and Tables\n\n- None recorded.", "## Figures and Tables\n\n- Table: conflicting value"),
+        "warning": ("## Parse Warnings\n\n- None recorded.", "## Parse Warnings\n\n- Missing operands"),
+        "duplicate": ("## Extracted Text", "## Extracted Text\n\n## Extracted Text"),
+        "extra": ("## Extracted Text", "## Contrary Evidence\n\nConflicting result.\n\n## Extracted Text"),
+        "preface": ("# Exact retained observation", "An unsupported premise.\n\n# Exact retained observation"),
+        "trailing": (payload, payload + "\nThe opposite interpretation is correct."),
+        "fenced": (payload, "```json\n" + payload + "\n```"),
+    }
+    before, after = replacements[change]
+    value["sources"][0]["content"] = body.replace(before, after, 1)
+    assert observe_domain(**value)["state"] == "unknown"
+
+
 def test_question_native_status_and_run_bookkeeping_do_not_change_semantic_basis():
     value = inputs()
     before = observe_domain(**value)

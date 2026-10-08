@@ -109,14 +109,16 @@ def test_missing_or_truncated_decisive_source_context_never_becomes_complete():
                for section in packet["manifest"]["sections"])
 
 
-def test_unavailable_premise_and_computational_projection_stay_explicit():
+def test_unavailable_premise_stays_explicit_and_malformed_computation_refuses():
     supplied = inputs()
     supplied["owner_snapshot"]["claim"]["premises"] = ["missing-premise"]
-    supplied["owner_snapshot"]["computation"] = {"unavailable": "definition"}
     packet = create_review_context(**supplied).document()
     assert not packet["manifest"]["context_complete"]
-    assert set(packet["manifest"]["limitations"]) == {"premise_context_missing", "computation_context_unavailable"}
+    assert set(packet["manifest"]["limitations"]) == {"premise_context_missing"}
     assert "missing-premise" not in json.dumps(packet)
+    supplied["owner_snapshot"]["computation"] = {"unavailable": "definition"}
+    with pytest.raises(ExecutionError, match="review_context_inputs_invalid"):
+        create_review_context(**supplied)
 
 
 def test_cross_question_premise_masks_identity_and_discloses_missing_question_context():

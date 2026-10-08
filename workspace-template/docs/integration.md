@@ -1,6 +1,6 @@
 # Integration journey
 
-Library API 57; operation matrix 39. Documentation basis: `34f7d231b3f73e5bed8a0628b6236bce76b59148038a50d438a3165de962d676`.
+Library API 58; operation matrix 40. Documentation basis: `7367fcc1d481a690b790836089579d205e173e6e9a0c0d62f593b60c15d44a5c`.
 
 ## Journey
 
@@ -157,6 +157,7 @@ Transport `returned` reports domain data, including negative outcomes. `refused`
 | `reconcile-pending` | native write | run_id, request_id | none | `research_reconcile_pending` |
 | `reconcile-recovery` | native write | run_id, request_id, expected_basis_id | none | `research_reconcile_recovery` |
 | `report` | read | run_id | after_sequence, max_records | `research_report` |
+| `semantic-report` | read | run_id | after_index, max_records, expected_snapshot_id | `research_semantic_report` |
 | `repair-progress` | read | run_id | original_id, after_sequence, max_records | `research_repair_progress` |
 | `review-services` | read | run_id | none | `research_review_services` |
 | `prepare-acquisition` | read | run_id, request_id | alternative_ids | `research_prepare_acquisition` |

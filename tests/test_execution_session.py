@@ -95,6 +95,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     initialized_config = yaml.safe_load((initialized_root / "research.yml").read_bytes())
     initialized_metadata = (initialized_root / "workspace-system.yml").read_bytes()
     root, control, proposal, normalized = draft_fixture.__wrapped__(tmp_path, monkeypatch)
+    if options.get("semantic_finite"):
+        from tests._semantic_fixture import prepare_native
+        normalized = prepare_native(root, proposal, options)
     (root / "workspace-system.yml").write_bytes(initialized_metadata)
     template_root = shared_assets_root() / "workspace-template"
     for path in template_root.rglob("*"):
@@ -135,6 +138,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     directory = tmp_path / "authority"
     directory.mkdir()
     authority = UsageFixture(directory, monkeypatch)
+    if options.get("semantic_finite"):
+        from tests._semantic_fixture import authorize
+        authorize(authority)
     if options.get("role_isolation"):
         authority.policy["principals"]["counter-reviewer"] = {"controller": "counter-controller", "roles": ["evaluator"],
             "keys": {"counter-key": "44" * 32}}
@@ -166,8 +172,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     source_id = proposal["inventory"]["claims"][0]["evidence"][0]["source_id"]
     source_note = root / "wiki/sources" / normalized.name
     source_note.parent.mkdir(parents=True, exist_ok=True)
+    note_body = "Retained finite structured observation." if options.get("semantic_finite") else "Measured solar reflectance was 0.74."
     source_note.write_text("---\ntype: source\ncreated: '2026-10-03'\nupdated: '2026-10-03'\nsource_ids:\n  - "
-        + source_id + "\n---\n# Captured study\n\nMeasured solar reflectance was 0.74.\n")
+        + source_id + "\n---\n# Captured study\n\n" + note_body + "\n")
     with (root / "index.md").open("a") as stream:
         stream.write("\n- [Original question](wiki/questions/q.md)\n- [Captured study](wiki/sources/" + normalized.name + ")\n")
         if options.get("partial"):
@@ -213,6 +220,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     if "allow_partial" in options:
         policy["source_rules"]["allow_partial"] = options["allow_partial"]
     policy["budgets"].update(seconds=1800, model_calls=100, tokens=1000000, cost_limit="0")
+    if options.get("semantic_finite"):
+        from tests._semantic_fixture import build_native
+        return build_native(root, control, proposal, authority, policy, GRANTS, tmp_path, options)
     service_plan = None
     if options.get("review_services"):
         service_plan = ReviewServicePlan(tuple(ReviewServiceRoute(item["profile_ref"], item["role"],

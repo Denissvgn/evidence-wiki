@@ -11,6 +11,12 @@
 
 ### Added
 
+- Add opt-in calibrated semantic judging with independent Evidence, Scope/Units
+  and Counterevidence passes, exact original context, anchored dimension checks
+  and advisory adjudication under existing investigation budgets. Bounded public
+  reports retain expected units, unknowns, provenance and current qualification;
+  finite references and agent judgments remain distinct from source truth.
+
 - Generate integration guides and operation references from shared public
   declarations, with a Documentation-agent/critic assembly recipe and bounded
   inert repair proposals. A public research request builder shares native

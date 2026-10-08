@@ -267,6 +267,7 @@ class ExecutionProfile:
     input_handoff: object | None = None
     readability: object | None = None
     artifact_delivery: object | None = None
+    semantic_judging: object | None = None
 
     def __post_init__(self) -> None:
         if self.input_handoff is not None:
@@ -360,6 +361,12 @@ class ExecutionProfile:
                 raise ExecutionError("artifact_delivery_plan_invalid")
             self.artifact_delivery.check_profile(self)
 
+        if self.semantic_judging is not None:
+            from .semantic_contracts import SemanticJudgingPlan
+            if type(self.semantic_judging) is not SemanticJudgingPlan:
+                raise ExecutionError("semantic_plan_invalid")
+            self.semantic_judging.check_profile(self)
+
     def document(self) -> dict[str, Any]:
         result = {
             "schema_version": PROFILE, "profile_ref": self.profile_ref, "total_steps": self.total_steps,
@@ -392,6 +399,18 @@ class ExecutionProfile:
             result.update(schema_version=PROFILE_V11, readability=self.readability.document())
         if self.artifact_delivery is not None:
             result.update(schema_version=PROFILE_V12, artifact_delivery=self.artifact_delivery.document())
+        if self.semantic_judging is not None:
+            result.update(schema_version="research-execution-profile/v13", semantic_judging=self.semantic_judging.document())
+            # The complete shared reference assessment remains committed once;
+            # per-controller configuration keeps its exact assessment reference.
+            compact = result["calibration"]
+            assessments = {}
+            for selection in compact["selections"]:
+                assessment = selection.pop("reference_assessment")
+                reference = _digest(assessment)
+                assessments.setdefault(reference, assessment)
+                selection["reference_assessment_ref"] = reference
+            compact["reference_assessments"] = assessments
         return result
 
     @property
@@ -419,6 +438,16 @@ class ExecutionProfile:
         if job["packet_sha256"] != _digest(input_document):
             raise ExecutionError("execution_context_mismatch")
         packet = input_document.get("packet")
+        if input_document.get("purpose") in {"semantic_judging", "semantic_adjudication"}:
+            from .semantic_contracts import checked_input
+            if self.semantic_judging is None:
+                raise ExecutionError("semantic_plan_required")
+            checked_input(input_document, max_input_bytes=self.semantic_judging.max_input_bytes)
+            expected_role = ("adjudicator" if input_document["purpose"] == "semantic_adjudication"
+                else self.semantic_judging.role_for(config_ref))
+            if (input_document["semantic"]["role"] != expected_role
+                    or expected_role == "adjudicator" and config_ref != self.disagreement.adjudicator_config_ref):
+                raise ExecutionError("semantic_role_mismatch")
         if self.readability is not None and config_ref == self.readability.config_ref and input_document.get("purpose") not in {"readability", "readability_calibration"}:
             raise ExecutionError("execution_context_mismatch")
         if job.get("payload", {}).get("qualification_purpose") == "readability" and input_document.get("purpose") not in {"readability", "readability_calibration"}:

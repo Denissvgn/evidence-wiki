@@ -87,6 +87,13 @@ class ResearchNamespace(Namespace):
         from ..research_command_contracts import schemas
         return schemas()
 
+    def semantic_schemas(self):
+        """Read detached judging input, findings and report shapes."""
+        self._workspace._check_open()
+        from ..semantic_contracts import schemas
+        from ..semantic_reporting import REPORT, schema_document
+        return {**schemas(), REPORT: schema_document(REPORT)}
+
     def command(self, request, *, runtime=None, operation_control=None):
         """Use the same public dispatch and typed terminal responses as the CLI."""
         self._workspace._check_open()

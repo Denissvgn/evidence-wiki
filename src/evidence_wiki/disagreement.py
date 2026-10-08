@@ -26,6 +26,30 @@ GATE_FIELDS = frozenset({"authentication", "accounting", "mechanical", "context_
 _HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 
 
+def semantic_adjudication_action(*, policy, claim_id, basis_id, generator_controller_ref, reviews, history, gates):
+    """Select advisory scoring only after the original native gate passes.
+
+    This shares the frozen investigation allowance, cannot replace first-pass
+    votes and never overrides a failed deterministic or qualification gate.
+    """
+    decision = disagreement_action(policy=policy, claim_id=claim_id, basis_id=basis_id,
+        generator_controller_ref=generator_controller_ref, reviews=reviews, history=history, gates=gates)
+    if decision["operation"] != "return_gate":
+        return decision
+    result = dict(decision)
+    exhausted = (decision["adjudications_used"] >= decision["adjudication_limit"]
+        or gates["run_adjudication_cycles"] >= policy.to_dict()["continuation_limits"]["adjudication_cycles"])
+    if exhausted or not gates["adjudicator_available"]:
+        result.update(operation="terminal", outcome="stop_budget" if exhausted else "blocked_external",
+            reason="budget_exhausted" if exhausted else "qualification_unknown", terminal=True,
+            detail="advisory_adjudication_unavailable", required_effects=[])
+    else:
+        result.update(operation="adjudicate", outcome=None, reason="review_disagreement", terminal=False,
+            detail="advisory_semantic_assessment", required_effects=["model", "adjudicate"],
+            requires_new_basis=False, requires_fresh_first_passes=False)
+    return result
+
+
 def _hash(value: Any) -> str:
     if type(value) is not str or _HASH.fullmatch(value) is None:
         raise ExecutionError("disagreement_digest_invalid")
@@ -90,7 +114,7 @@ def _history(values, claim_id):
             raise ExecutionError("disagreement_history_invalid")
         item = detached(supplied)
         identifier = _ref(item["action_ref"])
-        if identifier in identifiers or item["claim_id"] != claim_id or item["action"] not in {"repair", "adjudicate", "acquire"}:
+        if identifier in identifiers or item["claim_id"] != claim_id or item["action"] not in {"repair", "adjudicate", "acquire", "semantic_adjudicate"}:
             raise ExecutionError("disagreement_history_invalid")
         identifiers.add(identifier)
         _hash(item["basis_id"])
@@ -152,7 +176,7 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
             "requires_fresh_first_passes": operation in {"repair", "acquire", "collect_first_passes", "adjudicate"},
             "repair_limit": repair_limit, "adjudication_limit": adjudication_limit,
             "repairs_used": sum(item["action"] == "repair" for item in retained),
-            "adjudications_used": sum(item["action"] == "adjudicate" for item in retained),
+            "adjudications_used": sum(item["action"] in {"adjudicate", "semantic_adjudicate"} for item in retained),
             "acquisitions_used": sum(item["action"] == "acquire" for item in retained),
             "authorized": False, "evidence_accepted": False}
 
@@ -205,6 +229,7 @@ def disagreement_action(*, policy: RunPolicy, claim_id: str, basis_id: str, gene
             ("run_acquisition_attempts", "acquisition_attempts"))):
         return terminal("stop_budget", "budget_exhausted", "continuation_allowance_overrun")
     counts = {kind: sum(item["action"] == kind for item in retained) for kind in ("repair", "adjudicate", "acquire")}
+    counts["adjudicate"] += sum(item["action"] == "semantic_adjudicate" for item in retained)
     if counts["repair"] > repair_limit or counts["adjudicate"] > adjudication_limit:
         return terminal("stop_budget", "budget_exhausted", "claim_continuation_allowance_overrun")
     if (counts["repair"] > canonical_gates["run_repair_cycles"]

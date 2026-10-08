@@ -12,7 +12,8 @@ DOMAIN = "finite-structured-observation"
 OBSERVATION = "research-reference-domain-observation/v1"
 SOURCE = "finite-structured-observation/v1"
 DESCRIPTOR = {"schema_version": "research-reference-domain-descriptor/v1", "domain_ref": DOMAIN,
-    "source_schema": SOURCE, "classifier_version": "finite-observation-grammar/v1",
+    "source_schema": SOURCE, "classifier_version": "finite-observation-grammar/v2",
+    "source_container": "plain JSON or exact normalized sections with finite JSON Extracted Text and no additional factual sections",
     "operations": ["sum", "difference", "product", "mean", "ratio"],
     "original_grammar": "Assess the exact declared finite observation[ for {scope}[ at {time}]].",
     "values_per_source": 2, "scope": "exact-declared-cohort-and-observation-label",
@@ -67,6 +68,33 @@ def _originals(values):
     return result, slugs
 
 
+def finite_content(content):
+    """Read the finite payload without discarding ambiguous carrier material.
+
+    Native callers validate the normalized record, source closure and current
+    permissions. This pure parser accepts only the exact section carrier and
+    refuses additional factual text, duplicate headings, warnings or media.
+    Complete carrier bytes remain part of the observed semantic basis.
+    """
+    _require(type(content) is str and len(content.encode()) <= 65536)
+    if content.lstrip().startswith("{"):
+        return content
+    names = ("Citation Metadata", "Abstract", "Outline", "Extracted Text",
+             "Figures and Tables", "Links", "Raw Source Paths", "Parse Warnings")
+    headings = list(re.finditer(r"^##[ \t]+([^\r\n]+?)[ \t]*$", content, re.MULTILINE))
+    _require(tuple(match.group(1) for match in headings) == names)
+    _require(re.fullmatch(r"[ \r\n]*# [^\r\n]{1,4096}[ \r\n]*", content[:headings[0].start()]) is not None)
+    sections = {name: content[match.end():headings[index + 1].start() if index + 1 < len(headings) else len(content)].strip()
+                for index, (name, match) in enumerate(zip(names, headings, strict=True))}
+    empty = {"", "None extracted.", "- None extracted.", "None.", "- None.",
+             "- None recorded.", "- No outline extracted.", "- No warnings."}
+    _require(sections["Abstract"] in empty | {"Host-provided text with explicit capture qualifications."})
+    _require(all(sections[name] in empty for name in ("Outline", "Figures and Tables")))
+    _require(sections["Parse Warnings"] in empty | {
+        "- Host origin, scope, completeness and rights are caller declarations; captured bytes are checked independently."})
+    return sections["Extracted Text"]
+
+
 def _facts(source):
     content = source["content"]
     _require(type(content) is str and len(content.encode()) <= 65536)
@@ -76,7 +104,7 @@ def _facts(source):
             _require(key not in result)
             result[key] = value
         return result
-    document = json.loads(content, object_pairs_hook=pairs)
+    document = json.loads(finite_content(content), object_pairs_hook=pairs)
     _require(type(document) is dict and set(document) == {"schema_version", "facts"} and document["schema_version"] == SOURCE)
     facts = document["facts"]
     _require(type(facts) is dict and set(facts) == {"operation", "values", "units", "scope", "time", "contradiction"})

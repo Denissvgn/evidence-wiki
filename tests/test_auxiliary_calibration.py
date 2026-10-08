@@ -202,6 +202,9 @@ def test_probe_refresh_checks_mandatory_first_and_keeps_optional_failure_local(c
         executor=SimpleNamespace(qualification_configuration=configuration)))
     monkeypatch.setattr(driver, "gate", gate)
     monkeypatch.setattr(driver, "_begin", lambda _: None)
+    # This pure routing fixture supplies the already checked native policy;
+    # actual workspace machine compatibility is covered by native journeys.
+    monkeypatch.setattr(driver, "machine_compatible", lambda _: True)
     monkeypatch.setattr(driver, "deadline", lambda _: fixed + timedelta(seconds=60))
     monkeypatch.setattr(owner, "domain_observation", lambda _: domain)
     monkeypatch.setattr(driver, "append", lambda _session, _kind, _request, data: saved.append(data))

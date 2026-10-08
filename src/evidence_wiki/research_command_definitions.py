@@ -51,6 +51,10 @@ def definitions():
         add(name, request, write=True)
     add("reconcile-recovery", basis, write=True)
     add("report", run, ("after_sequence", "max_records"), shapes={"max_records": page})
+    add("semantic-report", run, ("after_index", "max_records", "expected_snapshot_id"), shapes={
+        "after_index": {"type": "integer", "minimum": 0, "maximum": 1024},
+        "max_records": {"type": "integer", "minimum": 1, "maximum": 16},
+        "expected_snapshot_id": {"type": "string", "pattern": r"^sha256:[a-f0-9]{64}$(?![\s\S])"}})
     add("repair-progress", run, ("original_id", "after_sequence", "max_records"))
     add("review-services", run)
     add("prepare-acquisition", request, ("alternative_ids",))

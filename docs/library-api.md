@@ -204,6 +204,15 @@ Version `51` adds `research.performance_schemas` and
 `research.qualify_performance`, with matrix `34`. Performance qualification is
 bounded synthetic native contract evidence, separate from scientific approval.
 
+Version `58` adds `research.semantic_schemas` and `session.semantic_report`,
+with matrix `40`. An opt-in `SemanticJudgingPlan` selects three separate qualified
+first-pass configurations and an independently qualified advisory adjudicator.
+Execution profile v13 binds exact originals, expected units, current claims and
+authorized sources; advisory calls share the existing investigation allowance.
+The current calibration covers exact finite structured observations. Broader
+prose and unsupported refusal judgments remain unknown. See the
+[semantic judging guide](../workspace-template/docs/semantic-judging.md).
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -1184,7 +1193,8 @@ recovery. A finite status snapshot cannot promise instantaneous future withdrawa
 Current domain derives from actual authorized source closures, strict claims,
 original question grammar and exact rubric. Native bookkeeping changes do not
 relabel that domain. Supported finite sources use `finite-structured-observation/v1`
-JSON and exact declared observation grammar; free prose, missing context,
+JSON, including the exact native normalized carrier, and declared observation
+grammar; free prose, missing context,
 computational premise graphs and incompatible data remain unknown. Unaccepted
 generation proposals may proceed under the original model grants and budgets;
 evaluation and release still require current qualified profiles. Completed

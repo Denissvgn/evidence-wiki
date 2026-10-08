@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "57"
+LIBRARY_API_VERSION = "58"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -106,6 +106,8 @@ LIBRARY_API_SURFACE = (
     "research.impact",
     "research.command",
     "research.command_schemas",
+    "research.semantic_schemas",
+    "research.session.semantic_report",
     "research.performance_schemas",
     "research.qualify_performance",
     "research.schedule_refresh",
@@ -560,6 +562,17 @@ def contract() -> dict:
             "noninteractive": "no user stdin reads, prompts, implicit credentials, daemon or plugin discovery",
             "scope": "run-cycle/refresh and bounded current/brief/resolution/recovery/history/impact/changes reads",
             "errors": "exact public typed envelope and exit status; capability refusal is terminal transport data, not a completed research run"},
+        "research_semantic_judging": {
+            "profile": "research-execution-profile/v13", "selection": "explicit SemanticJudgingPlan with protected recalibration",
+            "schema_method": "research.semantic_schemas", "report_method": "research.session.semantic_report",
+            "roles": ["evidence", "scope_units", "counterevidence", "adjudicator"],
+            "dimensions": ["support", "scoped_correctness", "missing_material_evidence", "appropriate_abstention", "unnecessary_refusal"],
+            "context": "exact original and required units, candidate peers and all current authorized sources; fresh blind aliases and ordering",
+            "adjudication": "existing finite investigation allowance; advisory findings add no native approval vote",
+            "references": "independently reproduced finite declarations kept separate from agent-adjudicated findings; published provenance needs its owner",
+            "scope": "finite structured observation only; unsupported/refusal-only contexts remain unknown",
+            "accuracy": "no definitive general accuracy or per-dimension calibration claim",
+            "effects": "opt-in native execution uses original journals, grants and budgets; report is read-only"},
         "scoped_research_transport": {
             "capability": "scoped-research-tools/v1", "server": "serve-onboarding-mcp",
             "method": "research.command", "runtime_selection": "startup only; HostRuntime services or private file",

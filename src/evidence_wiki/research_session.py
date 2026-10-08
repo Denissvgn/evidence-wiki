@@ -833,3 +833,13 @@ class ResearchSession:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
         from . import execution_session
         return execution_session.report(self, after_sequence=after_sequence, max_records=max_records)
+
+    @_boundary
+    def semantic_report(self, *, after_index=0, max_records=16, expected_snapshot_id=None):
+        """Read bounded current semantic scores and retained unqualified findings."""
+        self._check("semantic_report")
+        if self.execution is None:
+            refuse("EXECUTION_CONFIG_INVALID")
+        from .semantic_judging import report
+        return report(self, after_index=after_index, max_records=max_records,
+            expected_snapshot_id=expected_snapshot_id)

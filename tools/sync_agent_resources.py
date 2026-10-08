@@ -49,6 +49,8 @@ from evidence_wiki.review_packet_contracts import schema_document as review_pack
 from evidence_wiki.review_service_contracts import schemas as service_schemas
 from evidence_wiki.review_service_policy import SERVICE_PLAN
 from evidence_wiki.review_service_policy import schema_document as service_plan_schema
+from evidence_wiki.semantic_contracts import schemas as semantic_schemas
+from evidence_wiki.semantic_reporting import schemas as semantic_report_schemas
 from evidence_wiki.service_repair_binding import BINDING as REPAIR_BINDING
 from evidence_wiki.service_repair_binding import schema_document as repair_binding_schema
 
@@ -83,6 +85,8 @@ def exports() -> dict[str, bytes]:
     schemas.update(performance_schemas())
     schemas.update(refresh_schedule_schemas())
     schemas.update(delivery_schemas())
+    schemas.update(semantic_schemas())
+    schemas.update(semantic_report_schemas())
     schemas.update({key: refresh_schemas()[key] for key in REFRESH_SCHEMAS})
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}

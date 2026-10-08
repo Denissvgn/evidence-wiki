@@ -18,6 +18,7 @@ from .review_context import create_review_context
 
 PROJECTION = "research-disagreement-projection/v1"
 ATTEMPT = "research-disagreement-attempt/v1"
+ATTEMPT_ADVISORY = "research-disagreement-attempt/v2"
 FINDINGS = "research-review-findings/v1"
 _ATTEMPT_FIELDS = frozenset({"schema_version", "claim_id", "material_basis_id", "defect_sha256", "action", "cycle_ref"})
 _SCIENCE = frozenset({"title", "authors", "url", "published_at", "source_type"})
@@ -147,9 +148,13 @@ def material_basis(owner_snapshot, rubric, sources):
         _fail("material_invalid")
 
 
-def review_findings(output, *, allowed_source_refs=()):
+def review_findings(output, *, allowed_source_refs=(), semantic_input=None):
     """Decode legacy verdicts or explicitly versioned cited material objections."""
     output = detached(output)
+    if semantic_input is not None:
+        from .semantic_contracts import checked_findings
+        validated, _metrics = checked_findings(output, semantic_input)
+        output = {"schema_version": FINDINGS, **{key: validated[key] for key in ("verdicts", "rationale", "objections")}}
     legacy = type(output) is dict and set(output) == {"verdicts", "rationale"}
     if (not legacy and (type(output) is not dict or set(output) != {"schema_version", "verdicts", "rationale", "objections"}
                        or output["schema_version"] != FINDINGS)):
@@ -179,18 +184,21 @@ def review_findings(output, *, allowed_source_refs=()):
             "objection_refs": sorted({digest(item) for item in retained if item["material"]})}
 
 
-def attempt_metadata(action, *, cycle_ref):
+def attempt_metadata(action, *, cycle_ref, advisory=False):
     if action["operation"] not in {"repair", "adjudicate", "acquire"}:
         _fail("continuation_invalid")
-    return {"schema_version": ATTEMPT, "claim_id": _ref(action["claim_id"]),
+    if type(advisory) is not bool or advisory and action["operation"] != "adjudicate":
+        _fail("continuation_invalid")
+    return {"schema_version": ATTEMPT_ADVISORY if advisory else ATTEMPT, "claim_id": _ref(action["claim_id"]),
         "material_basis_id": _hash(action["basis_id"]), "defect_sha256": _hash(action["defect_sha256"]),
-        "action": action["operation"], "cycle_ref": _ref(cycle_ref)}
+        "action": "semantic_adjudicate" if advisory else action["operation"], "cycle_ref": _ref(cycle_ref)}
 
 
 def _metadata(value):
-    if type(value) is not dict or set(value) != _ATTEMPT_FIELDS or value["schema_version"] != ATTEMPT:
+    if type(value) is not dict or set(value) != _ATTEMPT_FIELDS or value["schema_version"] not in {ATTEMPT, ATTEMPT_ADVISORY}:
         _fail("history_invalid")
-    if type(value["action"]) is not str or value["action"] not in {"repair", "adjudicate", "acquire"}:
+    if (type(value["action"]) is not str or value["action"] not in {"repair", "adjudicate", "acquire", "semantic_adjudicate"}
+            or (value["schema_version"] == ATTEMPT_ADVISORY) != (value["action"] == "semantic_adjudicate")):
         _fail("history_invalid")
     _ref(value["claim_id"])
     _ref(value["cycle_ref"])
@@ -314,7 +322,10 @@ def project_claim(session, *, claim_id, prepared, sources):
         if review.get("claim_id") != claim_id or review.get("basis_id") != result["strict_basis_id"]:
             _fail("review_correlation_invalid")
         allowed_aliases = data.get("review_context", {}).get("aliases", {}).get("sources", {})
-        findings = review_findings(final["output"], allowed_source_refs=allowed_aliases.values())
+        semantic_input = attempt.input_document if "semantic_binding" in data else None
+        if semantic_input is not None:
+            allowed_aliases = data["semantic_binding"]["aliases"]
+        findings = review_findings(final["output"], allowed_source_refs=allowed_aliases.values(), semantic_input=semantic_input)
         if review["verdicts"] != findings["verdicts"] or review["rationale"] != findings["rationale"]:
             _fail("review_correlation_invalid")
         material = data.get("review_material_basis")

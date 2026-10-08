@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "39"
+OPERATION_MATRIX_VERSION = "40"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
@@ -137,6 +137,8 @@ _ROWS = (
     ("research.session.cancel_pending", None, "durable cancellation request and authenticated observation", "native gates released during bounded host cancellation", "explicit host cancel; stop and rollback are not inferred from a request"),
     ("research.session.intake_observation", None, "authenticated current or late attempt history and accounting", "selected native workspace gate and canonical run journal", "bounded host receipt authentication; no new dispatch"),
     ("research.session.report", None, "none; bounded redacted decision and measurement metadata", "authenticated canonical run journal snapshot", "bounded host receipt authentication"),
+    ("research.session.semantic_report", None, "none; bounded source-authorized semantic findings and full expected-unit accounting", "authenticated run records and current native source/qualification epoch", "none; no evaluator dispatch or qualification probe"),
+    ("research.semantic_schemas", None, "none; detached closed judging and report schemas", "handle lifetime only", "none"),
     ("research.session.close", None, "none; invalidates session handle", "none", "none"),
     ("research.telemetry.record", None, "canonical telemetry event and run journal checkpoints", "selected native workspace gate then canonical run lock", "none"),
     ("research.telemetry.report", None, "none; captured journal fold and optional explicit measurement verifier", "bounded anchored canonical journal snapshot", "none; optional trusted host callback"),

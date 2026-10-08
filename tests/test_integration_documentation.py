@@ -44,10 +44,16 @@ def test_request_builder_validates_native_argument_shapes_without_runtime_or_eff
     for operation,arguments in [('unknown',{}),('run-cycle',{}),('brief',{'run_id':'run','runtime':{}}),
                                 ('run-cycle',{'run_id':'run','request_id':'req','max_steps':True}),
                                 ('report',{'run_id':'run','max_records':128}),
+                                ('semantic-report',{'run_id':'run','max_records':17}),
+                                ('semantic-report',{'run_id':'run','after_index':True}),
+                                ('semantic-report',{'run_id':'run','expected_snapshot_id':'invalid'}),
                                 ('recovery-status',{'run_id':'run','max_effects':128})]:
         with pytest.raises(UsageError):
             research_request(operation,**arguments)
     assert research_request('report',run_id='run',max_records=64)['arguments']['max_records']==64
+    semantic=research_request('semantic-report',run_id='run',after_index=16,max_records=16,
+        expected_snapshot_id='sha256:'+'a'*64)
+    assert semantic['arguments']['after_index']==16 and semantic['arguments']['max_records']==16
     assert research_request('recovery-status',run_id='run',max_effects=64)['arguments']['max_effects']==64
 
 
