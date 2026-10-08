@@ -31,6 +31,8 @@ GUIDES = {
     "verification": "skills/research-verify.md", "acquisition": "skills/research-acquire.md",
     "discovery": "skills/research-discover.md",
     "frameworks": "docs/frameworks.md",
+    "agent-host": "docs/agent-host.md",
+    "agent-generator": "docs/agent-generator.md",
 }
 COMPUTATION_SCRIPTS = (
     "_computation_contract", "_computation_expression", "_computation_runtime", "_computation_schedule",
@@ -52,7 +54,7 @@ def resource_paths() -> dict[str, str]:
         paths[f"script/{stem}/v1"] = f"workspace-template/scripts/{stem}.py"
     for name in ("strict-policy", "init-profile", "pack"):
         paths[f"example/{name}/v1"] = f"workspace-template/docs/agent-resources/{name}.json"
-    for name in ("sample-benchmark", "sample-portfolio", "sample-filing", "unattended-host"):
+    for name in ("sample-benchmark", "sample-portfolio", "sample-filing", "unattended-host", "agent-host"):
         paths[f"example/{name}/v1"] = f"workspace-template/docs/agent-resources/{name}.json"
     paths.update({
         "framework/compatibility/v1": "workspace-template/docs/frameworks/compatibility.json",

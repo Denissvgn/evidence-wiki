@@ -4,6 +4,12 @@
 
 ### Added
 
+- Provide versioned current-caller and scoped MCP host recipes with public
+  task context selection, separate generator instructions, native omission and
+  byte bounds, independent Planner/critic dispatch and terminal profile refusal.
+  Installed scripted and live host records keep usage, interventions and
+  qualification limits explicit.
+
 - Publish an installed unattended Python host example using public setup, source
   admission, generation, independent review, bounded repair/abstention, current
   export and refresh APIs. Fixture mechanics and authority stay separate from

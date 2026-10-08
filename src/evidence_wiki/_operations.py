@@ -7,10 +7,13 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "36"
+OPERATION_MATRIX_VERSION = "37"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("agent_host_context.planner_input", None, "none; finite task-specific installed resource metadata", "one retained context selection", "none; the host selects agent dispatch"),
+    ("agent_host_context.critic_input", None, "none; detached omission, capability and UTF-8 byte checks", "same frozen task/resource basis", "none; independent host critic dispatch"),
+    ("agent_host_context.resolve", None, "none; bounded installed instructions or terminal refusal", "native closed selection and current retained instruction hashes", "none; grants no evidence or execution authority"),
     ("research.command_schemas", "evidence-wiki agent command-schemas", "none; detached transport shapes", "parent workspace lifetime", "none"),
     ("research.command", "evidence-wiki agent run-cycle / refresh / advance / pending / reconcile-recovery and the closed research operation family", "selected public operation only; explicit write/read definitions retain native effects", "same public facade owners and runtime HostContext; optional host operation control", "same explicit configured host services; no user stdin or implicit credential probes"),
     ("research.performance_schemas", None, "none; detached performance shapes", "parent workspace lifetime", "none"),

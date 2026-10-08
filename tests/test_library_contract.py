@@ -146,7 +146,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("54", self.block["version"])
+        self.assertEqual("55", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -163,6 +163,9 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
                 self.assertTrue(name)
 
         expected = {
+            "agent_host_context.planner_input",
+            "agent_host_context.critic_input",
+            "agent_host_context.resolve",
             "workspace.open",
             "workspace.close",
             "workspace.versions",
@@ -339,11 +342,12 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
         self.assertIn("artifact_schemas", payload)
 
     def test_every_declared_operation_resolves_and_has_one_boundary(self):
-        from evidence_wiki import Onboarding, Workspace, _facades
+        from evidence_wiki import AgentHostContext, Onboarding, Workspace, _facades
         from evidence_wiki.refresh_scheduling import HostRefreshSchedule
         from evidence_wiki.research_session import ResearchSession
 
         owners = {
+            "agent_host_context": AgentHostContext,
             "workspace": Workspace, "coverage": _facades.CoverageNamespace,
             "grounding": _facades.GroundingNamespace, "normalize": _facades.NormalizeNamespace,
             "questions": _facades.QuestionsNamespace, "orchestrate": _facades.OrchestrateNamespace,

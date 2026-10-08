@@ -190,6 +190,7 @@ evidence immutable and continue with the [research workflow][research-run].
 | Mode | Entry point and boundary |
 | --- | --- |
 | Direct Python host | The installed [unattended host example](examples/unattended-host/README.md) drives public setup, source admission, review/repair, current export and refresh, with separate fixture and live runtime modes. |
+| Automated agent host | [Host recipes](examples/agent-host/README.md) select bounded task instructions with a Planner and independent critic, then drive current-caller or scoped MCP operations with explicit terminal telemetry. |
 | Scoped MCP host | `serve-onboarding-mcp` exposes [startup-granted research tools](workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools), with explicit runtime, native cancellation/recovery and no elicitation. |
 | Configured autonomous host | `agent run-cycle` / `refresh` share the [public library dispatcher](docs/library-api.md), with explicit private runtime selection and bounded noninteractive execution. |
 | Current caller | `agent research-guide` describes advice, claims, ingestion and controlled export without another model runner. |

@@ -123,7 +123,7 @@ def exports() -> dict[str, bytes]:
     }}
     initializer.validate_profile(profile["workspace_init"])
     output[paths["example/init-profile/v1"]] = encoded(profile)
-    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), *(
+    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), ("agent-host", ROOT / "examples/agent-host"), *(
             (name, ROOT / "workspace-template/docs/computation-examples" / name)
             for name in ("sample-benchmark", "sample-portfolio", "sample-filing"))]:
         files = {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")
