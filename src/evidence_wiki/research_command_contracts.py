@@ -1,11 +1,30 @@
 """Closed noninteractive request/result data; CLI transport grants no authority."""
 
 from .mutation_contracts import MutationError, _shape, canonical, detached
-from .research_command_definitions import OPERATIONS
+from .research_command_definitions import DEFINITIONS, OPERATIONS
 from .research_session_contracts import refuse
 
 REQUEST = "research-command-request/v1"
 RESULT = "research-command-result/v1"
+
+
+def checked_arguments(operation, arguments):
+    from .errors import UsageError
+
+    if type(operation) is not str or operation not in DEFINITIONS:
+        raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Unknown public research operation.", recoverable=False)
+    arguments = detached(arguments)
+    try:
+        _shape(arguments, DEFINITIONS[operation]["schema"])
+    except MutationError:
+        raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Command arguments do not match the public operation.", recoverable=False) from None
+    return arguments
+
+
+def research_request(operation, **arguments):
+    """Build a detached native request from declared operation arguments."""
+    return checked(REQUEST, {"schema_version": REQUEST, "operation": operation,
+                             "arguments": checked_arguments(operation, arguments)})
 
 
 def schemas():

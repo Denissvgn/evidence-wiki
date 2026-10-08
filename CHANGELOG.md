@@ -4,6 +4,11 @@
 
 ### Added
 
+- Generate integration guides and operation references from shared public
+  declarations, with a Documentation-agent/critic assembly recipe and bounded
+  inert repair proposals. A public research request builder shares native
+  argument validation so callers need no manual schema envelopes.
+
 - Provide versioned current-caller and scoped MCP host recipes with public
   task context selection, separate generator instructions, native omission and
   byte bounds, independent Planner/critic dispatch and terminal profile refusal.

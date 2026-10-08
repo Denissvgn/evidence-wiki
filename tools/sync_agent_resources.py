@@ -32,6 +32,7 @@ from evidence_wiki.artifact_delivery_contracts import schemas as delivery_schema
 from evidence_wiki.brief_contracts import _schemas as brief_schemas
 from evidence_wiki.calculation_contracts import schema_document as calculation_schema
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
+from evidence_wiki.integration_documentation import IntegrationDocumentation
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
 from evidence_wiki.performance_contracts import schemas as performance_schemas
 from evidence_wiki.protected_handoff import HANDOFF
@@ -85,6 +86,7 @@ def exports() -> dict[str, bytes]:
     schemas.update({key: refresh_schemas()[key] for key in REFRESH_SCHEMAS})
     schemas.update(tool_schemas())
     output = {paths[key]: encoded(value) for key, value in schemas.items()}
+    output[paths["guide/integration/v1"]] = IntegrationDocumentation().render().encode()
     guide_bytes = (ROOT / paths["guide/bootstrap/v1"]).read_bytes()
     bundle = portable_bundle({"content": guide_bytes.decode(), "sha256": hashlib.sha256(guide_bytes).hexdigest()},
                              (ROOT / "workspace-template/docs/frameworks/pi.js").read_text(encoding="utf-8"), (ROOT / "LICENSE").read_text(encoding="utf-8"))
@@ -123,7 +125,7 @@ def exports() -> dict[str, bytes]:
     }}
     initializer.validate_profile(profile["workspace_init"])
     output[paths["example/init-profile/v1"]] = encoded(profile)
-    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), ("agent-host", ROOT / "examples/agent-host"), *(
+    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), ("agent-host", ROOT / "examples/agent-host"), ("integration-docs", ROOT / "examples/integration-docs"), *(
             (name, ROOT / "workspace-template/docs/computation-examples" / name)
             for name in ("sample-benchmark", "sample-portfolio", "sample-filing"))]:
         files = {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")

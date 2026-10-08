@@ -1,13 +1,10 @@
 """Transport-independent dispatch through public facades with exact typed errors."""
 
 from .errors import ConfigError, EvidenceWikiError, UsageError
-from .mutation_contracts import MutationError, _shape
 from .operation_control import checkpoint
-from .research_command_contracts import OPERATIONS, REQUEST, RESULT, checked, error_document
+from .research_command_contracts import OPERATIONS, REQUEST, RESULT, checked, checked_arguments, error_document
 from .research_command_definitions import DEFINITIONS, WRITE_OPERATIONS
 from .runtime_configuration import HostRuntime
-
-ARGUMENTS = {name: set(row["schema"]["properties"]) for name, row in DEFINITIONS.items()}
 
 
 def invoke(workspace, request, *, runtime=None, operation_control=None):
@@ -18,13 +15,7 @@ def invoke(workspace, request, *, runtime=None, operation_control=None):
     try:
         checkpoint(operation_control, "research_command_start")
         request = checked(REQUEST, request)
-        arguments = request["arguments"]
-        if set(arguments)-ARGUMENTS[operation]:
-            raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Command arguments do not match the public operation.", recoverable=False)
-        try:
-            _shape(arguments, DEFINITIONS[operation]["schema"])
-        except MutationError:
-            raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Command arguments do not match the public operation.", recoverable=False) from None
+        arguments = checked_arguments(operation, request["arguments"])
         if type(runtime) is not HostRuntime:
             raise ConfigError("RESEARCH_EXECUTION_CONFIG_INVALID", "An explicit host runtime is required for this operation.",
                 recoverable=False, remediation="Provide configured host policy, grants and execution services; the command never provisions credentials or prompts.")

@@ -23,6 +23,7 @@ def recipes():
         "schema_version": "evidence-agent-host-recipes/v1",
         "instructions": "guide/agent-host/v1", "generator_instructions": "guide/agent-generator/v1",
         "example": "example/agent-host/v1", "context_owner": "AgentHostContext",
+        "integration_guide": "guide/integration/v1", "documentation_example": "example/integration-docs/v1",
         "routes": ["current-caller", "mcp"], "tasks": ["research", "refresh", "capture", "calculation", "delivery"],
         "roles": ["host", "generator"], "selection": ["planner", "independent_critic", "native_bounds"],
         "authority": "Host-selected services, policy, scope and native evidence owners; instruction selection grants no effects.",

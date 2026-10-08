@@ -7,10 +7,17 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "37"
+OPERATION_MATRIX_VERSION = "38"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("research_request", None, "none; detached request with shared closed argument validation", "none", "none"),
+    ("integration_documentation.reference", None, "none; finite public operation and schema declarations", "frozen documentation basis", "none"),
+    ("integration_documentation.render", None, "none; canonical guide and reference text", "same public basis", "none"),
+    ("integration_documentation.agent_input", None, "none; bounded public declarations and consistency checks", "same public basis", "none"),
+    ("integration_documentation.proposal", None, "none; inert canonical section selection", "same public basis", "none"),
+    ("integration_documentation.resolve", None, "none; canonical text or terminal refusal", "native closed selection and critic shape checks", "none; no semantic acceptance"),
+    ("integration_documentation.repair", None, "none; bounded documentation/API proposals only", "same failed basis and finite repair ceiling", "none; proposals never edit or execute code"),
     ("agent_host_context.planner_input", None, "none; finite task-specific installed resource metadata", "one retained context selection", "none; the host selects agent dispatch"),
     ("agent_host_context.critic_input", None, "none; detached omission, capability and UTF-8 byte checks", "same frozen task/resource basis", "none; independent host critic dispatch"),
     ("agent_host_context.resolve", None, "none; bounded installed instructions or terminal refusal", "native closed selection and current retained instruction hashes", "none; grants no evidence or execution authority"),
