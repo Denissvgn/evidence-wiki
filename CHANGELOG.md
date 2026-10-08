@@ -11,6 +11,12 @@
 
 ### Added
 
+- Add a frozen autonomous journey-comparison harness with randomized interface
+  assignments, complete retained attempt accounting and generation sealing before
+  neutral final grading. Common answer conformance stays separate from native
+  approval; unobserved model usage, imported baselines and unmatched updates retain
+  their explicit limits.
+
 - Add opt-in calibrated semantic judging with independent Evidence, Scope/Units
   and Counterevidence passes, exact original context, anchored dimension checks
   and advisory adjudication under existing investigation budgets. Bounded public
