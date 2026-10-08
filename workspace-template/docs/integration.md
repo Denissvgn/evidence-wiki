@@ -1,11 +1,13 @@
 # Integration journey
 
-Library API 56; operation matrix 38. Documentation basis: `a9fed8fee0ddb189fe6829fd735dfee3004f87006f42d418e92fb80caaa23eb9`.
+Library API 57; operation matrix 39. Documentation basis: `34f7d231b3f73e5bed8a0628b6236bce76b59148038a50d438a3165de962d676`.
 
 ## Journey
 
 Fetch `guide/integration/v1` and `example/integration-docs/v1` with public
-`Onboarding.resource` or MCP `onboarding_resource`. The installed example generates
+`Onboarding.open().resource` or MCP `onboarding_resource`. Open a read-only handle
+with `with Onboarding.open() as onboarding:` before retrieving resources; the
+Onboarding constructor itself is not a zero-argument factory. The installed example generates
 this guide, dispatches a Documentation agent and independent critic, and returns
 terminal structured data. Host recipes and source provisioning are separately
 available as `example/agent-host/v1` and `example/unattended-host/v1`.
@@ -33,6 +35,21 @@ def run_journey(target, runtime, run_id="original"):
 Call run_journey with the host-provisioned target and runtime. Hosts can select
 HostRuntime.from_file for compatible owner-private native runtime files, or
 HostRuntime.from_services for explicitly provided public services.
+
+For current outputs, use brief with format="structured". Its lifecycle has
+terminal/outcome fields; verdict is current evidence eligibility. Require a
+returned accepted/partial terminal cycle and current accept/partial brief before
+requesting refresh with a new run_id/request_id and the previous_run_id.
+Independent installation/route trials should use separately provisioned targets.
+For continued work on an existing terminal target, use the native refresh path
+and retained parent identity. Preserve any provenance refusal even if an earlier
+cycle returned accepted; current output eligibility is checked separately.
+After an uncertain write, reconcile the original IDs instead of creating a
+replacement. report max_records and recovery-status max_effects accept 1..64;
+retain their paging/truncation flags. Start refresh with an explicit small step
+ceiling appropriate to the selected host budget. A trusted host enforces a
+finite outer deadline covering preparation and all calls, in addition to native
+per-run budgets. Record its numeric bound and unknown cleanup/effect observations.
 
 `research_request` builds and validates the exact native envelope; callers do not
 author schema documents. Inspect the domain outcome even when transport status

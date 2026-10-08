@@ -39,7 +39,8 @@ def definitions():
         add(name, run)
     add("brief", run, ("format",), shapes={"format": {"enum": ["structured", "markdown"]}})
     add("resolution", run)
-    add("recovery-status", run, ("after_sequence", "max_effects"))
+    page = {"type": "integer", "minimum": 1, "maximum": 64}
+    add("recovery-status", run, ("after_sequence", "max_effects"), shapes={"max_effects": page})
     add("history", run, ("kind", "after_index", "max_records", "expected_history_basis_id"))
     add("changes", ("pairs",), ("before_requirements_revision_id",))
     add("impact", optional=("pairs", "before_requirements_revision_id"))
@@ -49,7 +50,7 @@ def definitions():
     for name in ("cancel-pending", "reconcile-pending"):
         add(name, request, write=True)
     add("reconcile-recovery", basis, write=True)
-    add("report", run, ("after_sequence", "max_records"))
+    add("report", run, ("after_sequence", "max_records"), shapes={"max_records": page})
     add("repair-progress", run, ("original_id", "after_sequence", "max_records"))
     add("review-services", run)
     add("prepare-acquisition", request, ("alternative_ids",))

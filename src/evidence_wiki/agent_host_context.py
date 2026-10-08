@@ -15,7 +15,7 @@ ROUTES = {
     "mcp": {"capabilities": ["scoped_mcp", "autonomous_runtime"]},
 }
 TASKS = {
-    "research": ["guide/research/v1", "guide/verification/v1"],
+    "research": ["guide/integration/v1"],
     "refresh": ["research-refresh-result/v1", "research-recovery-status/v1"],
     "capture": ["guide/acquisition/v1", "guide/verification/v1"],
     "calculation": ["guide/computation/v1"],

@@ -7,7 +7,7 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "38"
+OPERATION_MATRIX_VERSION = "39"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (

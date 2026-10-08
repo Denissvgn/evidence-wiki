@@ -42,9 +42,13 @@ def test_request_builder_validates_native_argument_shapes_without_runtime_or_eff
     assert request['schema_version']=='research-command-request/v1'
     assert request['arguments']=={'run_id':'original','request_id':'cycle','max_steps':64}
     for operation,arguments in [('unknown',{}),('run-cycle',{}),('brief',{'run_id':'run','runtime':{}}),
-                                ('run-cycle',{'run_id':'run','request_id':'req','max_steps':True})]:
+                                ('run-cycle',{'run_id':'run','request_id':'req','max_steps':True}),
+                                ('report',{'run_id':'run','max_records':128}),
+                                ('recovery-status',{'run_id':'run','max_effects':128})]:
         with pytest.raises(UsageError):
             research_request(operation,**arguments)
+    assert research_request('report',run_id='run',max_records=64)['arguments']['max_records']==64
+    assert research_request('recovery-status',run_id='run',max_effects=64)['arguments']['max_effects']==64
 
 
 def test_native_coverage_checks_override_critic_and_bound_inert_repairs(monkeypatch):

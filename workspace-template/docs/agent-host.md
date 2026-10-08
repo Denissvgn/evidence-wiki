@@ -22,6 +22,16 @@ capabilities=[...], planner_ref=..., critic_ref=...)`. Tasks are `research`,
 `autonomous_runtime` for current-caller, or `scoped_mcp` and
 `autonomous_runtime` for MCP.
 
+Select `profile="autonomous"` for an unattended-compatible host. Exact refused
+profile literals are `"human_required"` and `"incompatible"`; a refusal requests
+no operator. Read-only resource access uses `with Onboarding.open() as host:`
+then `host.resource(id)`.
+
+For native research, the optional context is `guide/integration/v1`. It covers
+the public request builder and automatic review/repair/current outputs without
+depending on legacy workspace-script skills. A critic must reject missing
+context or unresolved instruction dependencies rather than assume their content.
+
 Send only `planner_input()` to a scoped Planner. It sees a bounded task and
 resource metadata, not the entire catalog or repository. Its output is
 `{"schema_version":"agent-host-selection/v1","basis_id":"...",

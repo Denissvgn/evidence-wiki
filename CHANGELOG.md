@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native research task context now includes the self-contained integration guide.
+  Public report and recovery schemas enforce the native page limit of 64, and
+  host guidance specifies handle opening, profile literals, current eligibility,
+  retained refresh identities and finite host deadlines.
+
 ### Added
 
 - Generate integration guides and operation references from shared public

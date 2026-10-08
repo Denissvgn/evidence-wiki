@@ -30,7 +30,8 @@ def replies(selected, identifiers=None):
 
 def test_minimal_context_role_projection_and_detached_content():
     selected=context();packet=selected.planner_input()
-    assert len(packet['resources'])==3 and all('content' not in row for row in packet['resources'])
+    assert len(packet['resources'])==2 and all('content' not in row for row in packet['resources'])
+    assert [row['id'] for row in packet['resources']]==['guide/agent-host/v1','guide/integration/v1']
     proposal,critique=replies(selected)
     assert selected.critic_input(proposal)['selected_context']['resources'][0]['content']
     result=selected.resolve(proposal,critique)
