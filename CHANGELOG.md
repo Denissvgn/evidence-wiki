@@ -11,6 +11,11 @@
 
 ### Added
 
+- Add bounded integration-cost accounting with complete attempt inventories,
+  exact monetary buckets, declared repeat-use allocation and authenticated host
+  and native receipt adapters. Unknown provider usage and human or organizational
+  telemetry remain separate from known subtotals and execution observations.
+
 - Add a frozen autonomous journey-comparison harness with randomized interface
   assignments, complete retained attempt accounting and generation sealing before
   neutral final grading. Common answer conformance stays separate from native

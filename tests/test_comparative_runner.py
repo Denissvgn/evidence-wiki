@@ -42,6 +42,43 @@ def ledger(tmp_path, selected=None):
         work_root=tmp_path / "workers", create=True)
 
 
+def test_read_only_open_never_recovers_creates_lock_or_appends(tmp_path, monkeypatch):
+    owner = ledger(tmp_path)
+    head = owner.report()["retention_head_sha256"]
+
+    def snapshot():
+        return {path.name: path.read_bytes() for path in owner.directory.iterdir() if path.is_file()}
+
+    original = snapshot()
+    monkeypatch.setattr(TrialLedger, "_recover_append", lambda *_: pytest.fail("Read-only open invoked recovery"))
+    reader = TrialLedger(owner.directory, owner.plan, observer_key=owner.key, work_root=owner.work_root,
+                         expected_head=head, read_only=True)
+    assert reader.report() == owner.report()
+    with pytest.raises(ValueError, match="trial_read_only"):
+        reader.append("attempt", {})
+    assert snapshot() == original
+    (owner.directory / "pending.json").write_text("{}\n")
+    (owner.directory / "pending.json").chmod(0o600)
+    pending_state = snapshot()
+    with pytest.raises(ValueError, match="trial_read_only_recovery_required"):
+        TrialLedger(owner.directory, owner.plan, observer_key=owner.key, work_root=owner.work_root,
+                    expected_head=head, read_only=True)
+    assert snapshot() == pending_state
+    (owner.directory / "pending.json").unlink()
+    (owner.directory / "ledger.lock").unlink()
+    with pytest.raises(FileNotFoundError):
+        TrialLedger(owner.directory, owner.plan, observer_key=owner.key, work_root=owner.work_root,
+                    expected_head=head, read_only=True)
+    assert not (owner.directory / "ledger.lock").exists()
+
+
+def test_read_only_creation_is_rejected_before_effects(tmp_path):
+    with pytest.raises(ValueError, match="trial_read_only_selection_invalid"):
+        TrialLedger(tmp_path / "private", plan(), observer_key=b"k" * 32,
+                    work_root=tmp_path / "workers", create=True, read_only=True)
+    assert not (tmp_path / "private").exists() and not (tmp_path / "workers").exists()
+
+
 def test_actual_processes_all_arms_seal_and_exact_replay_never_redispatch(tmp_path, monkeypatch):
     owner = ledger(tmp_path)
     for slot in owner.plan["schedule"]:

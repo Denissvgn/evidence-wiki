@@ -136,7 +136,11 @@ class TrialLedger:
     Final comparison judging is available only after immutable generation seal.
     """
 
-    def __init__(self, directory, plan, *, observer_key, work_root, create=False, expected_head=None):
+    def __init__(self, directory, plan, *, observer_key, work_root, create=False, expected_head=None,
+                 read_only=False):
+        if type(read_only) is not bool or read_only and create:
+            raise ValueError("trial_read_only_selection_invalid")
+        self._read_only = read_only
         if type(observer_key) is not bytes or not 32 <= len(observer_key) <= 128:
             raise ValueError("trial_observer_key_invalid")
         self.plan = validate_plan(plan)
@@ -174,7 +178,8 @@ class TrialLedger:
         if stored != self.binding:
             raise ValueError("trial_binding_changed")
         with self.locked():
-            self._recover_append()
+            if not self._read_only:
+                self._recover_append()
             self.events()
         self._expected_head = digest(self._head())
 
@@ -199,6 +204,8 @@ class TrialLedger:
 
     def _recover_append(self):
         pending = self.directory / "pending.json"
+        if self._read_only:
+            raise ValueError("trial_read_only")
         if not pending.exists():
             return
         value = self._verify(json.loads(read_private(pending, MAX_EVENT_BYTES + 4096)))
@@ -245,7 +252,8 @@ class TrialLedger:
         info = self.work_root.stat()
         if [info.st_dev, info.st_ino] != self.binding["work_root_identity"]:
             raise ValueError("trial_work_root_changed")
-        descriptor = os.open(self.directory / "ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        flags = os.O_RDONLY if self._read_only else os.O_RDWR | os.O_CREAT
+        descriptor = os.open(self.directory / "ledger.lock", flags | os.O_NOFOLLOW, 0o600)
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_mode & 0o077:
@@ -259,6 +267,9 @@ class TrialLedger:
                 raise ValueError("trial_lock_changed")
             self._lock_identity = identity
             self._lock_thread = threading.get_ident()
+            pending = self.directory / "pending.json"
+            if self._read_only and (pending.exists() or pending.is_symlink()):
+                raise ValueError("trial_read_only_recovery_required")
             yield
             entry = (self.directory / "ledger.lock").stat(follow_symlinks=False)
             if [entry.st_dev, entry.st_ino] != identity:
@@ -296,6 +307,8 @@ class TrialLedger:
         return rows
 
     def append(self, kind, data):
+        if self._read_only:
+            raise ValueError("trial_read_only")
         rows = self.events()
         if len(rows) >= MAX_EVENTS:
             raise ValueError("trial_event_limit")
