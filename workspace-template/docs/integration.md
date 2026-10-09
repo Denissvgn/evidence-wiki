@@ -1,6 +1,6 @@
 # Integration journey
 
-Library API 58; operation matrix 40. Documentation basis: `7367fcc1d481a690b790836089579d205e173e6e9a0c0d62f593b60c15d44a5c`.
+Library API 59; operation matrix 41. Documentation basis: `611e024ada743c3592adeea548ac9fcdab8537695da985d220374f48ee5f4d03`.
 
 ## Journey
 

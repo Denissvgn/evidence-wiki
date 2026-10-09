@@ -83,3 +83,11 @@ freshly authenticated native observer can establish a zero counter only for its
 continuous declared scope, with the initial counter, terminal coverage and no
 gaps or exclusions. Absent human-time, adoption and business telemetry stays
 unknown. Agent time and simulated user scores cannot establish human savings.
+
+For original-source authenticated external observations use the public
+[`OutcomeIngestion` API](library-api.md#observed-outcomes). Its explicit host
+verifier checks the original producer, evidence class, source receipt and exact
+scope before import and again when reporting. Cost-report external observations
+remain declared and unproved; copying them into another signed container does
+not authenticate actual customer or human activity. Outcome inputs are optional
+and never gate unrelated automated technical qualification.

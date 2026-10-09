@@ -213,6 +213,11 @@ The current calibration covers exact finite structured observations. Broader
 prose and unsupported refusal judgments remain unknown. See the
 [semantic judging guide](../workspace-template/docs/semantic-judging.md).
 
+Version `59` adds host-only `OutcomeIngestion.ingest` and `report`, with matrix
+`41`. Fresh original-source verification binds optional external observations
+to their source, candidate and population without expanding native research
+authority. See [observed outcomes](#observed-outcomes).
+
 `evidence-wiki` can be driven two ways: by spawning the CLI, or by calling the
 package in-process. This document is the contract for the second. It is aimed at
 a host that embeds EvidenceWiki as an evidence layer inside a longer-lived
@@ -1254,6 +1259,86 @@ The reference subprocess and controlled extraction worker require POSIX process
 groups. Unsupported hosts refuse before worker dispatch; hosts can supply their
 own qualified executor boundary. Calls without explicit operation control retain
 their existing platform behavior.
+
+### Observed outcomes
+
+`OutcomeIngestion` is an optional host-only measurement API. Construct it in an
+activated `HostContext` granting `outcomes.ingest` and `outcomes.report`, with an
+allowed existing workspace root, exact candidate hash and scope ID. Select
+`ObservationSource` objects and an `ObservationVerifier` in trusted host code,
+outside worker JSON. Ingestion and reports do not write files or change native
+research policy, acceptance or technical qualification.
+
+```python
+from evidence_wiki import OutcomeIngestion, ObservationSource, ObservationVerifier
+
+# verify_original_source is an application-owned finite callback.
+with host_context.activate():
+    outcomes = OutcomeIngestion(
+        root=workspace_root, scope_id="usage-window", candidate_sha256=candidate_hash,
+        sources=(ObservationSource("usage", "protected-customer-log",
+                                   "externally_observed", "customer"),),
+        verifier=ObservationVerifier("outcome-owner", verify_original_source),
+    )
+    retained = outcomes.ingest(batch)
+    report = outcomes.report([retained])
+    empty = outcomes.report()
+```
+
+Get the closed batch, verification, retained and report shapes through
+`evidence_wiki.outcome_contracts.schema_document`, or inspect
+`contract()["outcome_observations"]`. Each batch selects one metric and retains
+the actual source origin, receipt reference/hash, collection period, denominator
+with population identity, coverage, gaps and exclusions. A period is a nonempty
+UTC interval with an exclusive end. Unknown denominators are `None`; known
+denominators are positive integers. Zero-population denominators are unsupported.
+Counts use one record with value `"1"` per stable entity; unknown values use
+`None`. Decimal durations and payment amounts are exact strings.
+
+The callback receives `batch_sha256`, the full detached `batch` and the fixed
+`controller_ref`. It returns the verification schema, bound to the candidate,
+workspace identity, source, scope and receipt hash, with an authentication
+reference and current UTC verification/expiry times no more than five minutes
+apart. It must independently authenticate the original producer, class, actual
+subjects, stable entities, metric meaning, denominator and full observation
+inventory, and check current withdrawal. A caller boolean, opaque reference,
+retention signature or host source selection alone proves none of these facts.
+Re-signing synthetic records cannot make them externally observed. The host
+must bound callback execution; core cannot interrupt arbitrary Python callbacks.
+
+Evidence classes remain explicit: `deterministic_verified`, `agent_adjudicated`,
+`simulated` and `externally_observed`. Supported metrics are `technical_success`,
+`sessions`, `customer_adoption`, `incidents`, `human_interventions`,
+`human_work_seconds` and `payments`, constrained to their source subjects.
+For sessions, `entity_id` is the stable session identity; for adoption it must
+equal the actual customer `subject_id`. Other entities identify one incident,
+intervention, work record, payment or technical case. Duplicate aliases for the
+same source/entity/metric are idempotent; conflicting aliases, reused receipts,
+conflicting inventories and overlapping windows for one source/metric are
+refused. One source/metric in a combined report requires nonoverlapping periods
+and globally stable, nonconflicting entities. A customer identity is counted
+once in the selected adoption scope; repeated customer observations with changed
+timestamps require a separate observation scope. Overlapping populations or
+currencies for the same source/metric are unsupported. Supported separate rows
+retain their source, population, currency, period and class and are never added
+together.
+
+Only complete authenticated coverage with a known denominator and no unknown
+records yields a scoped total or an exact count ratio. Partial coverage, gaps
+and exclusions yield known subtotals only; missing records never mean zero.
+Complete empty authenticated inventories can measure a scoped zero. Reports
+freshly authenticate every batch before reduction and at closing, then recheck
+the active host scope, workspace identity and all expiries. Report flags are
+historical after serialization: call `report` on the retained observations to
+reverify loaded evidence. Applications own retention and verifier custody.
+
+Empty reports return `adoption_unobserved` and `business_value_unobserved` while
+automated technical validation continues independently. Payments report actual
+receipts; they do not establish causal business value or willingness to pay.
+Human work reports measured effort, never inferred savings. Those unsupported
+metrics remain unobserved. Customer/human/business metrics cannot use simulated,
+agent or deterministic technical records. Measurement authentication never
+grants native scientific acceptance.
 
 **`ws.research.telemetry`** retains bounded measurement declarations and exposes
 their provenance:

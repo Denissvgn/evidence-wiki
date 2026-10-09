@@ -11,6 +11,11 @@
 
 ### Added
 
+- Add optional host ingestion of authenticated usage, incident, payment and
+  human-work observations. Scoped reports separate deterministic, adjudicated,
+  simulated and external evidence, preserve partial coverage and unknowns,
+  and leave adoption or business value unobserved when unsupported.
+
 - Add frozen adversarial acceptance checks with exact test obligations,
   retained process and owner evidence, independent reproduction support and
   conservative pass/fail/abstain outcomes. Missing observations and expected

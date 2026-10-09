@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "58"
+LIBRARY_API_VERSION = "59"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -55,6 +55,8 @@ DOMAIN_PACK_LIFECYCLE_COMMANDS = ("pack refresh", "pack adopt")
 # that version "1" callers cannot absorb bumps the version rather than editing
 # the list in place.
 LIBRARY_API_SURFACE = (
+    "outcomes.ingest",
+    "outcomes.report",
     "research_request",
     "integration_documentation.reference",
     "integration_documentation.render",
@@ -806,6 +808,18 @@ def contract() -> dict:
             "projection": "redacted declared report; measurement authentication is not reverified",
             "delivery": "explicit host-selected deadline sink; core cannot interrupt arbitrary Python callback",
             "replay": "exact logical event identity and immutable attempts; uncertain delivery never blindly retries",
+        },
+        "outcome_observations": {
+            "entry": "OutcomeIngestion with host-selected ObservationSource and ObservationVerifier",
+            "schema_accessor": "evidence_wiki.outcome_contracts.schema_document",
+            "schemas": ["outcome-observation-batch/v1", "outcome-observation-verification/v1",
+                        "outcome-observation-retained/v1", "outcome-observation-report/v1"],
+            "grants": ["outcomes.ingest", "outcomes.report"],
+            "verification": "original producer/class and full batch/receipt binding; fresh import and report closing checks",
+            "evidence_classes": ["deterministic_verified", "agent_adjudicated", "simulated", "externally_observed"],
+            "state_owner": "application-selected retention; no research or policy mutation",
+            "unknowns": "absent external inputs yield adoption_unobserved and business_value_unobserved",
+            "qualification": "optional measurements never gate unrelated technical checks or grant native research acceptance",
         },
         "upgrade_compatibility": {
             "workspace_schema_versions": list(initializer.SUPPORTED_WORKSPACE_SCHEMA_VERSIONS),

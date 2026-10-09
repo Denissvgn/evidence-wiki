@@ -7,10 +7,12 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "40"
+OPERATION_MATRIX_VERSION = "41"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("outcomes.ingest", None, "none; detached scoped retention data", "activated host grant and original workspace/candidate binding with closing scope check", "none; explicit finite original-source verifier"),
+    ("outcomes.report", None, "none; separate exact scoped measurement report", "fresh original-source checks before reduction and at closing; no native research authority", "none; explicit finite host verifier; external input is optional"),
     ("research_request", None, "none; detached request with shared closed argument validation", "none", "none"),
     ("integration_documentation.reference", None, "none; finite public operation and schema declarations", "frozen documentation basis", "none"),
     ("integration_documentation.render", None, "none; canonical guide and reference text", "same public basis", "none"),

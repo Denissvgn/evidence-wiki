@@ -39,6 +39,9 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
 # below with a module and make ``evidence_wiki.contract()`` fail by import
 # order. The leading underscore keeps one meaning for the public name.
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
+    "OutcomeIngestion": (".outcome_observations", "OutcomeIngestion"),
+    "ObservationSource": (".outcome_observations", "ObservationSource"),
+    "ObservationVerifier": (".outcome_observations", "ObservationVerifier"),
     "SemanticJudgingPlan": (".semantic_contracts", "SemanticJudgingPlan"),
     "IntegrationDocumentation": (".integration_documentation", "IntegrationDocumentation"),
     "research_request": (".research_command_contracts", "research_request"),
