@@ -11,6 +11,11 @@
 
 ### Added
 
+- Add frozen adversarial acceptance checks with exact test obligations,
+  retained process and owner evidence, independent reproduction support and
+  conservative pass/fail/abstain outcomes. Missing observations and expected
+  refusals remain distinct from successful answers or native authorization.
+
 - Add bounded integration-cost accounting with complete attempt inventories,
   exact monetary buckets, declared repeat-use allocation and authenticated host
   and native receipt adapters. Unknown provider usage and human or organizational

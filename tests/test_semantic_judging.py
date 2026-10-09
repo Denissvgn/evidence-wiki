@@ -39,6 +39,17 @@ from tests.test_finite_domain import inputs as finite_inputs
 from tests.test_semantic_contracts import findings, worker_input
 
 
+def record_acceptance_owner(request, owner_name, result):
+    plugin = request.config.pluginmanager.get_plugin("acceptance-records")
+    if plugin is not None:
+        plugin.record_owner_result(request.node.nodeid, owner_name, result)
+
+
+def journal_digest(records):
+    """Commit every authenticated record in order without nesting its payload again."""
+    return digest({"record_count": len(records), "ordered_record_sha256": [digest(record) for record in records]})
+
+
 @pytest.fixture(scope="module")
 def accepted_native(tmp_path_factory):
     """Pay protected native setup once for the related boundary assertions."""
@@ -182,10 +193,11 @@ def test_unassessed_original_retains_unknown_behavior_and_material_denominators(
 
 
 @pytest.mark.parametrize("change", ["original", "required_unit", "source", "closure", "candidate"])
-def test_current_application_refuses_original_unit_source_and_candidate_drift(accepted_session, change):
+def test_current_application_refuses_original_unit_source_and_candidate_drift(accepted_session, change, request):
     selected, session = accepted_session
     row = next(row for row in _semantic_rows(selected.execution, session) if row["purpose"] == "evaluate")
     attempt = selected.execution.attempt(row["attempt"])
+    before_records = journal_digest(selected.execution.records(session))
     with driver._current_facts(session) as current:
         view, packets = copy.deepcopy(current.view), copy.deepcopy(current.packets)
         observed = SimpleNamespace(requirements=copy.deepcopy(current.observed.requirements), strict=copy.deepcopy(current.observed.strict))
@@ -204,9 +216,24 @@ def test_current_application_refuses_original_unit_source_and_candidate_drift(ac
             judging.require_current(session, row, attempt, view, prepared, packets, observed)
         assert refused.value.error_code == "RESEARCH_SEMANTIC_BASIS_CHANGED"
         current.require(session)
+        assert journal_digest(selected.execution.records(session)) == before_records
+        input_parts = {"view": view, "packets": packets, "prepared": prepared,
+                       "requirements": observed.requirements, "strict": observed.strict}
+        input_commitments = {key: digest(value) for key, value in input_parts.items()}
+        record_acceptance_owner(request, "semantic_judging.require_current", {
+            "attempt_id": attempt.attempt_id, "claim_id": row["claim_id"], "change": change,
+            "workspace": str(selected.root), "basis_id": current.view["basis_id"],
+            "input_sha256": digest(input_commitments), "input_parts_sha256": input_commitments,
+            "input_commitment": "named-native-input-digests/v1",
+            "error_code": refused.value.error_code, "reason": refused.value.details,
+            "before_records_sha256": before_records,
+            "after_records_sha256": journal_digest(selected.execution.records(session)),
+            "records_commitment": "ordered-native-record-digests/v1",
+            "accepted": False,
+        })
 
 
-def test_forged_exact_source_anchor_is_refused_before_native_review_application(accepted_session):
+def test_forged_exact_source_anchor_is_refused_before_native_review_application(accepted_session, request):
     selected, session = accepted_session
     row = next(row for row in _semantic_rows(selected.execution, session) if row["purpose"] == "evaluate")
     attempt = selected.execution.attempt(row["attempt"])
@@ -216,10 +243,18 @@ def test_forged_exact_source_anchor_is_refused_before_native_review_application(
     output["checks"]["support"][0]["anchors"][0]["quote"] = "A forged contrary observation."
     with driver._current_facts(session) as current:
         prepared = owner("strict_evidence").prepare_review(selected.root, row["claim_id"])
-        with pytest.raises(ExecutionError, match="anchor_quote_invalid"):
+        with pytest.raises(ExecutionError, match="anchor_quote_invalid") as refused:
             judging.assess(session, row, attempt, output, current.view, prepared, current.packets, current.observed)
         current.require(session)
     assert selected.execution.records(session) == records
+    record_acceptance_owner(request, "semantic_judging.assess", {
+        "attempt_id": attempt.attempt_id, "claim_id": row["claim_id"],
+        "workspace": str(selected.root), "input_sha256": digest(output),
+        "reason": str(refused.value), "exception_type": type(refused.value).__name__,
+        "before_records_sha256": journal_digest(records),
+        "after_records_sha256": journal_digest(selected.execution.records(session)),
+        "records_commitment": "ordered-native-record-digests/v1", "accepted": False,
+    })
 
 
 @pytest.mark.parametrize("condition", ["absent", "expired", "out_of_domain"])
@@ -287,7 +322,7 @@ def test_public_absent_protected_records_block_judging_without_worker_dispatch(a
             assert not any(row["kind"] == "execution_attempt" for row in execution.records(session))
 
 
-def test_public_finite_wrong_value_cannot_release_synthetic_model_passes(tmp_path, monkeypatch):
+def test_public_finite_wrong_value_cannot_release_synthetic_model_passes(tmp_path, monkeypatch, request):
     root, policy, execution, context = native_fixture(tmp_path, monkeypatch, semantic_wrong_value=True)
     with context.activate(), Workspace.open(root) as workspace:
         with workspace.research.session(policy, run_id="semantic-wrong-value", execution=execution) as session:
@@ -311,6 +346,22 @@ def test_public_finite_wrong_value_cannot_release_synthetic_model_passes(tmp_pat
             replay = session.run_until_terminal(request_id="drive", expected_basis_id=basis, max_steps=64)
             assert replay["historical"] and replay["outcome"] == result["outcome"]
             assert len(execution.records(session)) == count
+            record_acceptance_owner(request, "ResearchSession.run_until_terminal", {
+                "workspace": str(root),
+                "result": {key: result[key] for key in ("outcome", "reason", "terminal", "historical")},
+                "replay": {key: replay[key] for key in ("outcome", "reason", "terminal", "historical")},
+                "result_sha256": digest(result), "replay_sha256": digest(replay),
+                "basis_id": session.current()["basis_id"],
+                "proposed_output_sha256": [digest(output) for output in proposed],
+                "all_proposed_verdicts_pass": True,
+                "reference_conflict_observed": True, "accepted_count": 0,
+                "research_complete": False, "records_count": count,
+                "records_sha256": journal_digest(execution.records(session)),
+                "records_commitment": "ordered-native-record-digests/v1",
+                "support_score": report["dimensions"]["support"]["score"],
+                "support_unknown": report["dimensions"]["support"]["unknown"],
+                "native_workers": "synthetic",
+            })
 
 
 def test_public_unknown_advisory_cannot_release_after_three_native_passes(tmp_path, monkeypatch):
