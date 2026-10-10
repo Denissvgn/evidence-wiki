@@ -69,7 +69,9 @@ def test_release_checks_fan_out_from_identity_and_all_gate_promotion() -> None:
     for producer in producers - {"release-tests"}:
         assert jobs[producer]["needs"] == "release-identity"
     assert set(jobs["release-tests"]["needs"]) == {"release-identity", "compatibility"}
-    assert set(jobs["release-artifacts"]["needs"]) == {"release-identity", "release-build"}
+    assert set(jobs["release-artifacts"]["needs"]) == {"release-artifacts-wheel", "release-artifacts-sdist"}
+    for kind in ("wheel", "sdist"):
+        assert set(jobs["release-artifacts-"+kind]["needs"]) == {"release-identity", "release-build"}
     assert set(jobs["release-gate"]["needs"]) == producers | {"compatibility", "release-identity", "release-artifacts"}
     publication = load_workflow()["jobs"]
     assert publication["publish-to-pypi"]["needs"] == "release-gate"
@@ -173,26 +175,28 @@ def test_release_rehearsal_has_no_publishing_authority():
 
 
 def test_release_artifact_matrix_runs_the_same_bounded_gate_as_ci():
-    release = load_workflow(QUALIFICATION_PATH)["jobs"]["release-artifacts"]
-    ci = load_workflow(CI_WORKFLOW_PATH)["jobs"]["installed"]
-    assert release["strategy"] == ci["strategy"]
-    assert release["timeout-minutes"] == ci["timeout-minutes"]
-    parsed = []
-    for job in (release, ci):
-        step = next(step for step in job["steps"] if "tools/validate_installed_artifacts.py" in step.get("run", ""))
-        command = step["run"].replace("\\\n", " ").split(" | tee ", 1)[0]
-        command = command.replace("${{ matrix.artifact }}", "wheel").replace("$EXPECTED_VERSION", "1.0.0")
-        parsed.append(VALIDATOR.parse_args(shlex.split(command)[2:]))
-        assert step["timeout-minutes"] < job["timeout-minutes"]
-    for option in ("artifact", "journey_workers", "command_timeout", "case_timeout", "journey_timeout", "heartbeat_seconds"):
-        assert getattr(parsed[0], option) == getattr(parsed[1], option), option
-    assert parsed[0].expected_version == "1.0.0"
-    uploads = [step for step in release["steps"] if "upload-artifact@" in step.get("uses", "")]
-    success = next(step for step in uploads if "if" not in step)
-    diagnostic = next(step for step in uploads if step.get("if") == "always()")
-    assert "matrix.artifact" in success["with"]["name"] and success["with"]["overwrite"] is True
-    assert "github.run_attempt" not in success["with"]["name"]
-    assert "matrix.artifact" in diagnostic["with"]["name"] and "github.run_attempt" in diagnostic["with"]["name"]
+    shared=load_workflow(REPO_ROOT/'.github/workflows/qualify-installation.yml')
+    job=shared['jobs']['installation']
+    step=next(step for step in job['steps'] if 'tools/validate_installed_artifacts.py' in step.get('run',''))
+    assert step['timeout-minutes'] < job['timeout-minutes']
+    assert '--custody-output "$GITHUB_OUTPUT"' in step['run']
+    assert '--journey-workers 3' in step['run'] and '--case-timeout 1200' in step['run'] and '--journey-timeout 5400' in step['run']
+    for path,group in ((QUALIFICATION_PATH,'release-artifacts'),(CI_WORKFLOW_PATH,'installed')):
+        jobs=load_workflow(path)['jobs']
+        assert jobs[group]['needs']==[group+'-wheel',group+'-sdist']
+        for kind in ('wheel','sdist'):
+            producer=jobs[group+'-'+kind]
+            assert producer['uses']=='./.github/workflows/qualify-installation.yml'
+            assert producer['with']['artifact']==kind
+            if group=='release-artifacts':
+                assert producer['with']['expected-version']=='${{ needs.release-identity.outputs.version }}'
+            assert jobs[group]['outputs'][kind+'-report-sha256']=='${{ needs.'+group+'-'+kind+'.outputs.report-sha256 }}'
+    success=next(step for step in job['steps'] if 'upload-artifact@' in step.get('uses','') and 'if' not in step)
+    diagnostic=next(step for step in job['steps'] if step.get('if')=='always()' and 'upload-artifact@' in step.get('uses',''))
+    assert success['with']['path']=='reports/installed-artifacts/'
+    assert 'inputs.artifact' in success['with']['name'] and success['with']['overwrite'] is True
+    assert 'github.run_attempt' not in success['with']['name']
+    assert 'github.run_attempt' in diagnostic['with']['name']
 
 
 @pytest.mark.parametrize("defect", [None, "bytes", "name", "version", "missing", "extra", "duplicate", "partial", "selection", "artifact"])
@@ -239,7 +243,7 @@ def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkey
 
 
 def test_release_gate_checks_identity_quality_and_runs_the_shared_artifact_gate() -> None:
-    text = WORKFLOW_PATH.read_text(encoding="utf-8") + QUALIFICATION_PATH.read_text(encoding="utf-8")
+    text = WORKFLOW_PATH.read_text(encoding="utf-8") + QUALIFICATION_PATH.read_text(encoding="utf-8") + (REPO_ROOT/".github/workflows/qualify-installation.yml").read_text(encoding="utf-8")
 
     for required in (
         "github.event.release.tag_name",
@@ -265,7 +269,7 @@ def test_release_gate_checks_identity_quality_and_runs_the_shared_artifact_gate(
 
 
 def test_ci_runs_the_same_shared_artifact_gate_as_the_release() -> None:
-    text = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+    text = CI_WORKFLOW_PATH.read_text(encoding="utf-8") + (REPO_ROOT/".github/workflows/qualify-installation.yml").read_text(encoding="utf-8")
 
     assert "tools/validate_installed_artifacts.py --dist-dir dist" in text
     assert "pip install dist/*.whl" not in text
@@ -287,8 +291,9 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert test["needs"] == "compatibility"
     assert set(package["needs"]) == {"compatibility", "test", "build", "installed"}
     assert package["if"] == "${{ !cancelled() }}"
-    assert "needs" not in build and installed["needs"] == "build"
-    assert installed["strategy"] == {"fail-fast": False, "max-parallel": 2, "matrix": {"artifact": ["wheel", "sdist"]}}
+    assert "needs" not in build and installed["needs"] == ["installed-wheel", "installed-sdist"]
+    for kind in ("wheel", "sdist"):
+        assert workflow["jobs"]["installed-"+kind]["needs"] == "build" or workflow["jobs"]["installed-"+kind]["needs"] == ["build"]
     require = package["steps"][0]["run"]
     assert all("test '${{ needs." + name + ".result }}' = success" in require
                for name in ("compatibility", "test", "build", "installed"))
@@ -350,14 +355,14 @@ def test_shared_artifact_gate_carries_every_check_the_workflows_used_to_inline()
 
 def make_wheel(path: Path, members: list[str]) -> Path:
     with zipfile.ZipFile(path, "w") as archive:
-        for member in members:
+        for member in sorted(set(members)):
             archive.writestr(member, "x")
     return path
 
 
 def make_sdist(path: Path, members: list[str], root: str = "evidence_wiki-9.9.9") -> Path:
     with tarfile.open(path, "w:gz") as archive:
-        for member in members:
+        for member in sorted(set(members)):
             info = tarfile.TarInfo(name=f"{root}/{member}")
             info.size = 1
             archive.addfile(info, io.BytesIO(b"x"))
@@ -371,28 +376,25 @@ def test_archive_membership_accepts_a_policy_conformant_pair(tmp_path: Path) -> 
     summary = VALIDATOR.check_archive_membership(wheel, sdist)
 
     assert summary == {
-        "wheel_members": len(VALIDATOR.REQUIRED_WHEEL_MEMBERS),
-        "sdist_members": len(VALIDATOR.REQUIRED_SDIST_MEMBERS),
+        "wheel_members": len(set(VALIDATOR.REQUIRED_WHEEL_MEMBERS)),
+        "sdist_members": len(set(VALIDATOR.REQUIRED_SDIST_MEMBERS)),
     }
 
 
 def test_installed_ci_diagnostics_and_retries_preserve_each_artifact():
-    workflow = yaml.safe_load(CI_WORKFLOW_PATH.read_text(encoding="utf-8"))
-    job = workflow["jobs"]["installed"]
-    command = next(step for step in job["steps"] if "tools/validate_installed_artifacts.py" in step.get("run", ""))
-    assert command["timeout-minutes"] < job["timeout-minutes"]
-    assert "--artifact ${{ matrix.artifact }}" in command["run"]
-    assert "--journey-workers 3" in command["run"]
-    uploads = [step for step in job["steps"] if "actions/upload-artifact@" in step.get("uses", "")]
-    successful = next(step for step in uploads if step["with"]["path"].endswith("summary.json"))
-    diagnostics = next(step for step in uploads if step.get("if") == "always()")
-    assert "if" not in successful and successful["with"]["overwrite"] is True
-    assert successful["with"]["if-no-files-found"] == "error"
-    assert "github.run_attempt" not in successful["with"]["name"]
-    assert "github.run_attempt" in diagnostics["with"]["name"]
-    assert "matrix.artifact" in diagnostics["with"]["name"]
-    assert diagnostics["with"]["path"] == "reports/installed-artifacts/"
-    assert diagnostics["with"]["retention-days"] == 90
+    shared=load_workflow(REPO_ROOT/'.github/workflows/qualify-installation.yml')
+    job=shared['jobs']['installation']
+    command=next(step for step in job['steps'] if 'tools/validate_installed_artifacts.py' in step.get('run',''))
+    assert command['timeout-minutes'] < job['timeout-minutes']
+    assert '--artifact "$SELECTED_ARTIFACT"' in command['run'] and '--journey-workers 3' in command['run']
+    uploads=[step for step in job['steps'] if 'actions/upload-artifact@' in step.get('uses','')]
+    successful=next(step for step in uploads if 'if' not in step)
+    diagnostics=next(step for step in uploads if step.get('if')=='always()')
+    assert successful['with']['path']=='reports/installed-artifacts/' and successful['with']['overwrite'] is True
+    assert successful['with']['if-no-files-found']=='error'
+    assert 'github.run_attempt' not in successful['with']['name']
+    assert 'github.run_attempt' in diagnostics['with']['name'] and 'inputs.artifact' in diagnostics['with']['name']
+    assert diagnostics['with']['retention-days']==90
 
 
 def test_every_workflow_uses_pinned_node24_checkout_and_python_actions():
@@ -621,7 +623,7 @@ def test_release_failure_diagnostics_do_not_admit_failed_distributions() -> None
     jobs = workflow["jobs"]
     for job, report in (("release-artifacts", "artifact-validation.json"),
                         ("release-scale", "scale-benchmark-standard.json")):
-        steps = jobs[job]["steps"]
+        steps = load_workflow(REPO_ROOT/".github/workflows/qualify-installation.yml")["jobs"]["installation"]["steps"] if job == "release-artifacts" else jobs[job]["steps"]
         collector = next(step for step in steps if "tools/collect_release_diagnostics.py" in step.get("run", ""))
         upload = next(step for step in steps if step.get("with", {}).get("path", "").startswith("release-diagnostics/"))
         assert collector["if"] == upload["if"] == "always()"

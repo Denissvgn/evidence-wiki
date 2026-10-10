@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "59"
+LIBRARY_API_VERSION = "60"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -396,6 +396,7 @@ def contract() -> dict:
     import yaml
 
     from . import orchestration
+    from .agent_execution import PROFILE_SCHEMA_VERSIONS
     from .artifact_delivery_contracts import schemas as delivery_schemas
     from .environment import SERVICE_VARIABLES
     from .extension_contracts import index as extension_index
@@ -722,7 +723,7 @@ def contract() -> dict:
             "deadline": "job lease capped by the original canonical run deadline; calls do not reset the allowance",
             "model_executor": "host_selected",
             "execution_profile": "ExecutionProfile and ResearchExecution; no mandatory model SDK",
-            "execution_profile_schemas": ["research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3", "research-execution-profile/v4", "research-execution-profile/v5", "research-execution-profile/v6"],
+            "execution_profile_schemas": list(PROFILE_SCHEMA_VERSIONS),
             "scheduling": "optional frozen role/controller aggregate caps, configured worker failover and bounded authenticated retry/backoff",
             "offline_executor": "DeterministicOfflineExecutor; measured local work, zero provider use, fixtures cannot qualify semantic review",
             "role_isolation": "optional frozen role scopes and exact configured controllers; fresh blinded parent-bound review contexts; independent control/context/model dimensions remain separate",

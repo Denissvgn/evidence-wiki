@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -82,21 +83,39 @@ class CommandRunner:
                 with (self.output / "progress.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
                     stream.write(json.dumps(row, sort_keys=True) + "\n")
 
-    def run(self, argv, *, label, cwd=None, env=None, timeout=900, input=None, stream_stderr=False, expected=(0,)):
+    def run(self, argv, *, label, cwd=None, env=None, timeout=900, input=None, stream_stderr=False, expected=(0,),
+            deadline_monotonic=None, supervision=None):
         timeout = positive_seconds(timeout)
+        budget_started = time.monotonic()
+        effective_deadline = None
+        if deadline_monotonic is not None:
+            if type(deadline_monotonic) not in (int, float) or not math.isfinite(deadline_monotonic):
+                raise ValueError("absolute deadline must be finite")
+            remaining = deadline_monotonic - budget_started
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(label, 0)
+            effective_deadline = min(deadline_monotonic, budget_started + timeout)
+            timeout = min(timeout, remaining)
         if self.cancelled.is_set():
             raise KeyboardInterrupt
         with self.lock:
             number = len(self.records) + 1
-            record = {"stage": label, "status": "running", "timeout_seconds": timeout}
+            record = {"stage": label, "status": "running", "timeout_seconds": timeout,
+                      "argv": list(map(str, argv)), "cwd": str(Path(cwd).resolve()) if cwd else None,
+                      "stdin_mode": "devnull" if input is None else "explicit_payload",
+                      "expected_exit_codes": list(expected), "started_at_utc": datetime.now(timezone.utc).isoformat(),
+                      "input_sha256": hashlib.sha256(input.encode("utf-8") if isinstance(input, str) else input or b"").hexdigest()}
             self.records.append(record)
+            if deadline_monotonic is not None:
+                record.update(deadline_monotonic=deadline_monotonic, budget_started_monotonic=budget_started,
+                              effective_deadline_monotonic=effective_deadline, supervision=supervision)
         name = f"{number:03}-" + re.sub(r"[^a-zA-Z0-9_.-]", "-", label)[:100]
         started = time.monotonic()
         self.event("started", label, timeout_seconds=timeout)
         with tempfile.TemporaryDirectory(prefix="qualification-command-") as temporary:
             directory = self.output if self.output is not None else Path(temporary)
             stdout_path, stderr_path = directory / (name + ".stdout.log"), directory / (name + ".stderr.log")
-            record.update(stdout=stdout_path.name, stderr=stderr_path.name)
+            record.update(stdout=stdout_path.name, stderr=stderr_path.name, receipt=name + ".json")
             process = None
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr, tempfile.TemporaryFile() as stdin:
                 if input is not None:
@@ -106,8 +125,14 @@ class CommandRunner:
                 options = ({"start_new_session": True} if os.name != "nt" else
                            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP})
                 try:
-                    process = subprocess.Popen(argv, cwd=cwd, env=environment, stdin=stdin,  # noqa: S603 -- explicit qualification argv.
+                    if effective_deadline is not None and time.monotonic() >= effective_deadline:
+                        record["status"] = "timed_out"
+                        raise subprocess.TimeoutExpired(label, timeout)
+                    process = subprocess.Popen(argv, cwd=cwd, env=environment,  # noqa: S603 -- explicit qualification argv.
+                                               stdin=subprocess.DEVNULL if input is None else stdin,
                                                stdout=stdout, stderr=stderr, **options)
+                    record["pid"] = process.pid
+                    record["started_monotonic"] = time.monotonic()
                     next_heartbeat, offset = self.heartbeat, 0
                     while True:
                         if stream_stderr:
@@ -123,6 +148,9 @@ class CommandRunner:
                             raise ValueError(f"{label}: command output exceeded 32 MiB; inspect retained logs")
                         if self.cancelled.is_set():
                             raise KeyboardInterrupt
+                        if effective_deadline is not None and time.monotonic() >= effective_deadline:
+                            record["status"] = "timed_out"
+                            raise subprocess.TimeoutExpired(label, timeout)
                         if process.poll() is not None:
                             record.update(status="passed" if process.returncode in expected else "failed", exit_code=process.returncode)
                             if stream_stderr:
@@ -147,10 +175,23 @@ class CommandRunner:
                         stop_process(process)
                     raise
                 finally:
+                    completed_late = (effective_deadline is not None and record["status"] == "passed"
+                                      and time.monotonic() >= effective_deadline)
+                    if completed_late:
+                        record["status"] = "timed_out"
+                        if process is not None:
+                            stop_process(process)
+                    record["completed_monotonic"] = time.monotonic()
+                    record["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
                     record["seconds"] = round(time.monotonic() - started, 3)
+                    for channel, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+                        record[channel + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                        record[channel + "_bytes"] = path.stat().st_size
                     self.event(record["status"], label, **{key: value for key, value in record.items() if key not in {"stage", "status"}})
                     if self.output is not None:
                         (directory / (name + ".json")).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")
+                    if completed_late:
+                        raise subprocess.TimeoutExpired(label, timeout)
             return subprocess.CompletedProcess(argv, process.returncode,
                 stdout_path.read_text(encoding="utf-8", errors="replace"),
                 stderr_path.read_text(encoding="utf-8", errors="replace"))

@@ -48,6 +48,11 @@ PROFILE_V9 = "research-execution-profile/v9"
 PROFILE_V10 = "research-execution-profile/v10"
 PROFILE_V11 = "research-execution-profile/v11"
 PROFILE_V12 = "research-execution-profile/v12"
+PROFILE_V13 = "research-execution-profile/v13"
+PROFILE_SCHEMA_VERSIONS = (
+    PROFILE, PROFILE_V2, PROFILE_V3, PROFILE_V4, PROFILE_V5, PROFILE_V6,
+    PROFILE_V7, PROFILE_V8, PROFILE_V9, PROFILE_V10, PROFILE_V11, PROFILE_V12, PROFILE_V13,
+)
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
 _COST = re.compile(r"^(?:0|[1-9][0-9]{0,11})(?:\.[0-9]{1,12})?$")
@@ -400,7 +405,7 @@ class ExecutionProfile:
         if self.artifact_delivery is not None:
             result.update(schema_version=PROFILE_V12, artifact_delivery=self.artifact_delivery.document())
         if self.semantic_judging is not None:
-            result.update(schema_version="research-execution-profile/v13", semantic_judging=self.semantic_judging.document())
+            result.update(schema_version=PROFILE_V13, semantic_judging=self.semantic_judging.document())
             # The complete shared reference assessment remains committed once;
             # per-controller configuration keeps its exact assessment reference.
             compact = result["calibration"]

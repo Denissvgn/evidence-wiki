@@ -135,6 +135,8 @@ def test_wrong_owner_cannot_mutate_caller_run(workspace, operation):
     with pytest.raises(Exception) as caught:
         getattr(controller, "run_" + operation)(workspace, controller.parse_args(args))
     assert caught.value.error_code == "RUN_CALLER_CONTEXT_CONFLICT"
+    assert caught.value.details["reason"] == "caller_run_owned_by_another_agent"
+    assert caught.value.recoverable is False
     assert files(workspace) == before
 
 

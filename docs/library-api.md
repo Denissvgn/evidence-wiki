@@ -3010,3 +3010,45 @@ without semantic prompts or credential setup. A separate bounded refresh allowan
 keeps the first terminal result distinct from the new run; original budgets remain
 native owner facts. No new executor, qualification or scientific acceptance owner
 is introduced by the application.
+
+## Installed and legacy compatibility
+
+Library API `60` advertises every native execution profile version, v1–v13,
+from the execution owner. Operation matrix `41` retains its existing operations.
+
+Open the installed library and its content catalog from the same isolated Python
+environment used by native children. `contract()` describes that installation's
+library API and operation matrix. `Onboarding.open().contracts()` describes its
+scoped adapters; `resources()` and `resource(id)` expose the closed, hashed
+catalog, including schema documents and complete public example bundles.
+The command-line contract and MCP resource interface use these same owners.
+Optional Git, Poppler and model CLIs are separately selected host capabilities.
+Discovery does not establish live model execution or host isolation. Framework
+compatibility applies only to the exact version, platform and mode listed in the
+installed matrix.
+
+Legacy `RunPolicy` v1/v2 and `ExecutionProfile` constructors retain their original
+serialized meanings. Omitted service, scheduling and role-scope declarations are
+not filled with newer defaults. For example, this original profile remains v1:
+
+```python
+import hashlib
+import json
+from evidence_wiki import ExecutionProfile, ExecutionRole
+
+worker = ExecutionRole("worker", "host_worker", "owner", "offline/model", "prompt")
+profile = ExecutionProfile("legacy", 4, "EUR", "fixed", (worker,), 1, 1, 100, "0")
+document = profile.document()
+serialized = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+assert document["schema_version"] == "research-execution-profile/v1"
+assert hashlib.sha256(serialized).hexdigest() == (
+    "4b7802ba8fecf9be3863320d32e70c15a5c1737db574c0693aace554599ab444"
+)
+```
+
+Adding an explicit `ExecutionSchedule` selects the corresponding v2 document;
+`ExecutionRoleRegistry` selects the scoped profile form. Newer services select
+their declared profile versions. `HostRuntime.from_file` accepts its documented
+native file formats; use `HostRuntime.from_services` for advanced public service
+profiles. Do not downgrade a profile or add authority to make an older adapter
+accept it. Unsupported combinations preserve a terminal refusal.

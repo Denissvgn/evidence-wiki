@@ -41,7 +41,7 @@ import sys
 import tarfile
 import tempfile
 import textwrap
-import zipfile
+import time
 from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 
@@ -53,9 +53,23 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
+from tools._installation_contract import (  # noqa: E402
+    admitted_archive,
+    check_source_archives,
+    dependency_rules,
+    source_file,
+    source_layout,
+)
+from tools._installed_receipts import evidence_inventory  # noqa: E402
 from tools._qualification_process import CommandRunner, interruptible, positive_seconds  # noqa: E402
 from tools.probe_html_usability import CASE_NAMES as HTML_CASE_NAMES  # noqa: E402
 from tools.probe_installed_cli import checked_outcomes  # noqa: E402
+from tools.probe_installed_public import (  # noqa: E402
+    PUBLIC_STAGE_SECONDS,
+    checked_public_outcomes,
+    digest,
+    public_expectations,
+)
 
 _RUNNER = CommandRunner()
 _OPTIONS = argparse.Namespace(command_timeout=900, journey_timeout=5400, case_timeout=1200,
@@ -149,6 +163,8 @@ REQUIRED_SDIST_MEMBERS = (
     "src/evidence_wiki/__main__.py",
     "tools/smoke_installed_orchestration.py",
     "tools/validate_installed_artifacts.py",
+    "tools/verify_installed_artifacts.py",
+    "tools/probe_installed_public.py",
     "tools/_qualification_process.py",
     "tools/qualify_journeys.py",
     "tools/sync_agent_resources.py",
@@ -197,14 +213,19 @@ def find_artifacts(dist_dir: Path) -> tuple[Path, Path]:
 
 
 def wheel_members(path: Path) -> list[str]:
-    with zipfile.ZipFile(path) as archive:
-        return sorted(archive.namelist())
+    try:
+        return sorted(admitted_archive(path, "wheel"))
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
 
 
 def sdist_members(path: Path) -> list[str]:
     """Members relative to the project root, with the ``<name>-<version>/`` prefix removed."""
-    with tarfile.open(path, "r:gz") as archive:
-        names = [member.name for member in archive.getmembers() if member.isfile()]
+    try:
+        names = [name for name, row in admitted_archive(path, "sdist").items()
+                 if len(PurePosixPath(name).parts) > 1 or not row["directory"]]
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
     stripped: list[str] = []
     for name in names:
         if SDIST_ROOT_RE.match(name) is None:
@@ -266,15 +287,17 @@ def command_label(argv):
 
 
 def run(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
-        timeout=None, label=None, stream_stderr=False) -> str:
+        timeout=None, label=None, stream_stderr=False, deadline_monotonic=None, supervision=None) -> str:
     environment = dict(os.environ if env is None else env)
     for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "GIT_DIR", "GIT_WORK_TREE"):
         environment.pop(key, None)
     environment.update(PYTHONNOUSERSITE="1", PYTHONDONTWRITEBYTECODE="1")
     stage = _OPTIONS.active_artifact + "/" + (label or command_label(argv))
     try:
+        deadline_options = ({"deadline_monotonic": deadline_monotonic, "supervision": supervision}
+                            if deadline_monotonic is not None else {})
         process = _RUNNER.run(argv, label=stage, cwd=cwd, env=environment,
-                              timeout=timeout or _OPTIONS.command_timeout, stream_stderr=stream_stderr)
+                              timeout=timeout or _OPTIONS.command_timeout, stream_stderr=stream_stderr, **deadline_options)
     except subprocess.TimeoutExpired as error:
         raise ValidationError(f"{stage} exceeded {error.timeout:g}s; inspect retained command logs") from error
     if process.returncode != 0:
@@ -297,8 +320,8 @@ def venv_cli(venv: Path) -> Path:
 
 
 def create_venv_with_wheel(root: Path, wheel: Path) -> Path:
-    venv = root / "venv"
-    run([sys.executable, "-m", "venv", str(venv)])
+    venv = root / ".venv"
+    run([getattr(_OPTIONS, "python", sys.executable), "-m", "venv", str(venv)])
     python = venv_python(venv)
     run([str(python), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", str(wheel)])
     return venv
@@ -1021,7 +1044,8 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     from pathlib import Path
     from evidence_wiki import contract, verify_snapshot
 
-    cli, fixture, directory = map(Path, sys.argv[1:])
+    cli, fixture, directory = map(Path, sys.argv[1:4])
+    expected_api = sys.argv[4]
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         print(json.dumps({"historical_execution": "unsupported_host"}))
         sys.exit(0)
@@ -1061,7 +1085,7 @@ HISTORICAL_EXECUTION_PROBE = textwrap.dedent(
     del os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]
     del os.environ["EVIDENCE_WIKI_STATE_DIR"]
     assert verify_snapshot(raw, trust_policy_bytes=policy)["valid"]
-    assert contract()["library_api"]["version"] == "14"
+    assert contract()["library_api"]["version"] == expected_api
     print(json.dumps({"historical_execution": "validated", "historical_execution_snapshot": "independent_offline_verification"}))
     '''
 )
@@ -1135,7 +1159,8 @@ ASSESSMENT_PROBE = textwrap.dedent(
     from evidence_wiki import Workspace, contract
     from evidence_wiki.errors import EvidenceWikiError
 
-    cli, fixture, directory = map(Path, sys.argv[1:])
+    cli, fixture, directory = map(Path, sys.argv[1:4])
+    expected_api = sys.argv[4]
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         print(json.dumps({"evidence_assessments": "unsupported_host"}))
         sys.exit(0)
@@ -1189,7 +1214,7 @@ ASSESSMENT_PROBE = textwrap.dedent(
         assert workspace.assessments.apply_refresh(application) == applied
         assert workspace.assessments.check(envelope)["reasons"] == ["assessment_invalidated"]
         assert command("plan-refresh", host.refresh())["plan"]["entries"] == []
-        assert contract()["library_api"]["version"] == "14"
+        assert contract()["library_api"]["version"] == expected_api
     print(json.dumps({"evidence_assessments": "authenticated_cli_api_parity", "assessment_refresh": "revocation_and_idempotent_apply"}))
     '''
 )
@@ -1701,8 +1726,11 @@ RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.y
     assert current['caller_context'] == stored['caller_context']
     before = support['workspace_files'](target)
     refused = command('heartbeat','--target',target,'--run-id',run_id,'--agent-id','other',expected=3)
-    assert refused['error_code'] == 'ONBOARDING_OWNERSHIP_CONFLICT'
-    assert support['workspace_files'](target) == before
+    unchanged = support['workspace_files'](target) == before
+    assert (refused['error_code'] == 'RUN_CALLER_CONTEXT_CONFLICT'
+        and refused['details']['reason'] == 'caller_run_owned_by_another_agent'
+        and refused['recoverable'] is False), {'actual_refusal':refused,'workspace_unchanged':unchanged}
+    assert unchanged, {'actual_refusal':refused,'workspace_unchanged':False}
     output = command('research-export','--target',target,expected=3)
     assert not output['research_complete'] and output['original_outcomes'][0]['original_text'] == text
     progress = command('progress','--target',target,'--run-id',run_id)
@@ -1712,6 +1740,7 @@ RESEARCH_PROBE = PLANNING_PROBE[:PLANNING_PROBE.index("profile = root/'profile.y
     assert 'evidence-research-action/v1' in command('research-schemas')['schema_ids']
     print(json.dumps({'caller_guidance':'passed','caller_run_binding':'passed','caller_readonly_resume':'passed',
         'caller_ownership_conflict':'passed','original_question_accounting':'passed','local_telemetry_unknown_grading':'passed',
+        'caller_ownership_refusal':refused,
         'generated_research_actions':support['checked_outcomes']('generated_research_actions',{'start':'passed','heartbeat':'passed'}),
         'research_action_commands':commands.runner.records,'research_action_log_directory':str(commands.runner.output)}))
 ''')
@@ -1791,6 +1820,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
         raise ValidationError(f"{label}: the installed distribution did not provide the evidence-wiki entry point")
     outside = scratch / "outside-checkout"
     outside.mkdir()
+    expectations = getattr(_OPTIONS, "public_expectations", None) or qualification_expectations()
     fixture_root = isolated_fixtures(scratch)
     workspace = scratch / "provider-workspace"
     # Every command runs from a directory that is not the checkout, so a module
@@ -1885,7 +1915,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     ], cwd=outside)
     historical = run([
         str(python), "-c", HISTORICAL_EXECUTION_PROBE, str(cli), str(fixture_root / "tests/_historical_fixture.py"),
-        str(scratch / "historical-execution"),
+        str(scratch / "historical-execution"), expectations["installation"]["library_api_version"],
     ], cwd=outside)
     simulation = run([
         str(python), "-c", SIMULATION_PROBE, str(cli), str(fixture_root / "tests/_simulation_fixture.py"),
@@ -1893,7 +1923,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     ], cwd=outside)
     assessments = run([
         str(python), "-c", ASSESSMENT_PROBE, str(cli), str(fixture_root / "tests/_assessment_fixture.py"),
-        str(scratch / "assessment-evidence"),
+        str(scratch / "assessment-evidence"), expectations["installation"]["library_api_version"],
     ], cwd=outside)
     computation = run([str(python), "-c", COMPUTATION_PROBE, str(cli), str(scratch / "computation-workspace")], cwd=outside)
     sources = run([str(python), "-c", SOURCE_PROBE, str(cli), str(scratch / "source-workspace")], cwd=outside)
@@ -1908,7 +1938,7 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     setup = validate_action_probe(python, cli, kind="setup", root=scratch / "workspace application", outside=outside,
                                   fixture_root=fixture_root, output=setup_output)
     extensions = run([str(python), "-I", str(fixture_root / "tools/probe_installed_extensions.py"), "--root", str(scratch / "scoped-extensions"),
-                      "--docx-fixture", str(fixture_root / "tests/_docx_fixture.py")], cwd=outside) if os.name == "posix" else json.dumps({"scoped_extensions": "unsupported_platform"})
+                      "--docx-fixture", str(fixture_root / "tests/_docx_fixture.py"), "--expected-api", expectations["installation"]["library_api_version"]], cwd=outside) if os.name == "posix" else json.dumps({"scoped_extensions": "unsupported_platform"})
     authoring = run([str(python), "-c", PACK_AUTHORING_PROBE, str(cli), str(scratch / "pack-authoring"),
         str(scratch / "research-planning/request.json")], cwd=outside)
     journey_reports = (_OPTIONS.evidence / label / "journeys") if _OPTIONS.evidence is not None else scratch / "journeys"
@@ -1919,7 +1949,36 @@ def validate_installed(venv: Path, scratch: Path, expected_version: str | None, 
     journeys = json.loads((journey_reports / "observations.json").read_text(encoding="utf-8"))
     if journeys["status"] != "passed" or not Path(journeys["package_location"]).is_relative_to(venv.resolve()):
         raise ValidationError("installed journeys failed or imported a package outside the isolated environment")
-    return {"label": label, "fixture_inputs_sha256": sha256_of(fixture_root / "inputs.json"), "checkout_imports": "disabled", **probe_result, "managed_smoke": "passed", **json.loads(publication),
+    public_inputs = scratch / "public-inputs"
+    public_inputs.mkdir()
+    for name in ("probe_installed_public.py", "_qualification_process.py", "_installation_contract.py"):
+        shutil.copyfile(REPO_ROOT / "tools" / name, public_inputs / name)
+    if any(sha256_of(public_inputs / name) != checksum for name, checksum in expectations["probe_inputs"].items()):
+        raise ValidationError("copied public probe differs from frozen source")
+    expected_path = public_inputs / "expectations.json"
+    expected_path.write_text(json.dumps(expectations, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+    public_logs = (_OPTIONS.evidence / label / "public-commands" if _OPTIONS.evidence is not None
+                   else scratch / "public-commands")
+    stage_start = time.monotonic()
+    stage_limit = min(PUBLIC_STAGE_SECONDS, _OPTIONS.journey_timeout)
+    stage_deadline = stage_start + stage_limit
+    parent_selection = {"stage": "public-installed-journeys", "selected_monotonic": stage_start,
+                        "remaining_seconds": stage_limit, "timeout_seconds": stage_limit,
+                        "stage_start_monotonic": stage_start, "stage_deadline_monotonic": stage_deadline}
+    public_report = json.loads(run([str(python), "-I", str(public_inputs / "probe_installed_public.py"),
+        "--root", str(scratch / "public-journeys"), "--expectations", str(expected_path), "--cli", str(cli),
+        "--checkout-root", str(REPO_ROOT), "--logs", str(public_logs),
+        "--stage-start-monotonic", repr(stage_start), "--stage-deadline-monotonic", repr(stage_deadline)], cwd=outside,
+        label="public-installed-journeys", timeout=stage_limit, stream_stderr=True,
+        deadline_monotonic=stage_deadline, supervision=parent_selection))
+    checked_public_outcomes(public_report, expectations)
+    if (any(sha256_of(public_inputs / name) != checksum for name, checksum in expectations["probe_inputs"].items())
+            or json.loads(expected_path.read_text(encoding="utf-8")) != expectations):
+        raise ValidationError("public probe or expectations changed during execution")
+    return {"label": label, "public_installed": public_report,
+            "public_stage": {"start_monotonic": stage_start, "deadline_monotonic": stage_deadline},
+            "native_regression_scope": "copied_owner_fixtures",
+            "fixture_inputs_sha256": sha256_of(fixture_root / "inputs.json"), "checkout_imports": "disabled", **probe_result, "managed_smoke": "passed", **json.loads(publication),
             **json.loads(packets), **json.loads(execution), **json.loads(usage), **json.loads(snapshots),
             **json.loads(temporal), **json.loads(market), **json.loads(historical), **json.loads(simulation),
             **json.loads(assessments), **json.loads(computation), **json.loads(agent_probe), **json.loads(pack_probe), **json.loads(sources),
@@ -1932,6 +1991,10 @@ def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
     """Unpack the sdist and build a wheel from it, away from the checkout."""
     unpack_root = scratch / "sdist-unpacked"
     unpack_root.mkdir()
+    try:
+        admitted_archive(sdist, "sdist")
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
     with tarfile.open(sdist, "r:gz") as archive:
         for member in archive.getmembers():
             target = (unpack_root / member.name).resolve()
@@ -1946,7 +2009,7 @@ def build_wheel_from_sdist(sdist: Path, scratch: Path) -> Path:
     if len(roots) != 1:
         raise ValidationError(f"{sdist.name}: expected one project root, found {[root.name for root in roots]}")
     out_dir = scratch / "sdist-dist"
-    run([sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", str(out_dir), str(roots[0])])
+    run([getattr(_OPTIONS, "python", sys.executable), "-m", "build", "--wheel", "--no-isolation", "--outdir", str(out_dir), str(roots[0])])
     wheels = sorted(out_dir.glob("*.whl"))
     if len(wheels) != 1:
         raise ValidationError(f"{sdist.name}: building from the sdist produced {[path.name for path in wheels]}")
@@ -1957,17 +2020,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dist-dir", type=Path, default=REPO_ROOT / "dist", help="Directory holding one wheel and one sdist.")
     parser.add_argument("--expected-version", default=None, help="Version the installed package must report.")
+    parser.add_argument("--python", default=sys.executable, help="Explicit interpreter for fresh installed environments; qualification records its exact runtime.")
     parser.add_argument("--artifact", choices=("both", "wheel", "sdist"), default="both",
                         help="Select one independently rerunnable installation; the final gate requires both reports.")
     parser.add_argument("--skip-sdist", action="store_true", help="Validate only the wheel (not for release use).")
     parser.add_argument("--membership-only", action="store_true", help="Check archive contents without installing.")
     parser.add_argument("--evidence-dir", type=Path, help="New private directory retaining full installed inputs, journeys and failed diagnostics.")
+    parser.add_argument("--custody-output", type=Path, help="Independent producer output channel; append report_sha256 only after the retained summary is finalized.")
     parser.add_argument("--journey-workers", type=int, choices=range(1, 9), default=1)
     parser.add_argument("--command-timeout", type=positive_seconds, default=900)
     parser.add_argument("--journey-timeout", type=positive_seconds, default=5400)
     parser.add_argument("--case-timeout", type=positive_seconds, default=1200)
     parser.add_argument("--heartbeat-seconds", type=positive_seconds, default=30)
     args = parser.parse_args(argv)
+    if args.custody_output and not args.evidence_dir:
+        parser.error("--custody-output requires --evidence-dir")
     if args.skip_sdist and args.artifact != "both":
         parser.error("--skip-sdist cannot be combined with --artifact")
     if args.skip_sdist:
@@ -1976,23 +2043,70 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def validation_identity():
-    members = ["tools/validate_installed_artifacts.py", *fixture_members()]
+    members = ["tools/validate_installed_artifacts.py", "tools/verify_installed_artifacts.py",
+               "tools/probe_installed_public.py", "tools/_installation_contract.py", "tools/_installed_receipts.py", *fixture_members()]
     return {name: sha256_of(REPO_ROOT / name) for name in members}
+
+
+def qualification_expectations(layout=None):
+    expected = public_expectations()
+    expected.update(project_metadata=(layout or source_layout(REPO_ROOT)[0])["project"], dependency_rules=dependency_rules())
+    return expected
+
+
+def source_identity(source_files=None):
+    """Bind candidate behavior, packaging, public material and qualification configuration."""
+    files = set(source_files) if source_files is not None else source_layout(REPO_ROOT)[1]
+    for path in (REPO_ROOT / ".github").rglob("*"):
+        if path.is_symlink():
+            raise ValidationError("candidate configuration contains a link")
+        if path.is_file():
+            files.add(source_file(REPO_ROOT, path))
+    for name in ("pyproject.toml", ".gitignore", ".gitattributes", "AGENTS.md"):
+        path = REPO_ROOT / name
+        if path.exists() or path.is_symlink():
+            files.add(source_file(REPO_ROOT, path))
+    return {path.relative_to(REPO_ROOT).as_posix(): sha256_of(path) for path in sorted(files)}
+
+
+def check_archive_source_bytes(wheel, sdist, source, layout=None):
+    """Membership alone cannot bind same-version stale code to the selected candidate."""
+    try:
+        check_source_archives(wheel, sdist, source, layout or source_layout(REPO_ROOT)[0])
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+    return {"source_sha256": digest(source), "status": "passed"}
 
 
 def validate_distributions(args, summary, scratch):
     wheel, sdist = find_artifacts(args.dist_dir.resolve())
     checks: dict[str, object] = {}
+    layout, source_files = source_layout(REPO_ROOT)
+    source = source_identity(source_files)
+    expectations = qualification_expectations(layout)
+    _OPTIONS.public_expectations = expectations
+    selected = json.loads(run([args.python, "-I", "-c", "import json,platform,sys,os; print(json.dumps({'runtime':{'python_version':platform.python_version(), 'implementation':platform.python_implementation(), 'system':platform.system(), 'machine':platform.machine()}, 'markers':{'implementation_name':sys.implementation.name, 'implementation_version':platform.python_version(), 'os_name':os.name, 'platform_machine':platform.machine(), 'platform_release':platform.release(), 'platform_system':platform.system(), 'platform_version':platform.version(), 'python_full_version':platform.python_version(), 'platform_python_implementation':platform.python_implementation(), 'python_version':'.'.join(platform.python_version_tuple()[:2]), 'sys_platform':sys.platform}}))"],
+                             cwd=scratch, label="selected-runtime-identity"))
+    runtime = selected["runtime"]
     summary.update({
         "wheel": {"name": wheel.name, "sha256": sha256_of(wheel)},
         "sdist": {"name": sdist.name, "sha256": sha256_of(sdist)},
         "expected_version": args.expected_version,
         "artifact": args.artifact,
         "validation_inputs": validation_identity(),
+        "candidate_source": source,
+        "archive_expectations": layout,
+        "candidate_source_sha256": digest(source),
+        "source_binding": "candidate_source_sha256; workflow commit is informational provenance",
+        "public_expectations": expectations,
+        "public_expectations_sha256": digest(expectations),
+        "qualification_runtime": runtime,
+        "qualification_markers": selected["markers"],
         "workflow": {key: os.environ.get(key) for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")},
         "checks": checks,
     })
     checks["membership"] = check_archive_membership(wheel, sdist)
+    check_archive_source_bytes(wheel, sdist, source, layout)
     _RUNNER.event("passed", "archive-membership")
     if not args.membership_only:
         if args.artifact in {"both", "wheel"}:
@@ -2018,11 +2132,23 @@ def validate_distributions(args, summary, scratch):
                     "the wheel built from the sdist does not match the direct wheel; "
                     f"only in direct: {only_direct[:10]}; only in sdist-built: {only_rebuilt[:10]}"
                 )
+            check_archive_source_bytes(rebuilt, sdist, source, layout)
             checks["installed_sdist"] = validate_installed(
                 create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
             )
             checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
             _RUNNER.event("passed", "installed-sdist")
+    for key in ("installed_wheel", "installed_sdist"):
+        if key in checks and checks[key]["public_installed"]["runtime"] != runtime:
+            raise ValidationError("installed runtime differs from its frozen selection")
+        if key in checks and checks[key]["public_installed"]["marker_environment"] != selected["markers"]:
+            raise ValidationError("installed dependency markers differ from selected interpreter")
+    final_layout, final_files = source_layout(REPO_ROOT)
+    if final_layout != layout or source_identity(final_files) != source or qualification_expectations(final_layout) != expectations:
+        raise ValidationError("candidate source/configuration/expectations changed during qualification")
+    if any(summary[kind]["sha256"] != sha256_of(path) for kind, path in (("wheel", wheel), ("sdist", sdist))):
+        raise ValidationError("candidate archive changed during qualification")
+    summary["candidate_unchanged"] = True
     summary["status"] = "partial" if args.artifact != "both" or args.membership_only else "passed"
     summary["selection_status"] = "passed"
 
@@ -2033,11 +2159,11 @@ def retain_evidence(scratch, evidence):
         source, target = scratch / label, evidence / label
         if not source.is_dir():
             continue
-        for name in ("qualification-inputs", "journeys"):
+        for name in ("qualification-inputs", "public-inputs", "journeys"):
             directory = source / name
             if not directory.is_dir():
                 continue
-            if name == "qualification-inputs":
+            if name in {"qualification-inputs", "public-inputs"}:
                 shutil.copytree(directory, target / name, dirs_exist_ok=True)
             else:
                 (target / name).mkdir(parents=True, exist_ok=True)
@@ -2095,10 +2221,16 @@ def main(argv: list[str] | None = None) -> int:
                     summary.update(status="failed", evidence_retention="failed", retention_error=type(error).__name__)
                     raise
                 finally:
+                    summary["retained_files"] = evidence_inventory(evidence)
                     (evidence / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
         finally:
             _RUNNER, _OPTIONS = previous
             write_job_summary(summary)
+    if args.custody_output and summary["status"] in {"partial", "passed"}:
+        if args.custody_output.resolve().is_relative_to(evidence):
+            raise ValidationError("custody output must be separate from untrusted retained evidence")
+        with args.custody_output.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write("report_sha256=" + sha256_of(evidence / "summary.json") + "\n")
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

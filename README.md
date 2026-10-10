@@ -293,6 +293,12 @@ Python 3.10+ is required. Installation includes PyYAML, ruamel.yaml, pypdf and
 tzdata; [package metadata][package-metadata] owns their supported version bounds.
 pypdf provides portable PDF extraction. Poppler is optional unless explicitly
 selected as the PDF backend; Git snapshots and managed model CLIs are optional.
+An installed package exposes its exact library API, operation matrix and schema
+documents through `evidence-wiki contract`. Retrieve the closed resource catalog
+with `evidence-wiki agent resources --format json`. These declarations identify
+the selected installation; Python's minimum version does not establish optional
+runner, platform or host isolation capabilities. Framework support is limited to
+the exact version, platform and mode rows in `agent frameworks`.
 Run `evidence-wiki doctor --format json` for available capabilities and
 `evidence-wiki status --target WORKSPACE --format json` for workspace health.
 See [workspace validation][workspace-status] for lower-level checks and completion.

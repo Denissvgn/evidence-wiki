@@ -1,0 +1,111 @@
+name: Qualify one installed distribution
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        type: string
+        required: true
+      candidate-name:
+        type: string
+        required: true
+      report-prefix:
+        type: string
+        required: true
+      expected-version:
+        type: string
+        default: ""
+      upgrade-pip:
+        type: boolean
+        default: false
+    outputs:
+      report-sha256:
+        value: ${{ jobs.installation.outputs.report-sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  installation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    outputs:
+      report-sha256: ${{ steps.qualify.outputs.report_sha256 }}
+    steps:
+      - name: Check out the selected commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the validation environment
+        shell: bash
+        env:
+          UPGRADE_PIP: ${{ inputs.upgrade-pip }}
+        run: |
+          python -m venv .venv
+          if [ "$UPGRADE_PIP" = true ]; then
+            .venv/bin/python -m pip install --upgrade pip
+          fi
+          .venv/bin/python -m pip install --editable ".[dev]"
+
+      - name: Download this run's candidate distributions
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
+        with:
+          name: ${{ inputs.candidate-name }}
+          path: dist/
+
+      - name: Validate the installed artifact
+        id: qualify
+        timeout-minutes: 100
+        shell: bash
+        env:
+          SELECTED_ARTIFACT: ${{ inputs.artifact }}
+          EXPECTED_VERSION: ${{ inputs.expected-version }}
+        run: |
+          .venv/bin/python tools/validate_installed_artifacts.py --dist-dir dist \
+            --artifact "$SELECTED_ARTIFACT" --expected-version "$EXPECTED_VERSION" \
+            --journey-workers 3 --command-timeout 900 --case-timeout 1200 \
+            --journey-timeout 5400 --heartbeat-seconds 30 \
+            --evidence-dir reports/installed-artifacts --custody-output "$GITHUB_OUTPUT" | tee artifact-validation.json
+
+      - name: Collect distribution diagnostics
+        if: always()
+        shell: bash
+        env:
+          RELEASE_GATE_STATUS: ${{ job.status }}
+        run: .venv/bin/python tools/collect_release_diagnostics.py --report artifact-validation.json
+
+      - name: Store distribution diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.report-prefix }}-distribution-diagnostics-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.artifact }}
+          path: release-diagnostics/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Store the successful original report and retained receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.report-prefix }}-${{ github.sha }}-${{ github.run_id }}-${{ inputs.artifact }}
+          path: reports/installed-artifacts/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      - name: Retain installed qualification diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ inputs.report-prefix }}-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.artifact }}
+          path: reports/installed-artifacts/
+          if-no-files-found: warn
+          retention-days: 90

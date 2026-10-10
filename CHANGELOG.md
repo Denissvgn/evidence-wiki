@@ -4,12 +4,20 @@
 
 ### Fixed
 
+- The library contract now advertises all supported execution profiles through
+  v13. Library API `60` preserves the existing operation matrix and legacy
+  serialized profile meanings.
+
 - Native research task context now includes the self-contained integration guide.
   Public report and recovery schemas enforce the native page limit of 64, and
   host guidance specifies handle opening, profile literals, current eligibility,
   retained refresh identities and finite host deadlines.
 
 ### Added
+
+- Keep installed public imports, resource catalogs, schema declarations and
+  noninteractive host examples bound to the selected package contract. Legacy
+  policy/profile serialization and optional host capabilities remain explicit.
 
 - Add optional host ingestion of authenticated usage, incident, payment and
   human-work observations. Scoped reports separate deterministic, adjudicated,
