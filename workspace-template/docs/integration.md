@@ -1,6 +1,6 @@
 # Integration journey
 
-Library API 60; operation matrix 41. Documentation basis: `f32b3fa83ee86bd6ec0dc35122116bb7851a95e60bb0e7d6086ee3af597c502a`.
+Library API 61; operation matrix 42. Documentation basis: `eaee609bafea27f24db361d7d5d1bb97ffb025a2673eb9dc1f07e2fd1d6b670a`.
 
 ## Journey
 
@@ -55,6 +55,19 @@ per-run budgets. Record its numeric bound and unknown cleanup/effect observation
 author schema documents. Inspect the domain outcome even when transport status
 is returned. Missing runtime, capability or incompatible policy is terminal data;
 there is no stdin prompt, credential discovery or human review task.
+
+Host-only recovery uses HostBackupRecovery with a preauthorized
+ProtectedBackupService and an independent latest-head anchor outside every
+restorable, model-readable and artifact root. Opaque backup references never
+carry signing keys, credentials or backup bytes. recover_upgrade uses the
+canonical initializer with known predecessor hashes, one frozen complete
+write plan, original deadlines and finite retained attempts. Reconcile native
+run and mutation receipts with their original IDs after restart. Recheck current
+usage, strict review and brief eligibility before consuming restored evidence;
+historical snapshot authenticity supplies no current approval. Missing backup,
+permissions or surviving latest head is terminal blocked_external, with no
+stdin or operator handoff. A timed-out service callback remains uncertain and
+is not redispatched or described as cancelled.
 
 ## Policy
 

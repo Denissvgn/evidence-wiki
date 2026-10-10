@@ -7,10 +7,14 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "41"
+OPERATION_MATRIX_VERSION = "42"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("host_backup_recovery.backup", None, "private frozen key-free backup descriptor and independent recovery journal", "native private CAS outside all restorable roots; exact current host-service head", "finite preauthorized backup service wait; protected bytes remain service-owned"),
+    ("host_backup_recovery.restore", None, "host service restores exact latest complete permitted generation; independent attempts preserved", "same frozen root/service/package/deadline, latest anchor, user-conflict inspection and closing canonical state checks", "finite preauthorized service wait; uncertain callback effects are terminal blocked_external"),
+    ("recover_upgrade", None, "canonical initializer managed assets, version and one frozen activity-log successor; private finite journal", "native mutation and initializer/session locks; complete known predecessor/successor preflight and anchored per-file CAS", "none; trusted host selections only, no worker callbacks"),
+    ("protected_head", None, "none; content commitment over current workspace, trust, host state, original journals and package", "canonical bounded captures; caller must hold host-service consistent custody", "none; commitment grants no authority"),
     ("outcomes.ingest", None, "none; detached scoped retention data", "activated host grant and original workspace/candidate binding with closing scope check", "none; explicit finite original-source verifier"),
     ("outcomes.report", None, "none; separate exact scoped measurement report", "fresh original-source checks before reduction and at closing; no native research authority", "none; explicit finite host verifier; external input is optional"),
     ("research_request", None, "none; detached request with shared closed argument validation", "none", "none"),

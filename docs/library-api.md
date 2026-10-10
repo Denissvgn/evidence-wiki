@@ -1,5 +1,99 @@
 # Library API
 
+Version `61` adds host-only `HostBackupRecovery`, `ProtectedBackupService`,
+`protected_head` and `recover_upgrade`; the operation matrix is version `42`.
+These services are configured by trusted host code and have no worker JSON,
+CLI credential callback, or model-facing restore adapter.
+
+`recover_upgrade(root, *, context, request_id, predecessors, operation_control,
+max_attempts=3, paths=("scripts",))` uses the canonical initializer, native
+workspace/session locks and a private mutation journal. Grant
+`operations.recover_upgrade` in the selected `HostContext`. Supply hashes from
+a permitted predecessor generation or an explicitly approved host inventory;
+observing arbitrary live bytes does not establish that provenance. Every
+changed target needs an explicit mapping entry, including `None` for approved
+absent files and hashes for version metadata and the activity log. Optional
+`skills` and `docs` require the same provenance and preserve existing `.replaced`
+history. No automatic optional force is used.
+
+The finite upgrade closure supports at most 512 target files, including the
+version marker and activity-log slots. All selected scripts, docs and skills
+are included; the canonical installed `skills/.gitkeep` placeholder uses the
+same predecessor and anchored publication checks.
+
+The journal freezes all supported managed targets, source/package/resource
+identity, configuration, original deadline, expected before/after bytes and one
+rendered log successor. Each attempt preflights the whole closure and records
+publication intent before anchored compare-and-swap writes. Restart with the
+same request, predecessors, paths, native `OperationControl` deadline and
+attempt ceiling; exact successor bytes reconcile an uncertain publication.
+Unknown edits remain preserved. Attempts never reset. Successful historical
+receipts are checked against current target bytes and package identity before
+being reported as applied. Legacy CLI upgrade behavior remains available.
+
+Construct `HostBackupRecovery(root, *, context, service, request_id,
+operation_control, max_attempts=3)` only in trusted host code. Grant
+`operations.backup` and `operations.restore`; canonical state inspection also
+requires `workspace.open` and `evidence_usage.run_status`. Call `backup()` to
+freeze an opaque descriptor, then `restore()` to request the exact latest
+complete permitted generation. Signing keys, credentials and backup bytes stay
+inside the preauthorized host service. Recovery returns key-free terminal or
+partial metadata, with `authorized=False` and `evidence_accepted=False`.
+
+The `ProtectedBackupService` contract is:
+
+- Host-selected `anchor_directory`, `backup_directory`, all
+  `artifact_directories` and opaque `service_ref`. Backups are private and
+  disjoint from model-readable and artifact roots.
+- `latest_head(*, timeout_seconds)` returns an independently retained SHA256
+  commitment, never one reconstructed from a restored backup.
+- `backup(request_id, head_sha256, *, timeout_seconds)` returns exactly
+  `reference`, `backup_sha256` and `head_sha256`; references are opaque names.
+- `inspect(reference, backup_sha256, head_sha256, *, timeout_seconds)` returns
+  exactly `{"status": "restorable", "head_sha256": head_sha256}` only after
+  verifying current permission, the complete latest backup and all user edits.
+- `restore(reference, backup_sha256, head_sha256, *, timeout_seconds)` repeats
+  that inspection under its own custody immediately before publication. It
+  uses the canonical protected-state publication owners and preserves unknown
+  bytes, modes, foreign ownership and newer authority. It returns no secrets.
+
+The private independent anchor and recovery attempts must survive outside every
+workspace, artifact/export, state, original control, trust and backup root.
+Directory aliases and replacement identities are refused. `protected_head`
+observes bounded canonical content manifests with the revision owner's cache
+exclusions, including original run/mutation journals, consumed budgets,
+deadlines and instruction bindings. It also binds current trust, protected
+state and installed package/resources. This content commitment does not
+establish authorization or filesystem mode and ownership fidelity; those remain
+service obligations. The service holds consistent custody and
+canonically validates current state and authenticated journal extensions before
+advancing the independent latest head. An old valid prefix or full anchor loss
+cannot become a new head.
+
+Restore requires the frozen backup to match that latest head. It checks exact
+restored commitments and canonical current usage state again at closing.
+After restoration, use `usage.check`, `strict.check`, native research recovery
+and the current brief/acceptance owners for the actual consumer. Normalized
+evidence can be rematerialized with `usage.materialize` without a replacement
+hash, which preserves unexplained destination edits. Snapshot authenticity
+remains historical evidence; it grants no current eligibility or restore right.
+
+Ordinary strict checks use the host-selected trust file and do not independently
+enforce this latest-head guard. Privileged replacement of that file with older
+trust can make an old review eligible again. Hosts must enforce the independent
+guard before relying on restored authority or eligibility and protect the trust
+file's custody. Refused recovery must stop consumption; it must not fall through
+to ordinary strict acceptance. Arbitrary trusted filesystem writes remain
+outside the guarded recovery boundary.
+
+Host waits use the original finite `OperationControl`. Missing service,
+permissions, complete backup, attempt history, latest anchor or package identity
+produce noninteractive terminal `blocked_external`. Timed-out callback effects
+remain uncertain and are not redispatched or claimed cancelled. Unreadable
+attempt counts are reported as unknown rather than a new allowance. A
+disposable service demonstrates fixture mechanics; production secret services
+and OS containment require their own qualification.
+
 Version `13` adds an explicitly scoped `Onboarding` handle for discovery, setup,
 pack lifecycle and current-agent research. `Workspace` authority is unchanged.
 See [scoped onboarding](../workspace-template/docs/agent-contracts.md#scoped-python-onboarding)

@@ -347,7 +347,8 @@ class MutationStore:
                 with locks.descriptor_lock(request_lock, timeout_seconds=0):
                     self._active, self._request_id = True, identifier
                     self._verify()
-                    allowed = {"request.lock", "intent.json", "state.json", "receipt.json"}
+                    allowed = {"request.lock", "intent.json", "state.json", "receipt.json",
+                               "recovery-plan.json", "recovery-journal.json"}
                     entries = os.listdir(self._request)
                     if len(entries) > 2 * MAX_STAGE_BLOBS + 32 or any(name not in allowed and not _TEMPORARY.fullmatch(name)
                             and not _STAGED.fullmatch(name) and not _STAGE_METADATA.fullmatch(name) for name in entries):

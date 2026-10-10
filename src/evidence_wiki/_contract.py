@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "60"
+LIBRARY_API_VERSION = "61"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -55,6 +55,10 @@ DOMAIN_PACK_LIFECYCLE_COMMANDS = ("pack refresh", "pack adopt")
 # that version "1" callers cannot absorb bumps the version rather than editing
 # the list in place.
 LIBRARY_API_SURFACE = (
+    "host_backup_recovery.backup",
+    "host_backup_recovery.restore",
+    "recover_upgrade",
+    "protected_head",
     "outcomes.ingest",
     "outcomes.report",
     "research_request",

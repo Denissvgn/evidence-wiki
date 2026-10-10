@@ -125,5 +125,5 @@ def test_profile_advertisement_matches_all_supported_public_owner_versions():
     assert PROFILE_SCHEMA_VERSIONS == tuple("research-execution-profile/v" + str(index) for index in range(1, 14))
     advertised = contract()["research_sessions"]["execution_profile_schemas"]
     assert advertised == list(PROFILE_SCHEMA_VERSIONS)
-    assert contract()["library_api"]["version"] == "60"
-    assert contract()["library_api"]["matrix_version"] == "41"
+    assert contract()["library_api"]["version"] == "61"
+    assert contract()["library_api"]["matrix_version"] == "42"

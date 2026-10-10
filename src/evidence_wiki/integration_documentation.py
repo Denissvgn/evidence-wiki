@@ -64,7 +64,20 @@ per-run budgets. Record its numeric bound and unknown cleanup/effect observation
 `research_request` builds and validates the exact native envelope; callers do not
 author schema documents. Inspect the domain outcome even when transport status
 is returned. Missing runtime, capability or incompatible policy is terminal data;
-there is no stdin prompt, credential discovery or human review task.""",
+there is no stdin prompt, credential discovery or human review task.
+
+Host-only recovery uses HostBackupRecovery with a preauthorized
+ProtectedBackupService and an independent latest-head anchor outside every
+restorable, model-readable and artifact root. Opaque backup references never
+carry signing keys, credentials or backup bytes. recover_upgrade uses the
+canonical initializer with known predecessor hashes, one frozen complete
+write plan, original deadlines and finite retained attempts. Reconcile native
+run and mutation receipts with their original IDs after restart. Recheck current
+usage, strict review and brief eligibility before consuming restored evidence;
+historical snapshot authenticity supplies no current approval. Missing backup,
+permissions or surviving latest head is terminal blocked_external, with no
+stdin or operator handoff. A timed-out service callback remains uncertain and
+is not redispatched or described as cancelled.""",
     "policy": """The host selects immutable RunPolicy, roots, grants, finite usage/step/repair
 ceilings and allowed effects. Native owners check actual current permissions,
 source closure and policy at execution and closing boundaries. Declared refs and

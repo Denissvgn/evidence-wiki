@@ -15,6 +15,12 @@
 
 ### Added
 
+- Add preauthorized host backup recovery with an independent latest-head
+  commitment and key-free service descriptors. Canonical journaled upgrades
+  retain predecessor provenance, partial publications, original deadlines and
+  finite attempts while preserving unexplained user edits. Library API `61`
+  and operation matrix `42` advertise the host-only boundaries.
+
 - Keep installed public imports, resource catalogs, schema declarations and
   noninteractive host examples bound to the selected package contract. Legacy
   policy/profile serialization and optional host capabilities remain explicit.
