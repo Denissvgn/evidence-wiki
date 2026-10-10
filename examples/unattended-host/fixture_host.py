@@ -40,7 +40,7 @@ class FixtureMeter:
         return {'seconds':summary['seconds'],'model_calls':1,'tool_calls':1,'tokens':0,'cost':'0'}
 
 
-def provision(base, objective, *, scenario='repair'):
+def provision(base, objective, *, scenario='repair', observation_sink=None):
     base = base.resolve()
     if base.exists():
         raise ValueError('Fixture output must be a new directory; use live mode to reopen a provisioned runtime.')
@@ -152,8 +152,12 @@ def provision(base, objective, *, scenario='repair'):
             attempt = ExecutionAttempt.create(attempt_id='reference-'+str(index),nonce='nonce-'+str(index),run_id='fixture-references',
                 binding_id='fixture-reference-binding',profile=profile,config_ref=config_ref,job=job,input_document=case['input_document'])
             observed = calibration.invoke(attempt)
+            if observation_sink is not None:
+                observation_sink(attempt.document(),calibration.authenticate(observed,attempt))
             while observed['state']=='running':
                 time.sleep(0.005);observed=calibration.poll(attempt)
+            if observation_sink is not None:
+                observation_sink(attempt.document(),calibration.authenticate(observed,attempt))
             observations.append((attempt,observed))
         qualifications.append(issuer.issue(run_policy,profile,config_ref,suite,cases,observations,calibration,expires_utc=until))
     executor = BoundedSubprocessExecutor(profile,commands=commands,cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter())

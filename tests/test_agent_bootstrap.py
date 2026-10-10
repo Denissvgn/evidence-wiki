@@ -197,6 +197,19 @@ def test_compact_summary_negotiates_without_full_contract(capsys):
     assert json.loads(capsys.readouterr().out)["error_code"] == "ONBOARDING_ENVIRONMENT_INCOMPATIBLE"
 
 
+def test_current_catalog_bootstrap_cli_retains_all_resources_within_its_byte_bound(tmp_path, capsys):
+    (tmp_path / "research.yml").write_text("project: {name: 'Scoped local workspace'}\n")
+    shutil.copyfile(ROOT / "workspace-template/workspace-system.yml", tmp_path / "workspace-system.yml")
+    assert agent.main(["bootstrap", "--target", str(tmp_path), "--request-id", "console-0", "--format", "json"]) == 0
+    raw = capsys.readouterr().out.encode()
+    assert len(raw) <= agent.SUMMARY_BYTES == 32768
+    document = decode_document("onboarding/bootstrap/v2", raw)
+    assert document["request_id"] == "console-0" and document["payload"]["workspace"] == "present"
+    assert document["payload"]["resources"] == agent_resources.resource_index()["resources"]
+    assert {"research-host-qualification/v1", "research-protected-host-qualification/v1"} <= {
+        item["id"] for item in document["payload"]["resources"]}
+
+
 def test_top_level_help_discovers_bootstrap(capsys):
     from evidence_wiki.cli import main
 

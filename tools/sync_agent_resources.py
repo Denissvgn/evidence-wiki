@@ -18,6 +18,7 @@ from evidence_wiki import __version__  # noqa: E402
 from evidence_wiki._agent_catalog import (  # noqa: E402
     CALCULATION_SCHEMAS,
     CATALOG_PATH,
+    HOST_QUALIFICATION_SCHEMAS,
     RECOVERY_SCHEMAS,
     REFRESH_SCHEMAS,
     REPAIR_SCHEMAS,
@@ -32,6 +33,7 @@ from evidence_wiki.artifact_delivery_contracts import schemas as delivery_schema
 from evidence_wiki.brief_contracts import _schemas as brief_schemas
 from evidence_wiki.calculation_contracts import schema_document as calculation_schema
 from evidence_wiki.frameworks import portable_bundle, tool_schemas, validate_bundle  # noqa: E402
+from evidence_wiki.host_qualification_contracts import schemas as host_qualification_schemas
 from evidence_wiki.integration_documentation import IntegrationDocumentation
 from evidence_wiki.onboarding_schemas import schema_document, schema_ids  # noqa: E402
 from evidence_wiki.performance_contracts import schemas as performance_schemas
@@ -74,6 +76,7 @@ def exports() -> dict[str, bytes]:
     schemas.update({key:recovery_schema() for key in RECOVERY_SCHEMAS})
     service_documents = {**service_schemas(), SERVICE_PLAN: service_plan_schema()}
     schemas.update({key: service_documents[key] for key in SERVICE_SCHEMAS})
+    schemas.update({key: host_qualification_schemas()[key] for key in HOST_QUALIFICATION_SCHEMAS})
     # The fixed-root export owner can bootstrap newly declared resource anchors.
     # Public discovery still requires a complete installed asset generation.
     native_shapes = strict.schema_documents()

@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "61"
+LIBRARY_API_VERSION = "62"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -55,6 +55,8 @@ DOMAIN_PACK_LIFECYCLE_COMMANDS = ("pack refresh", "pack adopt")
 # that version "1" callers cannot absorb bumps the version rather than editing
 # the list in place.
 LIBRARY_API_SURFACE = (
+    "host_qualification",
+    "strict_host.qualification",
     "host_backup_recovery.backup",
     "host_backup_recovery.restore",
     "recover_upgrade",
@@ -404,6 +406,7 @@ def contract() -> dict:
     from .artifact_delivery_contracts import schemas as delivery_schemas
     from .environment import SERVICE_VARIABLES
     from .extension_contracts import index as extension_index
+    from .host_qualification_contracts import schemas as host_qualification_schemas
     from .mutation_contracts import MAX_BYTES as MUTATION_MAX_BYTES
     from .mutation_contracts import OPERATIONS as MUTATION_OPERATIONS
     from .mutation_contracts import schemas as mutation_schemas
@@ -513,6 +516,12 @@ def contract() -> dict:
             "pi_bridge": {"api": "evidence_wiki.pi_bridge.PiRpcBridge", "managed_runner": False,
                           "host_enforced": False, "automatic_replay": False},
         },
+        "host_qualification": {"method": "host_qualification", "schema": "research-host-qualification/v1",
+            "schema_documents": host_qualification_schemas(),
+            "scope": "current configured native credentials and retained authenticated attempts, contexts and review attestations",
+            "host_enforced": "semantic boundary unsupported; separate measured SBPL draft-only observation",
+            "protected_host_method": "strict_host.qualification", "protected_host_schema": "research-protected-host-qualification/v1",
+            "limits": {"attempts": 64, "report_bytes": 262144}, "provider_execution": "not_probed"},
         "review_services": {"status_schema": "research-review-service-status/v1", "plan_schema": "research-review-service-plan/v1",
             "policy": "research-run-policy/v3 explicit approved alternatives", "profile": "research-execution-profile/v8",
             "credentials": "provisioned parent key/native role usability only; no enrollment, discovery or service-health assertion",

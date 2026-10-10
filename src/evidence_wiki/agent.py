@@ -215,9 +215,9 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
             "route": "configure strict policy; check, independently review, export through strict owner",
             "reason": "template selected only; existing policy, authority and protected host not inspected",
         },
-        "limitations": ["Bootstrap does not initialize, validate readiness, run research or confer execution authority.",
-                        "This compact operation index is supplemented by agent research-schemas for caller heartbeat, acquisition and ingestion.",
-                        "No truth guarantee; framework modes need separate qualification and host enforcement needs protected execution."],
+        "limitations": ["Read-only markers; no readiness or execution grant.",
+                        "Research-schemas defines heartbeat, acquisition and ingestion.",
+                        "Truth, frameworks and host protection need separate qualification."],
     }
 
 

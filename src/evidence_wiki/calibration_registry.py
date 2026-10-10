@@ -138,7 +138,7 @@ class CalibratedEvaluators:
             raise ExecutionError("calibration_required_selection_changed")
         for wanted in selected_profiles:
             row = {**wanted, "qualification_ref": None, "qualified": None, "independent": None,
-                "assurance": frozen["assurance"], "reference_cases": None, "families": None,
+                "assurance": "artifact_checked", "reference_cases": None, "families": None,
                 "critical_false_acceptances": None, "positive_acceptance": None, "meaning_preserving_flip": None}
             record = records.get(wanted["profile_ref"])
             if record is None or profile.calibration is None:

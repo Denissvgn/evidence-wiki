@@ -1289,6 +1289,25 @@ Callbacks run outside coordination locks; owner gates then check pure exact
 correlation before semantic dispatch/application/release and unfinished accepted
 recovery. A finite status snapshot cannot promise instantaneous future withdrawal.
 
+`host_qualification(session)` reads a dated, bounded observation of the current
+configured host. It requires the `host_qualification.current` and
+`service_authentication.status` grants in addition to the existing current-session
+grants. It challenges provisioned native credentials and verifies retained owned
+attempts, current immutable review contexts and native evaluator attestations.
+Credential readiness, executed reviews and semantic eligibility remain separate;
+missing review execution or attestation remains `not_observed`. Runtime, package,
+policy, profile and journal identities bind the returned observation. The call
+dispatches no evaluator and probes no provider credentials or network service.
+
+Calibration observations always carry `artifact_checked` assurance. A
+`host_enforced` RunPolicy cannot upgrade reference metrics into OS isolation.
+`StrictResearchHost.qualification()` separately repeats the actual macOS SBPL
+draft write/protected read/workspace write probe and returns its dated scope.
+That draft-only observation does not qualify semantic evaluator execution or
+delivery. Independent credential custody, isolated reasoning and remote model
+execution remain unobserved unless separately demonstrated by the integrating host.
+Library API `62` and operation matrix `43` advertise these host observations.
+
 Current domain derives from actual authorized source closures, strict claims,
 original question grammar and exact rubric. Native bookkeeping changes do not
 relabel that domain. Supported finite sources use `finite-structured-observation/v1`

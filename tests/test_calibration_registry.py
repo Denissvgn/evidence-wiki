@@ -14,14 +14,14 @@ from evidence_wiki.run_policy import RunPolicy
 from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
 from tests.test_finite_domain import inputs
 from tests.test_qualification_calibration import AuthenticatedHost
-from tests.test_run_policy import policy_document
+from tests.test_run_policy import observation, policy_document
 from tests.test_workflow_contracts import job
 
 NOW = "2026-10-01T12:00:00Z"
 
 
-@pytest.fixture(scope="module")
-def calibrated():
+@pytest.fixture(scope="module", params=("artifact_checked", "host_enforced"))
+def calibrated(request):
     context = inputs()
     rubric = context["rubric"]
     suite = calibration_suite(protected_cases(), suite_ref="finite-references", split_ref="protected-holdout",
@@ -33,7 +33,7 @@ def calibrated():
         ExecutionRole("researcher", "host_worker", "generator", "generator-model", "generate/v1"),
         ExecutionRole("profile-a", "evaluator", "controller-a", "reference-model", "prompt/v1")),
         1, 0, 1, "0", 1, role_scopes=scopes, calibration=CalibrationPlan((selection,)))
-    policy = RunPolicy(policy_document())
+    policy = RunPolicy(policy_document() | {"assurance": request.param})
     selected = selection.document()
     configuration = {"execution_profile_sha256": profile.sha256, "config_ref": "profile-a", "controller_ref": "controller-a",
         "model_ref": "reference-model", "prompt_version": "prompt/v1", "model_revision": selected["model_revision"],
@@ -77,6 +77,17 @@ def test_new_qualification_requires_current_domain_probe_and_exact_protected_con
     row = rows(calibrated)[0]
     assert row["qualified"] and row["independent"] and row["reference_cases"] == 100 and row["families"] == 10
     assert rows(calibrated, domain={"state": "unknown"})[0]["qualified"] is None
+
+
+def test_calibrated_metrics_cannot_claim_the_policy_host_boundary(calibrated):
+    observed = rows(calibrated)[0]
+    assert observed["qualified"] is True
+    assert observed["assurance"] == "artifact_checked"
+    policy = calibrated[0]
+    owner = observation(policy)
+    owner["evaluators"] = [observed]
+    decision = policy.decide(owner)
+    assert decision["outcome"] == ("blocked_external" if policy.to_dict()["assurance"] == "host_enforced" else "accepted")
 
 
 @pytest.mark.parametrize("change", [{"active": False}, {"active": 1}, {"model_revision": "changed"},

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Keep complete agent bootstrap JSON within its existing byte bound when host
+  qualification resources are present.
+
+- Keep calibrated evaluator assurance at `artifact_checked`; selecting a
+  `host_enforced` policy cannot promote reference metrics into host isolation.
+
 - The library contract now advertises all supported execution profiles through
   v13. Library API `60` preserves the existing operation matrix and legacy
   serialized profile meanings.
@@ -14,6 +20,12 @@
   retained refresh identities and finite host deadlines.
 
 ### Added
+
+- Add dated current host observations joining native credential challenges,
+  owned execution, review contexts and evaluator attestations. A separate macOS
+  protected-host probe reports its draft-only kernel boundary. Library API `62`
+  and operation matrix `43` keep unsupported semantic host isolation and
+  unobserved remote model execution explicit.
 
 - Add preauthorized host backup recovery with an independent latest-head
   commitment and key-free service descriptors. Canonical journaled upgrades
