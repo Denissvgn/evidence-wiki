@@ -17,7 +17,7 @@ from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.onboarding_mcp import OnboardingMcpServer
 from evidence_wiki.research_command_contracts import REQUEST
 from evidence_wiki.research_command_definitions import DEFINITIONS, WRITE_OPERATIONS
-from tests.test_autonomous_commands import command, document, write_runtime
+from tests.test_autonomous_commands import command, document, write_factory, write_runtime
 from tests.test_execution_session import fixture as fixture
 from tests.test_onboarding_mcp import initialize, message
 
@@ -36,10 +36,10 @@ def direct(root, runtime, operation, arguments):
 
 
 class Client:
-    def __init__(self, root, runtime, *, allow=(), onboarding_allow=(), cwd=None):
+    def __init__(self, root, runtime, *, allow=(), onboarding_allow=(), cwd=None, services=False):
         argv = [str(Path(sys.executable).with_name('evidence-wiki')), 'serve-onboarding-mcp', '--allow-root', str(root)]
         if runtime:
-            argv += ['--research-runtime', str(runtime)]
+            argv += ['--research-services' if services else '--research-runtime', str(runtime)]
         for operation in allow:
             argv += ['--allow-research-operation', operation]
         for operation in onboarding_allow:
@@ -94,6 +94,37 @@ class Client:
             if self.process.poll() is None:
                 self.process.kill()
                 self.process.wait()
+
+
+def test_real_stdio_explicit_factory_is_startup_only(fixture, tmp_path):
+    root, *_ = fixture
+    path = write_factory(tmp_path, configured(fixture))
+    client = Client(root, path, services=True, allow=['run-cycle'])
+    try:
+        current = client.tool('current', root, {'run_id': 'factory-stdio'})
+        assert current['status'] == 'returned'
+        injected = client.tool('current', root, {'run_id': 'factory-stdio', 'services': str(path)})
+        assert injected['status'] == 'refused' and injected['error']['error_code'] == 'RESEARCH_COMMAND_ARGUMENTS_INVALID'
+        assert client.rpc('ping')['result'] == {}
+    finally:
+        client.close()
+    for roots in ([], ['--allow-root', str(root), '--allow-root', str(tmp_path)]):
+        result = subprocess.run([str(Path(sys.executable).with_name('evidence-wiki')), 'serve-onboarding-mcp',
+            '--research-services', str(path), *roots], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 2 and result.stdout == ''
+
+
+def test_actual_stdio_factory_cannot_consume_initialization_and_qualify(fixture, tmp_path):
+    root, *_ = fixture
+    path = write_factory(tmp_path, configured(fixture))
+    path.write_text('input()\n' + path.read_text())
+    transcript = '\n'.join(json.dumps(row) for row in [initialize(),
+        {'jsonrpc':'2.0','method':'notifications/initialized'}, message(20,'tools/list')]) + '\n'
+    response = subprocess.run([str(Path(sys.executable).with_name('evidence-wiki')), 'serve-onboarding-mcp',
+        '--allow-root', str(root), '--research-services', str(path)], input=transcript, capture_output=True, text=True, timeout=15)
+    frames = [json.loads(line) for line in response.stdout.splitlines()]
+    assert not any(row.get('result',{}).get('protocolVersion') for row in frames)
+    assert all('method' not in row for row in frames)
 
 
 def test_real_stdio_budget_reconnect_and_public_cli_parity(fixture, tmp_path):

@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "62"
+LIBRARY_API_VERSION = "63"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -55,6 +55,7 @@ DOMAIN_PACK_LIFECYCLE_COMMANDS = ("pack refresh", "pack adopt")
 # that version "1" callers cannot absorb bumps the version rather than editing
 # the list in place.
 LIBRARY_API_SURFACE = (
+    "HostRuntime.from_factory",
     "host_qualification",
     "strict_host.qualification",
     "host_backup_recovery.backup",
@@ -574,7 +575,7 @@ def contract() -> dict:
             "remote_delivery": "unsupported"},
         "research_commands": {
             "request_schema": "research-command-request/v1", "result_schema": "research-command-result/v1",
-            "method": "research.command", "runtime": "explicit owner-private file or HostRuntime.from_services",
+            "method": "research.command", "runtime": "explicit owner-private file, HostRuntime.from_services or bounded HostRuntime.from_factory",
             "noninteractive": "no user stdin reads, prompts, implicit credentials, daemon or plugin discovery",
             "scope": "run-cycle/refresh and bounded current/brief/resolution/recovery/history/impact/changes reads",
             "errors": "exact public typed envelope and exit status; capability refusal is terminal transport data, not a completed research run"},
@@ -591,7 +592,7 @@ def contract() -> dict:
             "effects": "opt-in native execution uses original journals, grants and budgets; report is read-only"},
         "scoped_research_transport": {
             "capability": "scoped-research-tools/v1", "server": "serve-onboarding-mcp",
-            "method": "research.command", "runtime_selection": "startup only; HostRuntime services or private file",
+            "method": "research.command", "runtime_selection": "startup only; HostRuntime services, private file or explicit private factory with one allowed root",
             "grants": "startup-selected operation set intersected with native host/root/policy permissions",
             "recovery": "retained request IDs, native pending/cancel/reconcile and current original budgets",
             "cancellation": "safe host OperationControl checkpoints; no rollback or approval reuse",

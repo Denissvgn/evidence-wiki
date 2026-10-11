@@ -1,8 +1,10 @@
 """Small actual pytest processes qualify joins, custody and partial retention."""
 
+import copy
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -121,6 +123,82 @@ def test_timeout_retains_real_start_and_partial_attempt_without_retry(tmp_path):
     assert report["grade"]["denominators"]["started_nodes"] == 1
 
 
+def test_failure_identifiers_survive_later_timeout_without_exception_prose(tmp_path):
+    root = candidate(tmp_path, """def test_failure():
+    private_value = 'private-sentinel-do-not-retain'
+    raise ValueError(private_value)
+
+def test_pending():
+    import time
+    assert True
+    time.sleep(4)
+""")
+    cases = [{"id": "failed-owner", "categories": sorted(REQUIRED_CATEGORIES), "severity": "critical",
+              "evidence_requirement": "assertions", "selectors": ["tests/test_owner.py::test_failure", "tests/test_owner.py::test_pending"]}]
+    value = run_acceptance(repo_root=root, cases=cases, evidence_root=tmp_path / "run", seed=0,
+                           timeout_seconds=1, observer_key=KEY)
+    retained = Path(value["report_path"]).parent
+    events = [json.loads(line) for line in (retained / "execute.events.jsonl").read_bytes().splitlines()]
+    failure = next(event for event in events if event.get("outcome") == "failed")
+    diagnostic = failure["failure_diagnostic"]
+    assert diagnostic["exception_type"] == "ValueError"
+    assert diagnostic["exception_module"] == "builtins"
+    assert diagnostic["frames"][-1]["function"] == "test_failure"
+    assert diagnostic["frames"][-1]["path"] == "tests/test_owner.py"
+    assert diagnostic["full_trace_replay"] == "unqualified"
+    assert len(failure["failure_sha256"]) == 64 and len(canonical_json(diagnostic)) <= 32768
+    assert b"private-sentinel-do-not-retain" not in canonical_json(diagnostic)
+    assert value["report"]["grade"]["status"] == "FAIL"
+    assert value["report"]["grade"]["denominators"]["started_nodes"] == 2
+    assert read_acceptance_report(value["report_path"], observer_key=KEY,
+                                  expected_report_sha256=value["report_sha256"]) == value["report"]
+    from tools.verify_acceptance_paths import _validate_artifacts
+    request = json.loads((retained / "execute.request.json").read_bytes())
+    pid = json.loads((retained / "execute.start.json").read_bytes())["pid"]
+    source_candidate = value["report"]["manifest"]["inputs"]["candidate"]
+    _, intact, gaps = _validate_artifacts(copy.deepcopy(events), retained, request, pid, candidate=source_candidate)
+    assert intact and gaps == []
+    for mutation in ("nonce", "pid", "source", "function", "metadata"):
+        altered = copy.deepcopy(events)
+        selected = next(event["failure_diagnostic"] for event in altered if event.get("outcome") == "failed")
+        if mutation == "nonce":
+            selected["run_nonce"] = "0" * 32
+        elif mutation == "pid":
+            selected["capture_pid"] += 1
+        elif mutation == "source":
+            selected["frames"][-1]["source_sha256"] = "0" * 64
+        elif mutation == "function":
+            selected["frames"][-1]["function"] = "AbCdEf123456"
+        else:
+            selected["reason"] = "AbCdEf123456"
+        _, intact, gaps = _validate_artifacts(altered, retained, request, pid, candidate=source_candidate)
+        assert not intact and "failure_diagnostic_binding_unqualified" in gaps, mutation
+
+
+def test_failure_diagnostics_bound_frames_and_ignore_exception_properties():
+    from tools._acceptance_protocol import validate_failure_diagnostic
+    from tools._acceptance_pytest import _failure_diagnostic
+    class HostileError(ValueError):
+        @property
+        def details(self):
+            raise RuntimeError("private-sentinel-do-not-retain")
+    opaque = "AbCdEf123456"
+    error = HostileError("private-sentinel-do-not-retain")
+    error.error_code = opaque
+    error.__dict__["details"] = {"reason": opaque, "path": "/" + opaque}
+    frame = SimpleNamespace(path=ROOT / (opaque + ".py"), lineno=0, name=opaque)
+    call = SimpleNamespace(when="call", excinfo=SimpleNamespace(value=error,
+                                                               traceback=[frame] * 80))
+    value = _failure_diagnostic(call, "tests/test_owner.py::test_failure", {"run_nonce": "a" * 32})
+    assert value["frame_count"] == 80 and value["frames_truncated"] and len(value["frames"]) == 32
+    assert all(frame["path"] is None and frame["function"] is None for frame in value["frames"])
+    assert value["reason"] is None and len(canonical_json(value)) <= 32768
+    assert b"private-sentinel-do-not-retain" not in canonical_json(value)
+    assert opaque.encode() not in canonical_json(value)
+    assert all(value[name] is None for name in ("exception_type", "exception_module", "error_code", "reason", "error_path"))
+    assert validate_failure_diagnostic(value, nodeid=value["nodeid"], phase="call") == value
+
+
 def test_expected_refusal_context_and_real_native_artifact_snapshot(tmp_path):
     value, _ = execute(tmp_path, """def test_owner(tmp_path):
     with pytest.raises(ValueError):
@@ -134,6 +212,69 @@ def test_expected_refusal_context_and_real_native_artifact_snapshot(tmp_path):
     row = json.loads(snapshots[0].read_text())
     assert row["public"] == [{"basis_id": "abc", "kind": "refused"}]
     assert row["native_sha256"] and row["native_bytes"] > 0
+
+
+def test_large_selected_native_records_keep_bounded_commitments_and_actual_finish(tmp_path):
+    import hashlib
+
+    from tools._acceptance_protocol import bounded_json
+    from tools.verify_acceptance_paths import _validate_artifacts
+
+    value, _root = execute(tmp_path, """import json
+@pytest.fixture
+def native_journal(tmp_path):
+    records = [{'kind': 'before', 'request_id': str(index),
+                'details': {'status': 'x' * 18000}, 'credential': 'PRIVATE-NATIVE-SECRET'} for index in range(32)]
+    path = tmp_path / 'native.jsonl'
+    path.write_text('\\n'.join(json.dumps(row, sort_keys=True) for row in records) + '\\n')
+    return path
+
+def test_owner(tmp_path, native_journal):
+    records = [json.loads(line) for line in native_journal.read_text().splitlines()]
+    assert len(records) == 32
+    for row in records:
+        row['kind'] = 'after'
+    native_journal.write_text('\\n'.join(json.dumps(row, sort_keys=True) for row in records) + '\\n')
+    assert native_journal.stat().st_size < 1048576
+""", requirement="native_artifact")
+    report = value["report"]
+    assert report["grade"]["status"] == "PASS" and report["grade"]["denominators"]["finished_nodes"] == 1
+    assert read_acceptance_report(value["report_path"], observer_key=KEY, expected_report_sha256=value["report_sha256"]) == report
+    retained = Path(value["report_path"]).parent
+    artifact_path = next((retained/"artifacts").glob("*.json"))
+    artifact = json.loads(artifact_path.read_bytes())
+    raw_path = tmp_path/"run/workers/execute/pytest-temp"/artifact["root_relative"]/artifact["path"]
+    raw = raw_path.read_bytes()
+    native_records = [json.loads(line) for line in raw.splitlines()]
+    for record in native_records:
+        assert bounded_json(record,32768) == record
+    assert len(canonical_json(artifact["public"])) <= 32768
+    assert artifact["scope"]["native_records"] == artifact["scope"]["retained_records"] == len(artifact["public"]) == 32
+    assert artifact["scope"]["projection_compacted"] is True and artifact["scope"]["projection_truncated"] is False
+    assert artifact["scope"]["full_raw_replay"] == "unqualified"
+    assert artifact["native_sha256"] == hashlib.sha256(raw).hexdigest() and artifact["native_bytes"] == len(raw)
+    before = [dict(record,kind="before") for record in native_records]
+    before_raw = ('\n'.join(json.dumps(row,sort_keys=True) for row in before)+'\n').encode()
+    assert artifact["before_native_sha256"] == hashlib.sha256(before_raw).hexdigest()
+    assert artifact["changed_since_setup"] is True
+    for record,projection in zip(native_records,artifact["public"],strict=True):
+        assert projection == {"schema_version":"acceptance-record-commitment/v1", "record_sha256":digest(record),
+            "public_sha256":digest({name:item for name,item in record.items() if name != "credential"})}
+        assert "accepted" not in projection and "authorized" not in projection
+    assert all(b"PRIVATE-NATIVE-SECRET" not in path.read_bytes() for path in retained.rglob("*") if path.is_file())
+
+    events = [json.loads(line) for line in (retained/"execute.events.jsonl").read_text().splitlines()]
+    request = json.loads((retained/"execute.request.json").read_bytes())
+    forged = dict(artifact,public=[{"accepted":True,"evidence_accepted":True} for _ in range(32)])
+    forged["public_sha256"] = digest(forged["public"])
+    artifact_path.chmod(0o600);artifact_path.write_bytes(canonical_json(forged))
+    for event in events:
+        if event.get("event") == "artifacts":
+            event["refs"][0]["sha256"] = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    _events,_intact,gaps = _validate_artifacts(events,retained,request,artifact["capture_pid"])
+    assert "artifact_binding_unqualified" in gaps
+    with pytest.raises(ValueError,match="retained_evidence"):
+        read_acceptance_report(value["report_path"],observer_key=KEY,expected_report_sha256=value["report_sha256"])
 
 
 def test_output_limit_retains_failure_and_actual_start(tmp_path):

@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from .workflow_contracts import JOB, JOB_V2, JOB_V3, JOB_V4, MAX_BYTES, document_sha256, validate_document, validate_job
+from .workflow_contracts import JOB, JOB_V2, JOB_V3, JOB_V4, MAX_BYTES, validate_document, validate_job
 
 if TYPE_CHECKING:
     from .calibration_registry import CalibrationPlan
@@ -273,6 +273,8 @@ class ExecutionProfile:
     readability: object | None = None
     artifact_delivery: object | None = None
     semantic_judging: object | None = None
+    _document_bytes: bytes = field(init=False,repr=False,compare=False)
+    _document_sha256: str = field(init=False,repr=False,compare=False)
 
     def __post_init__(self) -> None:
         if self.input_handoff is not None:
@@ -372,7 +374,18 @@ class ExecutionProfile:
                 raise ExecutionError("semantic_plan_invalid")
             self.semantic_judging.check_profile(self)
 
+        # Exact frozen owner types above validate scalar fields, tuple-owned
+        # collections and byte-owned selections before this detached snapshot.
+        # Live configuration, source checks and authentication remain in their
+        # original owners; these bytes represent only the declared profile.
+        raw = _json(self._declared_document())
+        object.__setattr__(self,"_document_bytes",raw)
+        object.__setattr__(self,"_document_sha256",hashlib.sha256(raw).hexdigest())
+
     def document(self) -> dict[str, Any]:
+        return json.loads(self._document_bytes)
+
+    def _declared_document(self) -> dict[str, Any]:
         result = {
             "schema_version": PROFILE, "profile_ref": self.profile_ref, "total_steps": self.total_steps,
             "currency": self.currency, "pricing_ref": self.pricing_ref,
@@ -420,7 +433,7 @@ class ExecutionProfile:
 
     @property
     def sha256(self) -> str:
-        return _digest(self.document())
+        return self._document_sha256
 
     def role(self, config_ref: str) -> ExecutionRole:
         for role in self.roles:
@@ -492,6 +505,8 @@ class ExecutionAttempt:
     config_ref: str
     _job_bytes: bytes = field(repr=False)
     _input_bytes: bytes = field(repr=False)
+    _job_sha256: str = field(init=False,repr=False,compare=False)
+    _input_sha256: str = field(init=False,repr=False,compare=False)
 
     def __post_init__(self) -> None:
         for name in ("attempt_id", "nonce", "run_id", "binding_id", "config_ref"):
@@ -513,6 +528,11 @@ class ExecutionAttempt:
             raise ExecutionError("execution_attempt_invalid") from None
         if type(supplied) is not dict or _json(job) != self._job_bytes or _json(supplied) != self._input_bytes:
             raise ExecutionError("execution_attempt_invalid")
+        # Both byte strings are now schema-checked canonical owned JSON. These
+        # declarations are immutable; current lease, scope and authentication
+        # checks remain at their original use boundaries.
+        object.__setattr__(self,"_job_sha256",hashlib.sha256(self._job_bytes).hexdigest())
+        object.__setattr__(self,"_input_sha256",hashlib.sha256(self._input_bytes).hexdigest())
 
     @classmethod
     def create(cls, *, attempt_id: str, nonce: str, run_id: str, binding_id: str,
@@ -538,11 +558,11 @@ class ExecutionAttempt:
 
     @property
     def job_sha256(self) -> str:
-        return document_sha256(self.job["schema_version"], self.job)
+        return self._job_sha256
 
     @property
     def input_sha256(self) -> str:
-        return hashlib.sha256(self._input_bytes).hexdigest()
+        return self._input_sha256
 
     def worker_document(self) -> dict[str, Any]:
         """Project scoped worker input while retaining full correlation in the host.

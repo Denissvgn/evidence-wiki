@@ -48,6 +48,119 @@ def write_runtime(tmp_path, value):
     path=tmp_path/'private-runtime.json';path.write_text(json.dumps(value));path.chmod(0o600);return path
 
 
+def write_factory(tmp_path, value):
+    path = tmp_path / 'private-services.py'
+    path.write_text('from evidence_wiki import HostRuntime\n'
+        'def build_runtime(root):\n    return HostRuntime.from_document(' + repr(value) + ')\n')
+    path.chmod(0o600)
+    return path
+
+
+def test_explicit_factory_uses_same_public_runtime_and_real_closed_console(fixture, tmp_path):
+    root, policy, execution, _ = fixture
+    path = write_factory(tmp_path, document(fixture))
+    runtime = HostRuntime.from_factory(path, root)
+    assert runtime.policy.to_dict() == policy.to_dict() and runtime.execution.identity() == execution.identity()
+    response = command('current', '--target', str(root), '--services', str(path), '--run-id', 'factory-read')
+    assert response.returncode == 0 and response.stderr == '', (response.stdout, response.stderr)
+    with Workspace.open(root) as workspace:
+        expected = workspace.research.command({'schema_version': REQUEST, 'operation': 'current',
+            'arguments': {'run_id': 'factory-read'}}, runtime=runtime)
+    assert json.loads(response.stdout) == expected
+    conflict = command('current', '--target', str(root), '--services', str(path), '--runtime', str(path))
+    assert conflict.returncode != 0 and json.loads(conflict.stdout)['status'] == 'refused'
+
+
+@pytest.mark.parametrize('kind', ['public', 'link', 'pipe', 'stdin', 'oversize', 'wrong', 'exception'])
+def test_factory_private_selection_fails_without_disclosing_code(tmp_path, kind):
+    path = tmp_path / 'services.py'
+    path.write_text("def build_runtime(root):\n    raise ValueError('PRIVATE-FACTORY-SECRET')\n")
+    path.chmod(0o600)
+    if kind == 'public':
+        path.chmod(0o644)
+    elif kind == 'link':
+        linked = tmp_path / 'linked.py'; linked.symlink_to(path); path = linked
+    elif kind == 'pipe':
+        path.unlink(); os.mkfifo(path)
+    elif kind == 'stdin':
+        path = '-'
+    elif kind == 'oversize':
+        path.write_text('#' + 'x' * 65_536)
+    elif kind == 'wrong':
+        path.write_text('def build_runtime(root):\n    return {}\n')
+    with pytest.raises(EvidenceWikiError) as caught:
+        HostRuntime.from_factory(path, tmp_path)
+    assert caught.value.error_code == 'RESEARCH_RUNTIME_REFUSED'
+    assert 'PRIVATE-FACTORY-SECRET' not in str(caught.value)
+
+
+def test_factory_timeout_retains_uncertain_effects_and_does_not_redispatch(tmp_path):
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    from evidence_wiki import OperationControl
+    path = tmp_path / 'services.py'
+    completed = tmp_path / 'late-effect'
+    path.write_text('import time\nfrom pathlib import Path\n'
+        'def build_runtime(root):\n    time.sleep(0.25)\n    Path(' + repr(str(completed)) + ').write_text("once")\n    return {}\n')
+    path.chmod(0o600)
+    control = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=0.1)).isoformat(), timeout_seconds=0.1)
+    try:
+        with pytest.raises(EvidenceWikiError) as caught:
+            HostRuntime.from_factory(path, tmp_path, operation_control=control)
+        assert caught.value.details['reason'] == 'factory_execution_uncertain'
+        time.sleep(0.3)
+        assert completed.read_text() == 'once'
+    finally:
+        control.close()
+
+
+@pytest.mark.parametrize('startup', ["print('UNEXPECTED-STARTUP-OUTPUT')", "input()"])
+def test_actual_console_rejects_noisy_or_input_reading_factory_transcript(tmp_path, startup):
+    path = tmp_path / 'services.py'
+    path.write_text(startup + '\ndef build_runtime(root):\n    return {}\n')
+    path.chmod(0o600)
+    response = command('current', '--target', str(tmp_path), '--services', str(path), '--run-id', 'bad-startup', timeout=10)
+    assert response.returncode != 0 and response.stderr == ''
+    if startup.startswith('print'):
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(response.stdout)
+        assert 'UNEXPECTED-STARTUP-OUTPUT' in response.stdout
+    else:
+        result = json.loads(response.stdout)
+        assert result['status'] == 'refused' and result['error']['error_code'] == 'RESEARCH_RUNTIME_REFUSED'
+
+
+def test_original_process_cap_retains_factory_entry_and_observed_stop(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from tools._integration_costs import freeze_cost_plan
+    from tools.measure_integration_costs import observe_command, read_command_receipt
+    entered, late = tmp_path/'entered', tmp_path/'late'
+    path = tmp_path/'services.py'
+    path.write_text('from pathlib import Path\nimport time\nPath('+repr(str(entered))+').write_text("entered")\n'
+        'time.sleep(10)\nPath('+repr(str(late))+').write_text("late")\ndef build_runtime(root):\n    return {}\n')
+    path.chmod(0o600)
+    retained, workers = tmp_path/'retained', tmp_path/'workers'
+    retained.mkdir(mode=0o700);workers.mkdir(mode=0o700)
+    now = datetime.now(timezone.utc)
+    plan = freeze_cost_plan(scope_id='factory-process-cap',binding={'factory':'original-cap'},sources=[{
+        'source_id':'host','provenance':'host_observed','kind':'automated','origin':'Explicit console factory startup',
+        'collection_started_at':(now-timedelta(seconds=1)).isoformat(),'collection_ended_at':(now+timedelta(seconds=30)).isoformat(),
+        'coverage':'complete','authentication_ref':None}],attempts=[{'attempt_id':'startup','phase':'setup','allocation':'one_time',
+            'source_id':'host','required_metrics':['elapsed_seconds']}])
+    argv = [str(Path(sys.executable).with_name('evidence-wiki')),'agent','current','--target',str(tmp_path),
+        '--services',str(path),'--run-id','bounded-startup']
+    key = b'factory-process-observer-key-0000'
+    value = observe_command(plan,'startup',argv,observer_key=key,directory=retained,work_root=workers,timeout_seconds=2)
+    checked = read_command_receipt(plan,'startup',argv,observer_key=key,directory=retained,work_root=workers,
+        expected_receipt_sha256=value['receipt_sha256'])
+    assert entered.exists() and not late.exists()
+    assert checked['receipt']['started_at'] and checked['receipt']['finished_at']
+    assert checked['receipt']['exit_code'] is not None and 'timeout' in checked['receipt']['failure']
+    assert checked['receipt']['status'] == 'failed' and not checked['receipt']['output_reader_work_unresolved']
+
+
 def command(*args, timeout=120):
     console=Path(sys.executable).with_name('evidence-wiki.exe' if os.name=='nt' else 'evidence-wiki')
     return subprocess.run([str(console), 'agent', *args], stdin=subprocess.DEVNULL, capture_output=True,text=True,timeout=timeout,check=False)

@@ -1,6 +1,6 @@
 # Integration journey
 
-Library API 62; operation matrix 43. Documentation basis: `632f0c8970f06bc8d531b08b6d374072ad04d6e9b731fd3eaea88f53ebd2cb9c`.
+Library API 63; operation matrix 44. Documentation basis: `4b3280cca5447ee2b7354ad3ff96cc3c6b86e23de15c2f72d24cd12483056d45`.
 
 ## Journey
 
@@ -34,7 +34,17 @@ def run_journey(target, runtime, run_id="original"):
 
 Call run_journey with the host-provisioned target and runtime. Hosts can select
 HostRuntime.from_file for compatible owner-private native runtime files, or
-HostRuntime.from_services for explicitly provided public services.
+HostRuntime.from_services for explicitly provided public services. Select a
+trusted owner-private build_runtime(workspace_root) Python factory with
+HostRuntime.from_factory(path, workspace_root), CLI --services, or MCP startup
+--research-services with exactly one --allow-root. File/factory choices are
+exclusive and never tool arguments. Factory code and imports have one bounded
+host wait; late effects remain uncertain and must be supervised by the outer
+host process, including filesystem startup. Factories must not read stdin or
+write protocol stdout/stderr. No automatic retry or credential provisioning
+follows refusal. The installed unattended recipe includes finite_host.provision
+for an explicitly synthetic v13 calibrated fixture and a private restore factory;
+restoration retains original qualification, keys, source and run identities.
 
 For current outputs, use brief with format="structured". Its lifecycle has
 terminal/outcome fields; verdict is current evidence eligibility. Require a
@@ -123,7 +133,8 @@ before starting another attempt. Hosts retain an outer finite operation deadline
 
 ## Mcp
 
-Start serve-onboarding-mcp with allowed roots, explicit research runtime and
+Start serve-onboarding-mcp with allowed roots, explicit research runtime or
+one-root --research-services trusted private factory, and
 write-operation grants. Initialize, send notifications/initialized and discover
 tools/list on startup and reconnect. Research tools accept target and declared
 operation arguments; clients cannot select runtime, credentials, grants or

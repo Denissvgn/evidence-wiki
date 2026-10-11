@@ -21,6 +21,16 @@
 
 ### Added
 
+- Compose bounded unattended qualification from original archive, acceptance,
+  installed transport, reference and cost evidence with exact candidate replay.
+  Separate product scenarios, expected abstentions and unresolved process stops
+  retain their original denominators and evidence meanings.
+
+- Add explicit bounded owner-private service factories for advanced public
+  host runtimes through Python, console commands and scoped stdio MCP startup.
+  Library API `63` and operation matrix `44` retain native grants and mark late
+  factory effects as uncertain.
+
 - Add dated current host observations joining native credential challenges,
   owned execution, review contexts and evaluator attestations. A separate macOS
   protected-host probe reports its draft-only kernel boundary. Library API `62`

@@ -18,6 +18,22 @@ def safe_load(stream: str | bytes) -> Any:
     return yaml.load(stream, Loader=SafeLoader)
 
 
+def safe_load_current(stream: str | bytes) -> Any:
+    """Parse fresh configuration with the portable reader's acceptance boundary.
+
+    LibYAML differs on literal tabs and YAML version directives. Select the
+    portable parser for those inputs and let it classify accelerated refusals.
+    No parsed configuration or current eligibility is retained.
+    """
+    markers = (b"\t", b"%YAML") if isinstance(stream, bytes) else ("\t", "%YAML")
+    if any(marker in stream for marker in markers):
+        return yaml.load(stream, Loader=yaml.SafeLoader)
+    try:
+        return safe_load(stream)
+    except yaml.YAMLError:
+        return yaml.load(stream, Loader=yaml.SafeLoader)
+
+
 def split_frontmatter_block(text: str) -> tuple[str | None, str]:
     """Separate frontmatter at standalone delimiter lines, leaving YAML parsing to the caller."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")

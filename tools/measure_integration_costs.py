@@ -139,9 +139,11 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
     forcibly terminated and does not establish provider or OS containment.
     Same-user workers and process groups are not a malicious-worker sandbox.
     """
+    budget_started = time.monotonic()
+    reserved = _now()
     _key(observer_key)
     if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
-            or not 0 < timeout_seconds <= 3600 or type(input_bytes) is not bytes or len(input_bytes) > MAX_BYTES):
+            or not 0 < timeout_seconds <= 7200 or type(input_bytes) is not bytes or len(input_bytes) > MAX_BYTES):
         raise ValueError("cost_command_budget_invalid")
     if (meter is None) != (meter_id is None) or (meter is not None and
             (not callable(meter) or type(meter_id) is not str or not 1 <= len(meter_id.encode()) <= 128)):
@@ -160,13 +162,13 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
             subprocess.run(["git", "check-ignore", "-q", "--", str(path)], cwd=ROOT, check=True, capture_output=True)  # noqa: S603,S607 -- fixed read-only policy check.
     if any(path.exists() or path.is_symlink() for path in paths.values()):
         raise ValueError("cost_attempt_already_reserved")
-    reserved = _now()
     _within(source, reserved)
     window_left = (datetime.fromisoformat(source["collection_ended_at"].replace("Z", "+00:00"))
                    - datetime.fromisoformat(reserved)).total_seconds()
     # Keep closure capacity for the process-group cleanup and final retention.
     effective_timeout = min(timeout_seconds, window_left - 12)
-    deadline = time.monotonic() + max(0, effective_timeout)
+    deadline = budget_started + max(0, effective_timeout)
+    effective_timeout = max(0, deadline - time.monotonic())
     intent = _signed({"schema_version": "integration-cost-intent/v1", "plan_sha256": plan["plan_sha256"],
         "attempt": attempt, "source": source, "argv": argv, "command_manifest": manifest,
         "observer_id": hashlib.sha256(observer_key).hexdigest(), "directory": str(directory),

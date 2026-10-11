@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from .finite_domain import observe_domain
-from .mutation_contracts import detached, digest
+from .mutation_contracts import detached, digest, validate_request_id
 from .research_execution import bounded_host_call, now_utc
 
 _CONFIG_FIELDS = frozenset({"execution_profile_sha256", "config_ref", "controller_ref", "model_ref",
@@ -61,9 +61,15 @@ def refresh(session, request_id):
     plan = session.execution.profile.calibration
     if plan is None:
         return
+    request_id = validate_request_id(request_id)
     with driver.gate(session):
+        session.context.require_grant("research_session.intake_observation")
+        session.context.require_grant("research_session.host_job.evaluate")
         driver.require_machine_compatible(session)
         driver._begin(session)
+        if (datetime.now(timezone.utc) >= driver.deadline(session)
+                or driver.execution_budget_overrun(session, driver.retained(session))):
+            driver.refuse("BUDGET_EXHAUSTED")
     domain = domain_observation(session)
     now = datetime.now(timezone.utc)
     expires = min(now + timedelta(seconds=plan.probe_lifetime_seconds), driver.deadline(session))
@@ -119,5 +125,8 @@ def refresh(session, request_id):
         if datetime.now(timezone.utc) >= expires:
             probe["configurations"] = {}
             probe["reasons"].append("qualification_probe_expired")
+        if driver.execution_budget_overrun(session, driver.retained(session)):
+            probe["configurations"] = {}
+            probe["reasons"].append("qualification_budget_exhausted")
         driver.append(session, "execution_qualification_probe", driver.child_id(request_id, "qualification." + secrets.token_hex(8)),
             {"probe": probe, "domain_ref": digest(current_domain), "completed_utc": now_utc()})

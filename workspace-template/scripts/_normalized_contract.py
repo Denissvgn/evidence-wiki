@@ -40,7 +40,7 @@ try:
     import yaml
 except ImportError as exc:  # pragma: no cover - environment guard
     raise SystemExit("PyYAML is required to read normalized records") from exc
-
+from _yaml_safe import safe_load_current as safe_load
 
 # Contract version stamped into records and accepted when reading them. `normalizer`
 # identifies the producing tool; `normalized_format` identifies the contract shape, so
@@ -197,7 +197,7 @@ def split_record(text: str) -> tuple[dict[str, Any] | None, str, str | None]:
     if closing_index is None:
         return None, normalized, "unterminated YAML frontmatter"
     try:
-        frontmatter = yaml.safe_load("\n".join(lines[1:closing_index]))
+        frontmatter = safe_load("\n".join(lines[1:closing_index]))
     except yaml.YAMLError as exc:
         return None, "\n".join(lines[closing_index + 1 :]), f"invalid YAML frontmatter: {exc}"
     body = "\n".join(lines[closing_index + 1 :])

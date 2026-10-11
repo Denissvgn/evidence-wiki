@@ -179,11 +179,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="evidence-wiki serve-onboarding-mcp", description=__doc__)
     parser.add_argument("--allow-root", action="append", default=[])
     parser.add_argument("--allow-operation", action="append", choices=sorted(WRITE), default=[])
-    parser.add_argument("--research-runtime", help="Startup-only owner-private HostRuntime file; never client-selected.")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--research-runtime", help="Startup-only owner-private HostRuntime file; never client-selected.")
+    selection.add_argument("--research-services", help="Startup-only owner-private trusted build_runtime(root) factory; requires exactly one allowed root.")
     parser.add_argument("--allow-research-operation", action="append", choices=sorted(WRITE_OPERATIONS), default=[])
     args = parser.parse_args(argv)
     try:
-        runtime = HostRuntime.from_file(args.research_runtime) if args.research_runtime else None
+        if args.research_services and len(args.allow_root) != 1:
+            from .runtime_configuration import refuse
+            refuse("factory_requires_one_startup_root")
+        runtime = (HostRuntime.from_factory(args.research_services, args.allow_root[0]) if args.research_services else
+                   HostRuntime.from_file(args.research_runtime) if args.research_runtime else None)
         server = OnboardingMcpServer(allowed_roots=args.allow_root, allow=args.allow_operation,
             runtime=runtime, research_allow=args.allow_research_operation)
         server.serve(sys.stdin, sys.stdout)

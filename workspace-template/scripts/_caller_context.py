@@ -10,9 +10,9 @@ import platform
 import sys
 from pathlib import Path
 
-import yaml
 from _evidence_revision import capture_workspace, content_id
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current as safe_load
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 _SIBLINGS = {}
@@ -48,7 +48,7 @@ def capture(root):
     if sibling("_delegation_gate").live_pending_orders(Path(root)):
         raise ValueError("caller_managed_protocol_required")
     revision = capture_workspace(Path(root).resolve())
-    config = yaml.safe_load(revision.files["research.yml"])
+    config = safe_load(revision.files["research.yml"])
     if not isinstance(config, dict) or not builtin_integrations(config):
         raise ValueError("caller_provider_requires_explicit_qualification")
     if "docs/research-requirements.json" in revision.files:

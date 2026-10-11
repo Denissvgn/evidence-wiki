@@ -210,6 +210,7 @@ from _owner_paths import checked_path
 from _request_scope import FACET_SCOPE_KEY, normalize_scope
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current
 
 _script_errors = load_workspace_module(_SCRIPT_DIR, "_script_errors")
 ScriptRefusal = _script_errors.ScriptRefusal
@@ -359,7 +360,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"Missing config: {path}")
     try:
-        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        config = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise CoverageManifestError("CONFIG_INVALID", f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(config, dict):
@@ -578,7 +579,7 @@ def load_yaml_mapping(path: Path, *, error_code: str) -> dict[str, Any]:
     if not path.is_file():
         raise CoverageManifestError(error_code, f"Missing coverage manifest: {path}")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        document = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise CoverageManifestError(error_code, f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):

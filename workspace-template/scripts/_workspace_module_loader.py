@@ -142,7 +142,9 @@ def load_workspace_module(
     path = (root / f"{stem}.py").resolve()
     if path.parent != root or not path.is_file():
         raise SystemExit(f"Missing sibling workspace script: {path}")
-    tree_hash = _tree_hash(root)
+    trusted_bridge = (host_context_bridge is not None and
+                      host_context_bridge is sys.modules.get("evidence_wiki.host_context"))
+    tree_hash = host_context_bridge.script_tree_hash(root) if trusted_bridge else _tree_hash(root)
     cache_key = f"{root}\0{stem}\0{tree_hash}"
     if host_context_bridge is not None:
         host_context_bridge.check_generation(root, tree_hash)

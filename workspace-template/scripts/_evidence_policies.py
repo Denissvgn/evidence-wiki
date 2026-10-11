@@ -27,6 +27,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current as safe_load
 
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
@@ -288,7 +289,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     path = project_root / "research.yml"
     if not path.is_file():
         return {}
-    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    document = safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(document, dict):
         raise ValueError(f"Invalid config: {path}")
     return document
@@ -399,7 +400,7 @@ def read_frontmatter(path: Path, *, strict_encoding: bool = False) -> dict[str, 
     if closing is None:
         return {}
     try:
-        frontmatter = yaml.safe_load("\n".join(lines[1:closing])) or {}
+        frontmatter = safe_load("\n".join(lines[1:closing])) or {}
     except yaml.YAMLError:
         return {}
     return frontmatter if isinstance(frontmatter, dict) else {}
@@ -457,7 +458,7 @@ def load_normalized_records(
 
 def load_yaml_mapping(path: Path) -> dict[str, Any]:
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        document = safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         return {}
     return document if isinstance(document, dict) else {}

@@ -83,6 +83,8 @@ def prepare_native(root, proposal, options):
     facts, candidate = copy.deepcopy(reference["facts"]), copy.deepcopy(reference["claim"])
     if options.get("semantic_wrong_value"):
         candidate["value"] = "999"
+    if options.get("semantic_reversed_value"):
+        candidate["value"] = "-" + candidate["value"]
     if options.get("semantic_out_of_domain"):
         data = b"A prose observation cannot qualify as exact finite evidence.\n"
     else:
@@ -162,6 +164,7 @@ def _qualify(profile, policy, suite, *, mode):
     if mode == "absent" or any(row["human_required"] for row in policy.to_dict()["required_evaluators"]):
         return CalibratedEvaluators(records, issuer), host
     now = datetime.now(timezone.utc)
+    job_budgets = profile.document()["job_budgets"]
     for config, task_role, controller, _principal, _key in REVIEWERS:
         if mode == "adjudicator_missing" and task_role == "adjudicator":
             continue
@@ -172,7 +175,7 @@ def _qualify(profile, policy, suite, *, mode):
             document = reference_job("evaluate") | {"schema_version": JOB_V3,
                 "expected_result_schema": EXECUTION_OBSERVATION, "id": f"reference-job-{index}",
                 "controller_ref": controller, "prompt_version": role.prompt_version, "policy_id": policy.policy_id,
-                "scope": policy.to_dict()["scope"]["question_ids"], "budgets": profile.document()["job_budgets"],
+                "scope": policy.to_dict()["scope"]["question_ids"], "budgets": job_budgets,
                 "issued_utc": "2026-10-01T11:59:40Z", "deadline_utc": "2026-10-01T12:00:10Z",
                 "task_role": task_role, "required_capabilities": ["model"], "role_scope_sha256": scope.sha256,
                 "context_id": f"reference-context-{index}", "packet_sha256": _digest(case["input_document"])}

@@ -428,6 +428,13 @@ def compiled_source_code(source: bytes, filename: str):
     return compile_source(source, filename)
 
 
+def script_tree_hash(root: Path) -> str:
+    """Select the private owner that computes a code-tree digest from a root."""
+    from ._script_host import script_tree_hash as tree_hash
+
+    return tree_hash(root)
+
+
 @contextmanager
 def call_binding() -> Iterator[None]:
     """Pin one installed owner generation across a complete operation."""

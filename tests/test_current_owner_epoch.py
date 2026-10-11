@@ -176,7 +176,8 @@ def policy_epoch(epoch, monkeypatch):
     """Controlled packet/decision collaborators; no native quality authority."""
     session, state = epoch
     session.policy = RunPolicy(policy_document())
-    session.execution = SimpleNamespace(profile=SimpleNamespace(disagreement=object(), review_services=None))
+    session.execution = SimpleNamespace(profile=SimpleNamespace(disagreement=object(), review_services=None,
+        semantic_judging=None))
     actual = native._observe_current
     view = actual(session)[0]
     state["reads"] = 0

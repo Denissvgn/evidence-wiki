@@ -32,6 +32,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from _script_errors import handle_system_exit, json_mode_requested
+from _yaml_safe import safe_load_current as safe_load
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -60,7 +61,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config = safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -104,7 +105,7 @@ def frontmatter_from_text(text: str) -> dict[str, Any] | None:
         return None
     block = text[4:end]
     try:
-        data = yaml.safe_load(block)
+        data = safe_load(block)
     # Deep aliases/mappings can exhaust the parser recursion budget, and Python's
     # integer conversion guard raises plain ValueError for an enormous numeric
     # scalar. An unreadable legacy page is skipped just like malformed YAML; it

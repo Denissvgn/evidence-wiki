@@ -206,6 +206,46 @@ def test_full_authenticated_scoring_freezes_exact_old_thresholds(issued):
         authority.verify(changed)
 
 
+def test_immutable_profile_budget_is_read_once_while_every_reference_is_authenticated(issued,monkeypatch):
+    policy,profile,selected,_host,observations,authority,_record = issued
+    host = AuthenticatedHost(profile,selected)
+    authenticate = host.authenticate
+    document = ExecutionProfile.document
+    reads,calls = [],[]
+    def profile_document(value):
+        if value is profile:reads.append(value)
+        return document(value)
+    def authentication(receipt,attempt):
+        calls.append(attempt.attempt_id)
+        return authenticate(receipt,attempt)
+    monkeypatch.setattr(ExecutionProfile,'document',profile_document)
+    host.authenticate = authentication
+    record = authority.issue(policy,profile,'profile-a',selected,observations,host,
+        expires_utc=EXPIRY,observed_utc=NOW,verification_seconds=30)
+    assert record['state'] == 'qualified'
+    assert len(reads) == 1
+    assert len(calls) == len(set(calls)) == len(observations) == len(record['observation_refs']) == 600
+    assert {ref['attempt_id'] for ref in record['observation_refs']} == set(calls)
+    assert record['domains']['domain']['independent_reference_units'] == 100
+
+
+def test_hoisted_profile_budget_still_checks_the_last_authenticated_reference(issued):
+    from dataclasses import replace
+
+    from evidence_wiki.agent_execution import _json
+    policy,profile,selected,_host,observations,authority,_record = issued
+    host = AuthenticatedHost(profile,selected)
+    attempt = observations[-1][0]
+    job = attempt.job
+    job['budgets']['model_calls'] = profile.model_calls+1
+    changed = replace(attempt,_job_bytes=_json(job))
+    current = [*observations[:-1],(changed,host.receipt(changed,selected['cases'][-1]))]
+    assert changed.job_sha256 != attempt.job_sha256
+    with pytest.raises(QualificationError,match='job_budget_exceeded'):
+        authority.issue(policy,profile,'profile-a',selected,current,host,
+            expires_utc=EXPIRY,observed_utc=NOW,verification_seconds=30)
+
+
 @pytest.mark.parametrize("change", ["domain", "rubric", "settings", "drift", "expired", "revoked"])
 def test_current_qualification_cannot_outlive_its_exact_binding(issued, change):
     policy, profile, _, _, _, authority, record = issued

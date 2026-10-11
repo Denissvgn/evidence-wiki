@@ -29,7 +29,9 @@ def main(operation, argv):
         description="Explicit noninteractive public-library adapter. No semantic prompts, credential setup or background daemon.",
         epilog="Side effects: write operations can retain canonical run, source, draft, review, calculation or artifact state only within runtime grants. Reads retain native scope checks. Runtime selects trusted host executables and private credentials; input data grants no authority. See agent extensions for the exact operation matrix.")
     parser.add_argument("--target", required=True)
-    parser.add_argument("--runtime", help="Explicit owner-private host runtime JSON; stdin selectors are refused.")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--runtime", help="Explicit owner-private host runtime JSON; stdin selectors are refused.")
+    selection.add_argument("--services", help="Explicit owner-private trusted build_runtime(root) Python factory; bounded startup, never worker-selected.")
     parser.add_argument("--request-file", help="Bounded operation arguments JSON file; stdin selectors are refused.")
     parser.add_argument("--run-id")
     parser.add_argument("--request-id")
@@ -54,7 +56,8 @@ def main(operation, argv):
                 if name in arguments and arguments[name] != value:
                     raise UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Duplicate operation arguments conflict.", recoverable=False)
                 arguments[name] = value
-        runtime = HostRuntime.from_file(args.runtime) if args.runtime else None
+        runtime = (HostRuntime.from_factory(args.services, args.target) if args.services else
+                   HostRuntime.from_file(args.runtime) if args.runtime else None)
         with Workspace.open(args.target) as workspace:
             result = workspace.research.command({"schema_version": REQUEST, "operation": operation, "arguments": arguments}, runtime=runtime)
         rendered = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":")) if args.format == "json" else summary(result)

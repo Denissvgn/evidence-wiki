@@ -15,6 +15,7 @@ import os
 import stat
 import sys
 import tempfile
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ MAX_BYTES = 256 * 1024 * 1024
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_ATTEMPTS = 3
 MAX_DEPTH = 64
+MAX_PINNED_DIRECTORIES = 32
 EXCLUDED_ROOTS = frozenset({".git", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
 
 
@@ -120,7 +122,88 @@ def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
     return result
 
 
-def read_observed_file(root: Path, relative: str, expected: tuple[int, ...]) -> bytes:
+class _DirectoryPins:
+    """Bound directory handles to one captured tree, checking live identities."""
+
+    def __init__(self, root: Path, before: dict[str, tuple[int, ...]]):
+        self.root = root
+        self.before = before
+        self.handles: OrderedDict[str, int] = OrderedDict()
+        self.closed = False
+        self.root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            self._check(self.root_fd, ".")
+        except BaseException as error:
+            try:
+                os.close(self.root_fd)
+            except BaseException as cleanup:
+                raise error from cleanup
+            raise
+
+    def _check(self, descriptor: int, relative: str) -> None:
+        if self.closed or observation(os.fstat(descriptor)) != self.before[relative]:
+            raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace directory changed during capture.", path=relative)
+
+    def parent(self, relative: str) -> int:
+        self._check(self.root_fd, ".")
+        if observation(self.root.lstat()) != self.before["."]:
+            raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace root path changed during capture.")
+        if not relative:
+            return self.root_fd
+        current, prefix = self.root_fd, ""
+        for part in relative.split("/"):
+            prefix = f"{prefix}/{part}" if prefix else part
+            if observation(os.stat(part, dir_fd=current, follow_symlinks=False)) != self.before[prefix]:
+                raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace directory entry changed during capture.", path=prefix)
+            if prefix in self.handles:
+                current = self.handles[prefix]
+                self._check(current, prefix)
+                self.handles.move_to_end(prefix)
+                continue
+            descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            try:
+                self._check(descriptor, prefix)
+                if len(self.handles) == MAX_PINNED_DIRECTORIES:
+                    oldest, pinned = next(iter(self.handles.items()))
+                    self._check(pinned, oldest)
+                    del self.handles[oldest]
+                    os.close(pinned)
+                self.handles[prefix] = descriptor
+            except BaseException as error:
+                try:
+                    os.close(descriptor)
+                except BaseException as cleanup:
+                    raise error from cleanup
+                raise
+            current = descriptor
+        return current
+
+    def verify(self) -> None:
+        self._check(self.root_fd, ".")
+        if observation(self.root.lstat()) != self.before["."]:
+            raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace root path changed during capture.")
+        for relative, descriptor in self.handles.items():
+            self._check(descriptor, relative)
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        descriptors = [*self.handles.values(), self.root_fd]
+        self.handles.clear()
+        error = None
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except BaseException as refused:
+                if error is None:
+                    error = refused
+        if error is not None:
+            raise error
+
+
+def read_observed_file(root: Path, relative: str, expected: tuple[int, ...],
+                       directories: _DirectoryPins | None = None) -> bytes:
     """Read through no-follow directory descriptors where the platform supports them."""
     if sys.platform == "win32":
         native = load_workspace_module(Path(__file__).resolve().parent, "_windows_files")
@@ -135,14 +218,21 @@ def read_observed_file(root: Path, relative: str, expected: tuple[int, ...]) -> 
         )
     descriptors: list[int] = []
     try:
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        current = os.open(root, directory_flags)
-        descriptors.append(current)
-        parts = Path(relative).parts
-        for part in parts[:-1]:
-            current = os.open(part, directory_flags, dir_fd=current)
+        if directories is not None:
+            if directories.root != root or directories.before.get(relative) != expected:
+                raise refuse("EVIDENCE_REVISION_CHANGED", "File is outside its captured directory pass.", path=relative)
+            parent, _, name = relative.rpartition("/")
+            current = directories.parent(parent)
+        else:
+            directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            current = os.open(root, directory_flags)
             descriptors.append(current)
-        descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
+            parts = Path(relative).parts
+            for part in parts[:-1]:
+                current = os.open(part, directory_flags, dir_fd=current)
+                descriptors.append(current)
+            name = parts[-1]
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
         descriptors.append(descriptor)
         if observation(os.fstat(descriptor)) != expected:
             raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.", path=relative)
@@ -263,12 +353,26 @@ def capture_workspace(root: str | Path, *, max_attempts: int = MAX_ATTEMPTS) -> 
             if sys.platform == "win32":
                 payloads = capture_windows_files(root, before)
             else:
-                payloads = {
-                    relative: read_observed_file(root, relative, info)
-                    for relative, info in sorted(before.items()) if stat.S_ISREG(info[2])
-                }
-                if observe_tree(root) != before:
-                    raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
+                if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+                    raise refuse("EVIDENCE_REVISION_UNSUPPORTED", "No-follow descriptor capture is unavailable.")
+                directories = _DirectoryPins(root, before)
+                try:
+                    payloads = {
+                        relative: read_observed_file(root, relative, info, directories)
+                        for relative, info in sorted(before.items()) if stat.S_ISREG(info[2])
+                    }
+                    directories.verify()
+                    if observe_tree(root) != before:
+                        raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
+                    directories.verify()
+                except BaseException as error:
+                    try:
+                        directories.close()
+                    except BaseException as cleanup:
+                        raise error from cleanup
+                    raise
+                else:
+                    directories.close()
             directories = tuple(sorted(relative for relative, info in before.items() if stat.S_ISDIR(info[2])))
             return WorkspaceRevision(MappingProxyType(payloads), directories)
         except (FileNotFoundError, NotADirectoryError):

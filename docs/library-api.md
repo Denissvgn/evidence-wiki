@@ -1306,7 +1306,8 @@ draft write/protected read/workspace write probe and returns its dated scope.
 That draft-only observation does not qualify semantic evaluator execution or
 delivery. Independent credential custody, isolated reasoning and remote model
 execution remain unobserved unless separately demonstrated by the integrating host.
-Library API `62` and operation matrix `43` advertise these host observations.
+Library API `63` and operation matrix `44` advertise these host observations
+and explicit bounded startup service factories.
 
 Current domain derives from actual authorized source closures, strict claims,
 original question grammar and exact rubric. Native bookkeeping changes do not
@@ -3043,6 +3044,20 @@ finite: its `research-host-runtime/v1` object requires `policy`, `context`,
 `policy` is `RunPolicy.to_dict()`; `profile` is the exact `ExecutionProfile.document()`
 for versions v1-v3, including optional scheduling and role scopes. Advanced profile
 versions and calibrated registry services are refused by this file loader.
+
+For advanced services select `HostRuntime.from_factory(PRIVATE_PY, WORKSPACE)`
+or console `--services PRIVATE_PY` instead of `--runtime`. The private Python
+file defines `build_runtime(workspace_root)` and returns an exact `HostRuntime`
+constructed through public services. It has no symlink components or hard links,
+owner-only permissions and a 64 KiB stable-read bound. Selection executes trusted
+host code; it must not read stdin or write protocol stdout/stderr. Factory code,
+imports and construction share a callback wait of at most 60 seconds, reduced
+by an optional caller `OperationControl`. The host must also supervise the
+enclosing process under its original deadline, covering filesystem reads,
+imports and all later operations. Timeout effects remain uncertain; no automatic
+retry or cancellation claim follows. MCP startup `--research-services PRIVATE_PY`
+is exclusive with `--research-runtime` and requires exactly one `--allow-root`.
+Tool arguments and environment variables cannot select factories.
 
 `context` supplies the explicit `HostContext` constructor selections, including
 allowed/writable roots, grants, actor/controller references, authority file,

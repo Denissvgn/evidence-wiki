@@ -198,6 +198,10 @@ evidence immutable and continue with the [research workflow][research-run].
 | Managed adapters | `orchestrate run` / `resume` support Codex CLI 0.138+ and Claude Code. Managed Claude is unavailable on native Windows. |
 | External host | `start` / `next` / `submit` / `status` support an operator-controlled host, including OpenCode, Pi, Aider or Gemini CLI. |
 
+For exact candidate conformance, the [unattended qualification guide](docs/unattended-qualification.md)
+describes original agent/tool evidence, complete installed transports, terminal
+accounting and independent replay.
+
 Managed execution refuses with `RUNNER_ISOLATION_UNAVAILABLE` when its required
 boundary is unavailable. The parent owns `runs/orchestrations/`; workers follow
 bounded work orders and never invoke the parent controller or write its state.

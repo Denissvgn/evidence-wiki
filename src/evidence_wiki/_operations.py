@@ -7,10 +7,11 @@ from typing import Any
 
 from ._onboarding_operations import rows as onboarding_rows
 
-OPERATION_MATRIX_VERSION = "43"
+OPERATION_MATRIX_VERSION = "44"
 
 # API name, shell entry point, filesystem effects, locking, subprocess boundary.
 _ROWS = (
+    ("HostRuntime.from_factory", "agent --services / serve-onboarding-mcp --research-services", "explicit trusted host factory effects only; no implied grants", "bounded owner-private stable file read and exact HostRuntime result", "finite host callback wait; late effects remain uncertain and enclosing process supervision is required"),
     ("host_qualification", None, "none; dated existing native credential, attempt, context and attestation observations", "current scoped session and original authenticated journal with closing identity checks", "none; provisioned native credential challenge only; no model dispatch"),
     ("strict_host.qualification", None, "temporary private draft probe only", "current strict host implementation, policy and workspace basis", "fixed bounded SBPL kernel draft write/read denial probe; no semantic qualification"),
     ("host_backup_recovery.backup", None, "private frozen key-free backup descriptor and independent recovery journal", "native private CAS outside all restorable roots; exact current host-service head", "finite preauthorized backup service wait; protected bytes remain service-owned"),

@@ -23,12 +23,15 @@ from tools._acceptance_protocol import (  # noqa: E402
     MAX_INPUT_BYTES,
     MAX_RECORD_BYTES,
     bounded_json,
+    catalog_profile,
     digest,
+    failure_source_locations,
     freeze_manifest,
     grade_evidence,
     hash_file,
     policy,
     validate_cases,
+    validate_failure_diagnostic,
     validate_manifest,
 )
 from tools._integration_costs import METRICS, freeze_cost_plan, validate_cost_plan  # noqa: E402
@@ -42,7 +45,8 @@ from tools.measure_integration_costs import (  # noqa: E402
 from tools.run_comparative_trials import checked_directory, publish_new, read_private  # noqa: E402
 
 CAPSULE_TREES = ("src", "tests", "tools", "examples", "workspace-template", "domain-packs", "orchestrator")
-CAPSULE_FILES = ("pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md")
+CAPSULE_FILES = ("pyproject.toml", "README.md", "LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
+                 "docs/library-api.md", "docs/acceptance-paths.md", "docs/unattended-qualification.md")
 EXCLUDED = {"__pycache__", ".pytest_cache", ".ruff_cache", ".git", ".venv", "reports", ".llm-wiki",
             ".aws", ".codex", ".agents", "llm_wiki"}
 LIMITATIONS = [
@@ -222,13 +226,27 @@ def _processes(retained, reservation, plan, observer_key):
     return rows, unstarted, unknown, gaps, intact
 
 
-def _validate_artifacts(events, retained, request, pid):
+def _validate_artifacts(events, retained, request, pid, *, candidate=None):
     """Check per-node native/projection bindings without pretending raw replay."""
     events = bounded_json(events)
     intact, gaps, used = True, [], set()
     fields = {"schema_version", "nodeid", "run_nonce", "capture_pid", "root_relative", "path", "native_sha256",
               "native_bytes", "before_native_sha256", "changed_since_setup", "public", "public_sha256", "scope"}
+    selected_paths = {frame.get("path") for event in events if type(event) is dict
+        and type(event.get("failure_diagnostic")) is dict
+        and type(event["failure_diagnostic"].get("frames")) is list
+        for frame in event["failure_diagnostic"]["frames"] if type(frame) is dict
+        and type(frame.get("path")) is str and candidate is not None and frame["path"] in candidate}
+    sources = failure_source_locations(retained.parent / "capsule", selected_paths)
+    sources = {path: value for path, value in sources.items() if value["sha256"] == candidate[path]["sha256"]} if candidate else {}
     for event in events:
+        if type(event) is dict and "failure_diagnostic" in event:
+            try:
+                validate_failure_diagnostic(event["failure_diagnostic"], nodeid=event["nodeid"],
+                    phase=event["phase"], run_nonce=request["run_nonce"], capture_pid=pid, source_locations=sources)
+            except (ValueError, KeyError, TypeError):
+                intact = False
+                gaps.append("failure_diagnostic_binding_unqualified")
         if type(event) is not dict or event.get("event") != "artifacts" or type(event.get("refs")) is not list:
             continue
         verified = []
@@ -245,6 +263,7 @@ def _validate_artifacts(events, retained, request, pid):
                 body = bounded_json(json.loads(raw))
                 if type(body) is not dict or set(body) != fields:
                     raise ValueError("acceptance_artifact_shape")
+                bounded_json(body["public"],32768)
                 from tools._acceptance_pytest import _public
                 if _public(body["public"], narrow=True) != body["public"]:
                     raise ValueError("acceptance_artifact_redaction")
@@ -263,7 +282,9 @@ def _validate_artifacts(events, retained, request, pid):
                         or (body["before_native_sha256"] is not None and (type(body["before_native_sha256"]) is not str
                             or re.fullmatch(r"[a-f0-9]{64}", body["before_native_sha256"]) is None))
                         or type(body["public"]) is not list or body["public_sha256"] != digest(body["public"])
-                        or type(scope) is not dict or set(scope) != {"redacted", "projection_truncated", "native_records", "retained_records", "full_raw_replay"}
+                        or type(scope) is not dict or set(scope) not in (
+                            {"redacted", "projection_truncated", "native_records", "retained_records", "full_raw_replay"},
+                            {"redacted", "projection_truncated", "projection_compacted", "native_records", "retained_records", "full_raw_replay"})
                         or scope["redacted"] is not True or type(scope["projection_truncated"]) is not bool
                         or type(scope["native_records"]) is not int or not 0 <= scope["native_records"] <= MAX_RECORD_BYTES
                         or type(scope["retained_records"]) is not int or scope["retained_records"] != len(body["public"])
@@ -272,6 +293,15 @@ def _validate_artifacts(events, retained, request, pid):
                         or scope["full_raw_replay"] != "unqualified"
                         or ref["path"] != digest([body["nodeid"], body["run_nonce"], body["root_relative"], body["path"]]) + ".json"):
                     raise ValueError("acceptance_artifact_binding")
+                if "projection_compacted" in scope:
+                    if type(scope["projection_compacted"]) is not bool:
+                        raise ValueError("acceptance_artifact_projection_shape")
+                    if scope["projection_compacted"] and any(type(item) is not dict
+                            or set(item) != {"schema_version","record_sha256","public_sha256"}
+                            or item["schema_version"] != "acceptance-record-commitment/v1"
+                            or any(type(item[name]) is not str or re.fullmatch(r"[a-f0-9]{64}",item[name]) is None
+                                for name in ("record_sha256","public_sha256")) for item in body["public"]):
+                        raise ValueError("acceptance_artifact_projection_shape")
                 verified.append(ref)
             except (OSError, ValueError, KeyError, TypeError):
                 gaps.append("artifact_binding_unqualified")
@@ -315,7 +345,7 @@ def _regrade_retained(retained, report, observer_key):
             or plan["sources"][0]["kind"] != "automated" or plan["sources"][0]["coverage"] != "partial"
             or plan["sources"][0]["authentication_ref"] is not None):
         raise ValueError("acceptance_process_plan_binding")
-    if (report["policy"] != policy() or report["reservation_sha256"] != digest(reservation)
+    if (report["policy"] != policy(catalog_profile(reservation["cases"])) or report["reservation_sha256"] != digest(reservation)
             or report["observer_id"] != hashlib.sha256(observer_key).hexdigest()):
         raise ValueError("acceptance_report_policy_binding")
     manifest_path = retained / "manifest.json"
@@ -345,7 +375,7 @@ def _regrade_retained(retained, report, observer_key):
                 raise ValueError("acceptance_worker_request_binding")
             if mode == "execute":
                 events, artifact_intact, artifact_gaps = _validate_artifacts(events, retained, request,
-                    None if row["start"] is None else row["start"].get("pid"))
+                    None if row["start"] is None else row["start"].get("pid"), candidate=inputs["candidate"])
                 intact &= artifact_intact
                 process_gaps.extend(artifact_gaps)
             result = json.loads(read_private(result_path, MAX_RECORD_BYTES)) if result_path.exists() else None
@@ -376,6 +406,10 @@ def _regrade_retained(retained, report, observer_key):
         from tools._acceptance_cases import acceptance_cases
         if effective["cases"] == validate_cases(acceptance_cases()):
             catalog_scope = "frozen_registry"
+        else:
+            from tools._terminal_cases import automatic_cases
+            if effective["cases"] == validate_cases(automatic_cases()):
+                catalog_scope = "frozen_automatic_registry"
     if report["catalog_scope"] != catalog_scope or report["catalog_sha256"] != digest(effective["cases"]):
         raise ValueError("acceptance_catalog_binding")
     if report.get("key_custody") != "caller_external_key" and grade["status"] != "FAIL":
@@ -409,6 +443,10 @@ def run_acceptance(*, repo_root, cases, evidence_root, seed=0, timeout_seconds=1
         from tools._acceptance_cases import acceptance_cases
         if cases == validate_cases(acceptance_cases()):
             catalog_scope = "frozen_registry"
+        else:
+            from tools._terminal_cases import automatic_cases
+            if cases == validate_cases(automatic_cases()):
+                catalog_scope = "frozen_automatic_registry"
     # Validate every scalar and pre-freeze order before creating directories or spawning.
     selectors = [selector for case in cases for selector in case["selectors"]]
     reservation = freeze_manifest(cases, selectors, inputs={}, seed=seed, timeout_seconds=timeout_seconds)
@@ -441,7 +479,7 @@ def run_acceptance(*, repo_root, cases, evidence_root, seed=0, timeout_seconds=1
     publish_new(retained / "process-plan.json", plan)
     report = {"schema_version": "acceptance-observation/v1", "reservation_sha256": digest(reservation),
               "manifest": None, "processes": [], "errors": [], "limitations": LIMITATIONS,
-              "observer_id": hashlib.sha256(observer_key).hexdigest(), "policy": policy(),
+              "observer_id": hashlib.sha256(observer_key).hexdigest(), "policy": policy(catalog_profile(cases)),
               "repo_root": str(repo_root), "key_custody": "caller_external_key" if supplied_key else "unqualified_ephemeral",
               "catalog_scope": catalog_scope, "catalog_sha256": digest(cases),
               "verifier_independence": "external agent assignment; not authenticated by role names or this gate",
@@ -516,6 +554,7 @@ def main(argv=None):
                         help="Private 32–128 byte key file outside the entire evidence tree; retain it with the external latest report hash.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--timeout", type=positive_seconds, default=1200)
+    parser.add_argument("--catalog", choices=("attack", "automatic"), default="attack")
     args = parser.parse_args(argv)
     key_path, evidence_path = args.observer_key.absolute(), args.evidence_dir.absolute()
     if key_path.resolve() != key_path or key_path.is_relative_to(evidence_path):
@@ -529,7 +568,8 @@ def main(argv=None):
     except (OSError, ValueError) as error:
         parser.error(str(error))
     from tools._acceptance_cases import acceptance_cases
-    value = run_acceptance(repo_root=ROOT, cases=acceptance_cases(), evidence_root=args.evidence_dir,
+    from tools._terminal_cases import automatic_cases
+    value = run_acceptance(repo_root=ROOT, cases=acceptance_cases() if args.catalog == "attack" else automatic_cases(), evidence_root=args.evidence_dir,
                            seed=args.seed, timeout_seconds=args.timeout, observer_key=observer_key)
     print(json.dumps({"status": value["report"]["grade"]["status"], "report_path": value["report_path"],
                       "report_sha256": value["report_sha256"]}, sort_keys=True))

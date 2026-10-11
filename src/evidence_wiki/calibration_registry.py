@@ -5,13 +5,34 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from .agent_execution import ExecutionError, _json, _ref, _utc
 from .finite_domain import DESCRIPTOR, DOMAIN
-from .mutation_contracts import detached
+from .mutation_contracts import canonical, detached
 from .qualification_calibration import CalibrationAuthority, calibration_suite, digest, hash_ref
 from .reference_oracles import assess_references, program_identity
+
+
+@lru_cache(maxsize=4)
+def _suite_assessment(suite_bytes, program_bytes, scorer_sha256, classifier_sha256):
+    """Reuse only exact bounded reference declarations, never host eligibility.
+
+    Full canonical input bytes and current implementation bindings key the
+    in-process cache. Retained values are immutable bytes; every view is fresh.
+    """
+    suite = json.loads(suite_bytes)
+    expected = calibration_suite(suite["cases"], **{key: suite[key] for key in
+        ("suite_ref", "split_ref", "domains", "rubric", "model_settings", "drift_ref")})
+    if suite != expected:
+        raise ExecutionError("calibration_suite_changed")
+    if suite.get("domains") != [DOMAIN]:
+        raise ExecutionError("calibration_domain_unsupported")
+    assessment = assess_references(suite["cases"])
+    if _json(assessment["program"]) != program_bytes:
+        raise ExecutionError("calibration_reference_program_changed")
+    return _json(assessment)
 
 
 @dataclass(frozen=True, init=False)
@@ -20,35 +41,35 @@ class CalibrationSelection:
 
     config_ref: str
     _document_bytes: bytes = field(repr=False)
+    _sha256: str = field(repr=False)
 
     def __init__(self, config_ref, suite, *, model_revision):
         _ref(config_ref)
         _ref(model_revision)
-        suite = detached(suite)
-        expected = calibration_suite(suite["cases"], **{key: suite[key] for key in
-            ("suite_ref", "split_ref", "domains", "rubric", "model_settings", "drift_ref")})
-        if suite != expected:
-            raise ExecutionError("calibration_suite_changed")
-        if suite.get("domains") != [DOMAIN]:
-            raise ExecutionError("calibration_domain_unsupported")
-        assessment = assess_references(suite["cases"])
+        suite_bytes = canonical(suite)
+        suite = json.loads(suite_bytes)
+        scorer_sha256 = hashlib.sha256(Path(__file__).with_name("qualification_calibration.py").read_bytes()).hexdigest()
+        classifier_sha256 = hashlib.sha256(Path(__file__).with_name("finite_domain.py").read_bytes()).hexdigest()
+        assessment = json.loads(_suite_assessment(suite_bytes, _json(program_identity()), scorer_sha256, classifier_sha256))
         value = {"schema_version": "research-calibration-selection/v1", "config_ref": config_ref,
-            "scorer_source_sha256": hashlib.sha256(Path(__file__).with_name("qualification_calibration.py").read_bytes()).hexdigest(),
-            "classifier_source_sha256": hashlib.sha256(Path(__file__).with_name("finite_domain.py").read_bytes()).hexdigest(),
+            "scorer_source_sha256": scorer_sha256,
+            "classifier_source_sha256": classifier_sha256,
             "model_revision": model_revision, "model_settings": suite["model_settings"],
             "rubric": suite["rubric"], "rubric_sha256": digest(suite["rubric"]), "suite_sha256": suite["suite_sha256"],
             "split_ref": suite["split_ref"], "drift_ref": suite["drift_ref"],
             "domain_descriptor": DESCRIPTOR, "reference_assessment": assessment}
         hash_ref(value["suite_sha256"])
         object.__setattr__(self, "config_ref", config_ref)
-        object.__setattr__(self, "_document_bytes", _json(value))
+        raw = _json(value)
+        object.__setattr__(self, "_document_bytes", raw)
+        object.__setattr__(self, "_sha256", hashlib.sha256(raw).hexdigest())
 
     def document(self):
         return json.loads(self._document_bytes)
 
     @property
     def sha256(self):
-        return hashlib.sha256(self._document_bytes).hexdigest()
+        return self._sha256
 
 
 @dataclass(frozen=True)

@@ -1,12 +1,13 @@
 """Bound current resolution reads to existing publication and execution owners."""
 
+import hashlib
 import threading
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from evidence_wiki import execution_session as native
-from evidence_wiki.mutation_contracts import detached, digest
+from evidence_wiki.mutation_contracts import MAX_BYTES, detached, digest
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.research_session import ResearchSession
 
@@ -144,6 +145,48 @@ def _input_observation(current, observation, proofs):
     return value
 
 
+def _journal_proof(session, facts):
+    """Commit full authenticated records only during the native owner's epoch.
+
+    Each record uses the journal owner's canonical validation. Streaming the
+    enclosing list avoids adding proof-wrapper depth to legitimate job schemas.
+    This private commitment confers no acceptance or reusable custody.
+    """
+    if type(facts) is not native._CurrentFacts:
+        refuse("resolution_native_journal_custody_required")
+    facts.require(session)
+    complete = hashlib.sha256()
+    complete.update(b"[")
+    size, nodes, ordered = 2, 1, []
+    for index, record in enumerate(facts.records):
+        raw = native.canonical(record)
+        size += len(raw) + (1 if index else 0)
+        pending = [record]
+        while pending:
+            value = pending.pop()
+            nodes += 1
+            if nodes > 65536 or size > MAX_BYTES:
+                refuse("resolution_native_journal_limit")
+            if type(value) is dict:
+                pending.extend(child for pair in value.items() for child in pair)
+            elif type(value) is list:
+                pending.extend(value)
+        if index:
+            complete.update(b",")
+        complete.update(raw)
+        ordered.append({"sequence": record["sequence"], "event_ref": record["event_ref"],
+            "previous_record_ref": record["previous_record_ref"],
+            "record_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "chain_record_ref": native.digest({key: value for key, value in record.items() if key != "event_ref"}),
+            "canonical_bytes": len(raw)})
+    complete.update(b"]")
+    return detached({"schema_version": "private-resolution-journal-proof/v1",
+        "canonical_sha256": "sha256:" + complete.hexdigest(), "canonical_bytes": size,
+        "nodes": nodes, "record_count": len(ordered), "ordered_records": ordered,
+        "closing_event_ref": ordered[-1]["event_ref"] if ordered else None,
+        "closing_chain_record_ref": ordered[-1]["chain_record_ref"] if ordered else None})
+
+
 @contextmanager
 def _held_owner(session, admission=None):
     """Keep current source custody through a private consumer and fresh closure.
@@ -173,6 +216,7 @@ def _held_owner(session, admission=None):
                 decision = session.policy.decide(observation)
                 facts = _Pass(session, config, packets=packets) if admission is None else _InputPass(session, config, admission, packets=packets)
                 proofs = questions(session, view, records, usage_view=live, facts=facts)
+                journal_proof = _journal_proof(session, current_facts)
             if admission is None:
                 constraints = blockers(view, session.policy.to_dict(), observation, proofs)
             else:
@@ -190,7 +234,7 @@ def _held_owner(session, admission=None):
                 derived_proofs=proofs, subset_blockers=constraints,
                 lifecycle={"terminal": terminal is not None, "decision": terminal})
             observed = owned_type(session, result, view["basis_id"], digest({
-                "basis_id": view["basis_id"], "records": records, "qualification": view["qualification"],
+                "basis_id": view["basis_id"], "journal": journal_proof, "qualification": view["qualification"],
                 "observation": observation, "decision": decision, "proofs": proofs, "constraints": constraints,
                 "config": config}), threading.get_ident(), _usage_view=live, _config=config,
                 _source_packets=detached(packets), **({"_input_admission": admission} if admission is not None else {}))
@@ -208,11 +252,13 @@ def _held_owner(session, admission=None):
                 facts = (_Pass(session, closing_config, packets=closing_facts.packets) if admission is None else
                     _InputPass(session, closing_config, admission, packets=closing_facts.packets))
                 closing_proofs = questions(session, closing, records, usage_view=live, facts=facts)
+                closing_journal_proof = _journal_proof(session, closing_facts)
             closing_constraints = (blockers(closing, session.policy.to_dict(), closing_observation, closing_proofs) if admission is None else
                 _input_constraints(session, closing, records, closing_proofs, admission))
             if native.execution_budget_overrun(session, records):
                 closing_constraints.append("current_execution_budget_overrun")
             if (closing["basis_id"] != view["basis_id"] or native.retained(session) != records
+                    or closing_journal_proof != journal_proof
                     or closing_observation["selected_outcomes"] != observation["selected_outcomes"]
                     or closing["qualification"] != view["qualification"]
                     or closing_proofs != proofs or closing_constraints != constraints

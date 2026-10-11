@@ -94,6 +94,8 @@ def readability_credential(session):
 
 def status(session, *, plan=None):
     """Read configured parent credentials; actual service execution is a separate fact."""
+    from . import execution_session as driver
+
     if type(session) is not ResearchSession or session.execution is None:
         refuse("service_execution_missing")
     session._check("current")
@@ -109,7 +111,8 @@ def status(session, *, plan=None):
     plan = frozen_plan
     if plan is not None:
         plan.check(session.execution.profile, session.policy.to_dict())
-    before = session.current()
+    held_epoch = driver._CURRENT_FACTS.get() is not None
+    before = driver._current_identity(session)
     config = owner("_strict_evidence").configuration(session.root)
     authority = owner("_evidence_authority")
     now = datetime.now(timezone.utc)
@@ -180,8 +183,17 @@ def status(session, *, plan=None):
             for slot in required))
     after = datetime.now(timezone.utc)
     if (after < now or authority.load_trust(session.root, config, after)["content_hash"] != trust["content_hash"]
-            or owner("_strict_evidence").configuration(session.root) != config
-            or session.current()["basis_id"] != before["basis_id"]):
+            or owner("_strict_evidence").configuration(session.root) != config):
+        refuse("service_current_identity_changed")
+    closing = driver._current_identity(session)
+    if held_epoch:
+        completed = datetime.now(timezone.utc)
+        if (completed < after
+                or authority.load_trust(session.root, config, completed)["content_hash"] != trust["content_hash"]
+                or owner("_strict_evidence").configuration(session.root) != config):
+            refuse("service_current_identity_changed")
+    if (closing["basis_id"] != before["basis_id"]
+            or held_epoch and closing["qualification"] != before["qualification"]):
         refuse("service_current_identity_changed")
     return validate(STATUS, {"schema_version": STATUS, "run_id": session.run_id, "binding_id": digest(session.binding),
         "profile_id": "sha256:" + session.execution.profile.sha256, "policy_id": before["policy_id"],

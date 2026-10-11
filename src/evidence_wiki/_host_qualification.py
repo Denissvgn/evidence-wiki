@@ -58,7 +58,8 @@ def host_qualification(session):
     session._check("current")
     session.context.require_grant("host_qualification.current")
     session.execution.check(session.binding)
-    before = session.current()
+    held_epoch = driver._CURRENT_FACTS.get() is not None
+    before = driver._current_identity(session)
     records = session.execution.records(session)
     attempts = [row["data"] for row in records if row["kind"] == "execution_attempt"]
     if len(attempts) > MAX_ATTEMPTS:
@@ -67,6 +68,7 @@ def host_qualification(session):
     configuration = driver.owner("_strict_evidence").configuration(session.root)
     sources = None
     observed = []
+    closing_reviews = []
     for retained in attempts:
         attempt = session.execution.attempt(retained["attempt"])
         role = session.execution.profile.role(attempt.config_ref)
@@ -138,6 +140,8 @@ def host_qualification(session):
                             for key in ("schema_version", "state_id", "workspace_binding", "action"))):
                     _refuse("attestation_current_context_mismatch")
                 row["attestation_state"] = "current_bound_review"
+                if held_epoch:
+                    closing_reviews.append((attempt, envelope, prepared["snapshot"]))
             else:
                 row["attestation_state"] = "native_controller_verified"
             row.update(attestation_ref=digest(envelope), attestation_principal=identity.principal,
@@ -149,10 +153,22 @@ def host_qualification(session):
                     _refuse("registered_review_binding_mismatch")
                 row["application_state"] = "registered"
         observed.append(row)
+    if closing_reviews:
+        current_claims = {}
+        with Workspace.open(session.root) as workspace:
+            for attempt, envelope, snapshot in closing_reviews:
+                driver._verify_review_controller(session, attempt, envelope)
+                claim_id = snapshot["claim"]["id"]
+                if claim_id not in current_claims:
+                    current_claims[claim_id] = workspace.strict.prepare_review(claim_id)
+                closing = current_claims[claim_id]
+                claim = next((item for item in closing["result"]["claims"] if item["claim"]["id"] == claim_id), None)
+                if closing["snapshot"] != snapshot or claim is None or claim["accepted"] is not True:
+                    _refuse("native_current_review_changed")
     session._check("current")
     session.execution.check(session.binding)
     after_records = session.execution.records(session)
-    after = session.current()
+    after = driver._current_identity(session)
     if driver.owner("_strict_evidence").configuration(session.root) != configuration:
         _refuse("native_configuration_changed")
     if credentials["authority_id"] is not None:
@@ -160,7 +176,8 @@ def host_qualification(session):
         trust = authority.load_trust(session.root, configuration, datetime.now(timezone.utc))
         if authority.authority_basis(trust) != credentials["authority_id"]:
             _refuse("native_authority_changed")
-    if before["basis_id"] != after["basis_id"] or records != after_records:
+    if (before["basis_id"] != after["basis_id"] or records != after_records
+            or held_epoch and before["qualification"] != after["qualification"]):
         _refuse("observation_changed")
     native_reviewers = [row for row in observed if row["attestation_state"] == "current_bound_review"]
     controller_refs = sorted({row["controller_ref"] for row in native_reviewers})

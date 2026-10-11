@@ -247,6 +247,7 @@ from _request_scope import normalize_scope
 from _script_errors import ScriptRefusal, emit_error, handle_system_exit, json_mode_requested
 from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
+from _yaml_safe import safe_load_current as safe_load
 from source_failure_taxonomy import (
     DELIVERY_FAILURE_CODES,
     SOURCE_STATUS_VALUES,
@@ -503,7 +504,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(_bounded_text(config_path)) or {}
+    config = safe_load(_bounded_text(config_path)) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -1802,7 +1803,7 @@ def parse_provenance_sidecar(path: Path, relative_path: str) -> tuple[dict[str, 
     """Parse one provenance sidecar; malformed content degrades to warnings, never failure."""
     warnings: list[str] = []
     try:
-        document = yaml.safe_load(_bounded_text(path))
+        document = safe_load(_bounded_text(path))
     except (OSError, yaml.YAMLError) as exc:
         return {}, [f"{relative_path}: malformed provenance sidecar: {exc}"]
     if not isinstance(document, dict):

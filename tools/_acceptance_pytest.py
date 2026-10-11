@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -14,12 +16,57 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT)]
 
 import pytest  # noqa: E402
 
-from tools._acceptance_protocol import MAX_FILES, MAX_RECORD_BYTES, bounded_json, canonical_json, digest  # noqa: E402
+from tools._acceptance_protocol import (  # noqa: E402
+    MAX_FILES,
+    MAX_RECORD_BYTES,
+    bounded_json,
+    canonical_json,
+    digest,
+    failure_source_locations,
+)
 
 _PRIVATE = ("credential", "password", "secret", "token", "authentication", "private_key", "signing_key")
 _PUBLIC = {"schema_version", "kind", "status", "state", "outcome", "reason", "code", "error",
            "basis_id", "expected_basis_id", "record_ref", "event_ref", "authorized", "accepted",
            "evidence_accepted", "historical", "request_id", "attempt_id", "operation", "action"}
+
+
+def _diagnostic_token(value, *, path=False):
+    """Retain only bounded public identifiers, never exception prose or locals."""
+    pattern = r"/[A-Za-z0-9_/-]{1,255}" if path else r"[A-Za-z_][A-Za-z0-9_.-]{0,255}"
+    return value if type(value) is str and re.fullmatch(pattern, value) and not any(
+        word in value.lower() for word in _PRIVATE) else None
+
+
+def _failure_diagnostic(call, nodeid, request, source_locations=None):
+    frames = []
+    traceback = list(call.excinfo.traceback)
+    for entry in traceback[-32:]:
+        path = Path(str(entry.path))
+        relative = str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else None
+        source = (source_locations or {}).get(relative)
+        name, line = entry.name, entry.lineno + 1
+        first = entry.frame.code.firstlineno + 1 if source else None
+        known = source is not None and _diagnostic_token(name) is not None and any(
+            name == function and first == declared_first and start <= line <= end
+            for function, declared_first, start, end in source["functions"])
+        frames.append({"path": relative if known else None, "source_sha256": source["sha256"] if known else None,
+                       "line": line if known else None, "function": name if known else None,
+                       "location_sha256": digest([str(path), name, line])})
+    error = call.excinfo.value
+    error_type = type(error)
+    names = ("AssertionError", "AttributeError", "EOFError", "Exception", "FileNotFoundError", "ImportError",
+        "IndexError", "KeyError", "LookupError", "ModuleNotFoundError", "NotImplementedError", "OSError",
+        "PermissionError", "RecursionError", "RuntimeError", "StopIteration", "SyntaxError", "SystemExit",
+        "TimeoutError", "TypeError", "UnicodeError", "ValueError", "ZeroDivisionError")
+    public_name = next((name for name in names if error_type is getattr(builtins, name)), None)
+    return bounded_json({"schema_version": "acceptance-failure-diagnostic/v1", "nodeid": nodeid,
+        "phase": call.when, "run_nonce": request["run_nonce"], "capture_pid": os.getpid(),
+        "exception_type": public_name, "exception_module": "builtins" if public_name else None,
+        "exception_identity_sha256": digest([type.__getattribute__(error_type, "__module__"), type.__getattribute__(error_type, "__name__")]),
+        "error_code": None, "reason": None, "error_path": None,
+        "frames": frames, "frame_count": len(traceback), "frames_truncated": len(traceback) > 32,
+        "redacted": True, "full_trace_replay": "unqualified"}, 32768)
 
 
 def _public(value, *, narrow=False):
@@ -38,6 +85,19 @@ def _public(value, *, narrow=False):
     return value
 
 
+def _project_records(values):
+    """Keep every selected record within the aggregate projection allowance."""
+    originals = [bounded_json(value,32768) for value in values]
+    public = [_public(value,narrow=True) for value in originals]
+    try:
+        return bounded_json(public,32768),False
+    except ValueError:
+        commitments = [{"schema_version":"acceptance-record-commitment/v1",
+            "record_sha256":digest(original),"public_sha256":digest(projected)}
+            for original,projected in zip(originals,public,strict=True)]
+        return bounded_json(commitments,32768),True
+
+
 class AcceptanceRecords:
     """Capture owner returns only after the selected test actually calls them."""
 
@@ -51,6 +111,7 @@ class AcceptanceRecords:
         self.observed = {}
         self.temporary_roots = {}
         self.native_before = {}
+        self.failure_sources = {}
 
     def append(self, event):
         path = Path(self.request["events"])
@@ -81,6 +142,8 @@ class AcceptanceRecords:
         if len(self.collected) > 512 or any(len(node.encode()) > 1024 for node in self.collected):
             raise pytest.UsageError("acceptance_collection_bound")
         self.items = {item.nodeid: item for item in session.items}
+        self.failure_sources = failure_source_locations(ROOT, [str(Path(item.path).relative_to(ROOT))
+            for item in session.items if Path(item.path).is_relative_to(ROOT)])
         if self.request["mode"] == "execute" and self.collected != self.request["exact_nodeids"]:
             session.items.clear()
             raise pytest.UsageError("acceptance_collection_drift")
@@ -94,6 +157,8 @@ class AcceptanceRecords:
         outcome = yield
         report = outcome.get_result()
         report.acceptance_assertion_failure = bool(call.excinfo and call.excinfo.errisinstance(AssertionError))
+        if report.failed and call.excinfo:
+            report.acceptance_failure_diagnostic = _failure_diagnostic(call, item.nodeid, self.request, self.failure_sources)
         if call.when == "setup" and item.funcargs:
             roots = []
             if item.funcargs.get("tmp_path") is not None:
@@ -130,6 +195,9 @@ class AcceptanceRecords:
                "assertion_failure": getattr(report, "acceptance_assertion_failure", False)}
         if report.failed:
             row["failure_sha256"] = hashlib.sha256(report.longreprtext.encode()).hexdigest()
+            diagnostic = getattr(report, "acceptance_failure_diagnostic", None)
+            if diagnostic is not None:
+                row["failure_diagnostic"] = diagnostic
         self.append(row)
 
     @pytest.hookimpl(hookwrapper=True)
@@ -185,10 +253,9 @@ class AcceptanceRecords:
                 try:
                     lines = raw.splitlines() if path.suffix == ".jsonl" else [raw]
                     values = [json.loads(line) for line in lines[-32:]]
-                    public = [_public(bounded_json(value, 32768), narrow=True) for value in values]
+                    public,compacted = _project_records(values)
                 except (ValueError, UnicodeError):
                     continue
-                public = bounded_json(public, 32768)
                 root_relative = str(tmp.relative_to(Path(self.request["basetemp"])))
                 before_hash = self.native_before.get(nodeid, {}).get(str(path.relative_to(Path(self.request["basetemp"]))))
                 native_hash = hashlib.sha256(raw).hexdigest()
@@ -199,6 +266,7 @@ class AcceptanceRecords:
                             "before_native_sha256": before_hash, "changed_since_setup": before_hash != native_hash,
                             "public": public, "public_sha256": digest(public),
                             "scope": {"redacted": True, "projection_truncated": len(lines) > 32,
+                                      "projection_compacted":compacted,
                                       "native_records": len(lines), "retained_records": len(public),
                                       "full_raw_replay": "unqualified"}}
                 target = Path(self.request["artifacts"]) / (digest([nodeid, self.request["run_nonce"], root_relative, relative]) + ".json")

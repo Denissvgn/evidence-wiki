@@ -21,7 +21,11 @@ def test_targeted_repair_requires_new_material_and_fresh_first_passes(tmp_path, 
             repair = repair_rows[0]
             claim_id = repair["target_claim_id"]
             evidence = repair["attempt"]["input"]["repair_scope"]["defect_evidence"]
-            assert len(evidence["first_pass_findings"]) == 2
+            assert len(evidence["first_pass_criteria"]) == 2
+            assert all(row["verdicts"]["support"] == "fail" and row["verdicts"]["scope"] == "fail"
+                for row in evidence["first_pass_criteria"])
+            assert evidence["historical_prose"] == "withheld_current_closure_not_established"
+            assert evidence["authorized"] is False and evidence["evidence_accepted"] is False
             applied = next(row["data"] for row in records if row["kind"] == "execution_applied"
                 and row["data"]["attempt_id"] == repair["attempt"]["attempt_id"])
             assert applied["disagreement_result_basis"] != repair["disagreement"]["material_basis_id"]
@@ -29,5 +33,6 @@ def test_targeted_repair_requires_new_material_and_fresh_first_passes(tmp_path, 
                 and row["data"].get("operation") == "evaluate"]
             assert {row["claim_id"] for row in reviews} == {claim_id}
             assert sum(row["passed"] is False for row in reviews) == 2
+            assert {row["profile_ref"] for row in reviews if not row["passed"]} == {"profile-a", "profile-b"}
             assert {row["profile_ref"] for row in reviews if row["passed"]} == {"profile-a", "profile-b"}
             assert session.current()["usage"]["repair_cycles"] == 1

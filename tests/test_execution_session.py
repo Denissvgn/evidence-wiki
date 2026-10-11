@@ -295,7 +295,9 @@ def fixture(tmp_path, monkeypatch, request=None):
     if options.get("artifact_delivery"):
         from evidence_wiki.artifact_delivery_contracts import ArtifactDeliveryPlan, ArtifactDestination
         roles += (ExecutionRole("release", "host_worker", "runner", "controlled-release-process", "release/v1"),)
-        registry = ExecutionRoleRegistry((*registry.scopes,
+        registry = ExecutionRoleRegistry((*(() if registry is None else registry.scopes),
+            *(() if registry is not None else (ExecutionRoleScope("researcher", "researcher", ("model",)),
+                ExecutionRoleScope("profile-a", "evaluator", ("model",)))),
             ExecutionRoleScope("release", "release", ("model", "eligibility.read", "release.propose"))))
         artifact_delivery = ArtifactDeliveryPlan("release", "runner", (ArtifactDestination("local-brief"),),
             timeout_seconds=600, tokens=1000)

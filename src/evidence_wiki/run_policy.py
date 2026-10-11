@@ -13,6 +13,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any, NoReturn
 
 from .workflow_contracts import WorkflowContractError
@@ -67,7 +68,7 @@ def _array(shape: dict[str, Any], maximum: int = 64, minimum: int = 0) -> dict[s
     return {"type": "array", "items": shape, "minItems": minimum, "maxItems": maximum}
 
 
-def schemas() -> dict[str, dict[str, Any]]:
+def _build_schemas() -> dict[str, dict[str, Any]]:
     """Closed policy, receipt and inert decision shapes; semantics are checked in code."""
     ident = _string()
     policy_id = {"type": "string", "pattern": r"^sha256:[a-f0-9]{64}$(?![\s\S])"}
@@ -159,12 +160,25 @@ def schemas() -> dict[str, dict[str, Any]]:
                                 (OBSERVATION_V2, observation_v2), (DECISION, decision))}
 
 
+@lru_cache(maxsize=1)
+def _schema_bytes() -> tuple[tuple[str, bytes], ...]:
+    """Retain only static schema declarations as immutable canonical bytes."""
+    return tuple((name, json.dumps(shape, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False).encode()) for name, shape in _build_schemas().items())
+
+
+def schemas() -> dict[str, dict[str, Any]]:
+    """Return detached closed declarations; caller inputs are always validated."""
+    return {name: json.loads(raw) for name, raw in _schema_bytes()}
+
+
 def schema_document(name: str) -> dict[str, Any]:
     """Return a detached closed schema or a typed unsupported-version error."""
-    catalog = schemas()
-    if type(name) is not str or name not in catalog:
-        _refuse("VERSION_UNSUPPORTED", "/schema_version")
-    return catalog[name]
+    if type(name) is str:
+        for declared, raw in _schema_bytes():
+            if declared == name:
+                return json.loads(raw)
+    _refuse("VERSION_UNSUPPORTED", "/schema_version")
 
 
 def _bounded(value: Any) -> None:

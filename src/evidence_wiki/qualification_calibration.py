@@ -325,6 +325,7 @@ class CalibrationAuthority:
             fail("observations_invalid")
         lookup = {case["case_id"]: case for case in suite["cases"]}
         results, refs, attempts = {}, [], set()
+        profile_cap = profile.document()["job_budgets"]
         for entry in observations:
             if type(entry) not in (list, tuple) or len(entry) != 2:
                 fail("observation_invalid")
@@ -332,9 +333,10 @@ class CalibrationAuthority:
             if type(attempt) is not ExecutionAttempt or attempt.attempt_id in attempts:
                 fail("attempt_invalid")
             attempts.add(attempt.attempt_id)
+            job, input_document = attempt.job, attempt.input_document
             if (attempt.profile_sha256 != profile.sha256 or attempt.config_ref != config_ref
-                    or attempt.job["operation"] != "evaluate" or attempt.job["policy_id"] != policy.policy_id
-                    or set(attempt.job["scope"]) != set(frozen["scope"]["question_ids"])):
+                    or job["operation"] != "evaluate" or job["policy_id"] != policy.policy_id
+                    or set(job["scope"]) != set(frozen["scope"]["question_ids"])):
                 fail("attempt_binding_invalid")
             remaining = min(until - time.monotonic(), profile.cleanup_timeout_seconds)
             if remaining <= 0:
@@ -353,43 +355,42 @@ class CalibrationAuthority:
                     or observed["controller_ref"] != role.controller_ref or observed["model_ref"] != role.model_ref
                     or observed["prompt_version"] != role.prompt_version
                     or observed["run_id"] != attempt.run_id or observed["binding_id"] != attempt.binding_id
-                    or observed["job_id"] != attempt.job["id"] or observed["issued_utc"] != attempt.job["issued_utc"]
-                    or observed["deadline_utc"] != attempt.job["deadline_utc"]
+                    or observed["job_id"] != job["id"] or observed["issued_utc"] != job["issued_utc"]
+                    or observed["deadline_utc"] != job["deadline_utc"]
                     or observed["currency"] != profile.currency or observed["pricing_ref"] != profile.pricing_ref
-                    or attempt.job["role"] != role.role or attempt.job["controller_ref"] != role.controller_ref
-                    or attempt.job["prompt_version"] != role.prompt_version):
+                    or job["role"] != role.role or job["controller_ref"] != role.controller_ref
+                    or job["prompt_version"] != role.prompt_version):
                 fail("observation_binding_invalid")
             if profile.role_scopes is not None:
-                profile.check_job_scope(config_ref, attempt.job, attempt.input_document)
+                profile.check_job_scope(config_ref, job, input_document)
                 if profile.role_scopes.scope(config_ref).task_role != required[0]["role"]:
                     fail("role_scope_mismatch")
-            profile_cap = profile.document()["job_budgets"]
-            if (any(attempt.job["budgets"][name] > profile_cap[name] for name in ("model_calls", "tool_calls", "tokens"))
-                    or Decimal(attempt.job["budgets"]["cost"]) > Decimal(profile_cap["cost"])):
+            if (any(job["budgets"][name] > profile_cap[name] for name in ("model_calls", "tool_calls", "tokens"))
+                    or Decimal(job["budgets"]["cost"]) > Decimal(profile_cap["cost"])):
                 fail("job_budget_exceeded")
-            usage, cap = observed["observed_usage"], attempt.job["budgets"]
+            usage, cap = observed["observed_usage"], job["budgets"]
             if (any(usage[name] is None or usage[name] > cap[name] for name in ("model_calls", "tool_calls", "tokens"))
                     or usage["cost"] is None or Decimal(usage["cost"]) > Decimal(cap["cost"])
-                    or usage["seconds"] is None or usage["seconds"] > attempt.job["timeout_seconds"]):
+                    or usage["seconds"] is None or usage["seconds"] > job["timeout_seconds"]):
                 fail("receipt_budget_exceeded")
             output = observed["output"]
             if (observed["state"] != "succeeded" or not observed["final_accounting"] or observed["completed_utc"] is None or observed["started_utc"] is None
-                    or not _utc(attempt.job["issued_utc"]) <= _utc(observed["started_utc"]) <= _utc(observed["completed_utc"])
+                    or not _utc(job["issued_utc"]) <= _utc(observed["started_utc"]) <= _utc(observed["completed_utc"])
                     or not _utc(observed["completed_utc"]) <= _utc(observed["observed_utc"]) <= _utc(now)
-                    or _utc(observed["completed_utc"]) > _utc(attempt.job["deadline_utc"])
+                    or _utc(observed["completed_utc"]) > _utc(job["deadline_utc"])
                     or type(output) is not dict
                     or not readability and (set(output) != {"case_id", "label"}
                         or type(output["label"]) is not str or output["label"] not in {"accept", "reject", "unknown"})):
                 fail("judgment_invalid")
             if readability:
-                payload = attempt.job["payload"]
+                payload = job["payload"]
                 if type(payload) is not dict or set(payload) != {"qualification_purpose", "calibration_case_id"} or payload["qualification_purpose"] != "readability":
                     fail("case_binding_invalid")
                 case_id = payload["calibration_case_id"]
             else:
                 case_id = output["case_id"]
             case = lookup.get(case_id if type(case_id) is str else None)
-            if case is None or case["case_id"] in results or attempt.input_document != case["input_document"]:
+            if case is None or case["case_id"] in results or input_document != case["input_document"]:
                 fail("case_binding_invalid")
             if case["reference"]["tier"] in ORACLE_TIERS and (observed["reason"] == "offline_fixture"
                     or observed["observed_usage"]["model_calls"] in (None, 0)):

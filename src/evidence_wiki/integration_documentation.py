@@ -44,7 +44,17 @@ def run_journey(target, runtime, run_id="original"):
 
 Call run_journey with the host-provisioned target and runtime. Hosts can select
 HostRuntime.from_file for compatible owner-private native runtime files, or
-HostRuntime.from_services for explicitly provided public services.
+HostRuntime.from_services for explicitly provided public services. Select a
+trusted owner-private build_runtime(workspace_root) Python factory with
+HostRuntime.from_factory(path, workspace_root), CLI --services, or MCP startup
+--research-services with exactly one --allow-root. File/factory choices are
+exclusive and never tool arguments. Factory code and imports have one bounded
+host wait; late effects remain uncertain and must be supervised by the outer
+host process, including filesystem startup. Factories must not read stdin or
+write protocol stdout/stderr. No automatic retry or credential provisioning
+follows refusal. The installed unattended recipe includes finite_host.provision
+for an explicitly synthetic v13 calibrated fixture and a private restore factory;
+restoration retains original qualification, keys, source and run identities.
 
 For current outputs, use brief with format="structured". Its lifecycle has
 terminal/outcome fields; verdict is current evidence eligibility. Require a
@@ -115,7 +125,8 @@ Cancellation is cooperative at safe checkpoints, suppresses a transport response
 and preserves effects. Reconnect cannot roll back a write or renew budgets.
 Resolve uncertain dispatch through native pending/cancel/reconcile operations
 before starting another attempt. Hosts retain an outer finite operation deadline.""",
-    "mcp": """Start serve-onboarding-mcp with allowed roots, explicit research runtime and
+    "mcp": """Start serve-onboarding-mcp with allowed roots, explicit research runtime or
+one-root --research-services trusted private factory, and
 write-operation grants. Initialize, send notifications/initialized and discover
 tools/list on startup and reconnect. Research tools accept target and declared
 operation arguments; clients cannot select runtime, credentials, grants or

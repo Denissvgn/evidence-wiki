@@ -95,7 +95,14 @@ owner-private Python factory instead:
 ```
 
 The explicitly selected file is trusted host code, with owner-only permissions,
-no links and a 64 KiB bound. Its public factory has this contract:
+no links and a 64 KiB bound. `HostRuntime.from_factory` owns its stable anchored
+read and bounded startup wait. An unavailable or late factory returns a terminal
+refusal; late effects remain uncertain and require enclosing host process
+supervision.
+It must not read stdin or write protocol output. The enclosing host process
+needs its original finite deadline around filesystem startup and all work;
+the 60-second factory callback wait does not establish OS isolation. Its public
+factory has this contract:
 
 ```python
 from evidence_wiki import HostRuntime, ResearchExecution
@@ -110,6 +117,56 @@ def build_runtime(workspace_root):
     )
     return HostRuntime.from_services(frozen_policy, selected_context, execution)
 ```
+
+The same explicit selection works through the installed console and stdio MCP:
+
+```bash
+evidence-wiki agent run-cycle --target /absolute/workspace \
+  --services /absolute/private/host_services.py --run-id study --request-id drive
+evidence-wiki serve-onboarding-mcp --allow-root /absolute/workspace \
+  --research-services /absolute/private/host_services.py --allow-research-operation run-cycle
+```
+
+Factory selection is exclusive with the runtime-file option. MCP requires one
+startup root; client tool arguments cannot select code, credentials or grants.
+
+For the finite structured domain, the same bundle includes `finite_host.provision`.
+It creates one independent public run source (9 + 2 count units), provisions the
+existing calibrated v13 profile and retains every reference reservation, start
+and final receipt. Its protected calibration corpus stays in the host; generator
+workers derive the claim from their permitted source packet using standard
+arithmetic. These are scripted fixture observations, never live semantic accuracy.
+
+```python
+from pathlib import Path
+from finite_host import provision
+
+root, runtime, setup = provision(Path("NEW_PRIVATE_FIXTURE_DIRECTORY"))
+services = setup["services"]
+```
+
+Use `services` with the installed console or stdio startup options above.
+Restoration retains the same policy, source, profile, credentials, expiry and
+qualification records without issuing new qualifications or resetting runs.
+The enclosing host must include setup and all reference work in its original
+finite budget. The existing reference suite has 100 logical baseline cases and
+five sensitivity variants per baseline, exercised for four configured reviewers.
+Reusing that exact calibration for separate current runs is one reference set;
+it does not create independent reference samples. A CLI fixture selection is
+also available with `host.py --mode fake --scenario finite --output NEW_DIRECTORY`.
+
+Current qualification is short-lived. The trusted recipe exposes
+`refresh_current(runtime, root, run_id)` as explicit host work before an
+effect-free brief or current read. It refreshes only an existing authenticated
+bound run; a missing run is neither created nor probed.
+`restore(root, configuration_path, current_run_id=run_id)` explicitly selects
+that same startup host work before returning services. Each genuine probe
+rechecks grants, the original run deadline, consumed allowance, current source
+domain and configured reviewers, using a new nonce and the unchanged
+30-second expiry. A newly accepted or partial run-cycle makes a fresh closing
+observation; historical request replay does not renew it. Reads and resolution
+remain effect-free, and historical acceptance cannot override a later unknown
+or withdrawn current qualification.
 
 An AgentExecutor exposes `profile`, `invoke(attempt)`, `poll(attempt)`,
 `cancel(attempt)` and `authenticate(observation, attempt)`. `BoundedSubprocessExecutor`

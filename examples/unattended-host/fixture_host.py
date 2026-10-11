@@ -40,7 +40,7 @@ class FixtureMeter:
         return {'seconds':summary['seconds'],'model_calls':1,'tool_calls':1,'tokens':0,'cost':'0'}
 
 
-def provision(base, objective, *, scenario='repair', observation_sink=None):
+def provision(base, objective, *, scenario='repair', observation_sink=None, finite=False):
     base = base.resolve()
     if base.exists():
         raise ValueError('Fixture output must be a new directory; use live mode to reopen a provisioned runtime.')
@@ -48,7 +48,7 @@ def provision(base, objective, *, scenario='repair', observation_sink=None):
     private = base/'fixture-private'; private.mkdir(mode=0o700)
     control = base/'fixture-control'; control.mkdir(mode=0o700)
     workers = base/'workers'; workers.mkdir(mode=0o700)
-    keys = {principal:secrets.token_bytes(32) for principal in ('generator','evidence','critic','usage','scrubber','receipt','observer','qualifier')}
+    keys = {principal:secrets.token_bytes(32) for principal in ('generator','evidence','scope','critic','adjudicator','usage','scrubber','receipt','observer','qualifier')}
     until = expiry()
     keys['expires_at'] = until
     with Onboarding.open(allowed_roots=[base],allow=['apply']) as onboarding:
@@ -60,6 +60,10 @@ def provision(base, objective, *, scenario='repair', observation_sink=None):
     (root/'sources/jurisdictions.yml').write_text(yaml.safe_dump({'jurisdiction_profiles':[{
         'jurisdiction_id':'fixture-only','official_domains':['example.org'],'blocked_domains':[]}]}))
     raw = b'Measured solar reflectance was 0.74.\n'
+    if finite:
+        from evidence_wiki.finite_domain import SOURCE
+        raw = canonical({'schema_version': SOURCE, 'facts': {'operation': 'sum', 'values': ['9','2'],
+            'units': 'count', 'scope': 'fixture-cohort', 'time': 'fixture-observation', 'contradiction': False}})
     metadata = {'schema_version':'evidence-source-capture-input/v1','capture_id':'fixture-study','tool_id':'fixture-input','tool_version':'1',
         'origin_url':'https://example.org/study','title':'Synthetic local observation','retrieved_at':now(),
         'capture_method':'manual_transcription','content_format':'markdown','content_kind':'primary','completeness':'complete',
@@ -85,6 +89,8 @@ def provision(base, objective, *, scenario='repair', observation_sink=None):
     config_path.write_text(yaml.safe_dump(config,sort_keys=False))
     role_map = {'generator':('generator-controller',['generator']), 'evidence':('evidence-controller',['evaluator']),
         'critic':('critic-controller',['evaluator']), 'usage':('usage-controller',['usage']), 'scrubber':('scrub-controller',['scrubber'])}
+    if finite:
+        role_map.update(scope=('scope-controller',['evaluator']), adjudicator=('adjudicator-controller',['evaluator']))
     authority = {'schema_version':'evidence-trust-policy/v1','policy_id':'fixture-authority','policy_revision':'1',
         'not_before':now(),'expires_at':until,
         'principals':{principal:{'controller':controller,'roles':roles,'keys':{principal+'-key':keys[principal].hex()}}
@@ -127,6 +133,13 @@ def provision(base, objective, *, scenario='repair', observation_sink=None):
             receipt = workspace.usage.transact(attest(command,'usage','usage',keys),artifacts=artifacts)
             checkpoint = receipt['checkpoint']
     worker = Path(__file__).with_name('fake_workers.py').resolve()
+    if finite:
+        from finite_host import provision_services
+        runtime = provision_services(root, private, control, workers, keys, run_policy, policy_doc['rubric'], until,
+            observation_sink=observation_sink)
+        return root, runtime, {'setup_ready': True, 'source_admitted': captured.get('state', captured.get('status')),
+            'scenario': 'finite-structured-observation', 'observation_class': 'fixture_mechanics',
+            'services': str(private/'services.py'), 'profile_version': runtime.execution.profile.document()['schema_version']}
     commands = {role.config_ref:[sys.executable,str(worker),'generator' if role.config_ref=='planner' else role.config_ref,scenario] for role in roles}
     issuer = QualificationAuthority('fixture-only-issuer',keys['qualifier'],'generator-controller')
     cases = [{'case_id':'case-'+str(i),'family_id':'family-'+str(i//10),

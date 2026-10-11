@@ -14,6 +14,7 @@ import json
 import math
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, NoReturn, TypedDict
 
 from .errors import UsageError
@@ -180,12 +181,8 @@ def _nullable(shape: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [shape, {"type": "null"}]}
 
 
-def schemas() -> dict[str, dict[str, Any]]:
-    """Return detached JSON Schema documents for the supported envelope versions.
-
-    Calendar validity, lease arithmetic and stored-parent/result correlation
-    also require the documented semantic validators. Schemas confer no grants.
-    """
+def _build_schemas() -> dict[str, dict[str, Any]]:
+    """Construct the closed source declarations without caller data."""
     ident = {**_string(128), "pattern": r"^[a-zA-Z0-9][a-zA-Z0-9._:-]*$(?![\s\S])"}
     original = _nullable({"type": "string", "minLength": 1, "maxLength": 65_536})
     utc = {"type": "string", "maxLength": 32, "pattern": _UTC_PATTERN, "format": "date-time"}
@@ -289,18 +286,38 @@ def schemas() -> dict[str, dict[str, Any]]:
                           for name, shape in ((JOB, job), (JOB_V2, job_v2), (JOB_V3, job_v3), (JOB_V4, job_v4), (RESULT, result), (DECISION, decision))})
 
 
+@lru_cache(maxsize=1)
+def _schema_bytes() -> tuple[tuple[str, bytes], ...]:
+    """Retain validated immutable declarations, never caller validation results."""
+    encoded = []
+    for name, shape in _build_schemas().items():
+        _bounded_tree(shape)
+        encoded.append((name, _canonical(shape)))
+    return tuple(encoded)
+
+
+def schemas() -> dict[str, dict[str, Any]]:
+    """Return detached JSON Schema documents for the supported envelope versions.
+
+    Calendar validity, lease arithmetic and stored-parent/result correlation
+    also require the documented semantic validators. Schemas confer no grants.
+    """
+    return {name: json.loads(raw) for name, raw in _schema_bytes()}
+
+
 def schema_document(name: str) -> dict[str, Any]:
     """Return one supported closed schema; unknown versions fail explicitly."""
-    catalog = schemas()
-    if type(name) is not str or name not in catalog:
-        _refuse("VERSION_UNSUPPORTED", "/schema_version")
-    return catalog[name]
+    if type(name) is str:
+        for declared, raw in _schema_bytes():
+            if declared == name:
+                return json.loads(raw)
+    _refuse("VERSION_UNSUPPORTED", "/schema_version")
 
 
 def schema_catalog() -> dict[str, Any]:
     """Advertise only inert document support, limits and semantic requirements."""
     return {
-        "schema_ids": sorted(schemas()), "roles": list(ROLES), "operations": list(OPERATIONS),
+        "schema_ids": sorted(name for name, _raw in _schema_bytes()), "roles": list(ROLES), "operations": list(OPERATIONS),
         "limits": {"bytes": MAX_BYTES, "depth": MAX_DEPTH, "nodes": MAX_NODES, "lease_seconds": MAX_LEASE_SECONDS},
         "authority_granted": False, "evidence_accepted": False,
         "context_requirements": {"job": "explicit UTC clock; stored parent for poll/cancel", "result": "complete stored job and explicit UTC clock"},

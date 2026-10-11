@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -19,6 +20,12 @@ REQUIRED_CATEGORIES = frozenset({
     "replay", "request-race", "permission-revocation", "output-substitution", "cancellation",
     "context-overload", "unsupported-format", "hostile-evaluator-generator", "forged-role",
     "colluding-output", "hidden-answer-leakage", "threshold-editing", "judge-order", "infinite-repair",
+})
+AUTOMATIC_CATEGORIES = frozenset({
+    "supported-claim", "reversed-quote", "missing-evidence", "judge-disagreement", "arithmetic-consensus",
+    "unqualified-judge", "human-policy", "spoofed-principal", "source-drift", "threshold-or-key-access",
+    "provider-timeout", "repair-oscillation", "durable-mutation-death", "unattended-transports",
+    "simulated-approval", "absent-usage", "ungranted-delivery", "truncated-context",
 })
 
 
@@ -41,6 +48,78 @@ def hash_file(path):
             after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size):
         raise ValueError("acceptance_input_changed_while_reading")
     return {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def failure_source_locations(root, paths):
+    """Index only explicitly selected frozen source declarations, without imports."""
+    locations = {}
+    for relative in sorted(set(paths)):
+        path = Path(relative)
+        if path.is_absolute() or ".." in path.parts or path.suffix != ".py" or len(relative.encode()) > 256:
+            continue
+        source = Path(root) / path
+        if source.is_symlink() or not source.is_file() or source.stat().st_size > MAX_RECORD_BYTES:
+            continue
+        raw = source.read_bytes()
+        try:
+            tree = ast.parse(raw)
+        except (SyntaxError, ValueError, UnicodeError):
+            continue
+        functions = [[node.name, min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)]),
+                      node.lineno, node.end_lineno] for node in ast.walk(tree)
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        locations[relative] = {"sha256": hashlib.sha256(raw).hexdigest(), "functions": functions}
+    return locations
+
+
+def validate_failure_diagnostic(value, *, nodeid, phase, run_nonce=None, capture_pid=None, source_locations=None):
+    """Validate bounded diagnostic identifiers; they supply no acceptance proof."""
+    value = bounded_json(value, 32768)
+    fields = {"schema_version", "nodeid", "phase", "run_nonce", "capture_pid", "exception_type",
+              "exception_module", "error_code", "reason", "error_path", "frames", "frame_count",
+              "frames_truncated", "redacted", "full_trace_replay", "exception_identity_sha256"}
+    private = ("credential", "password", "secret", "token", "authentication", "private_key", "signing_key")
+    def token(item, pattern):
+        return item is None or (type(item) is str and re.fullmatch(pattern, item) is not None
+            and not any(word in item.lower() for word in private))
+    if (type(value) is not dict or set(value) != fields or value["schema_version"] != "acceptance-failure-diagnostic/v1"
+            or value["nodeid"] != nodeid or value["phase"] != phase or phase not in {"setup", "call", "teardown"}
+            or type(value["capture_pid"]) is not int or value["capture_pid"] <= 0
+            or type(value["run_nonce"]) is not str or re.fullmatch(r"[a-f0-9]{32}", value["run_nonce"]) is None
+            or (run_nonce is not None and value["run_nonce"] != run_nonce)
+            or (capture_pid is not None and value["capture_pid"] != capture_pid)
+            or any(value[name] is not None for name in ("error_code", "reason", "error_path"))
+            or type(value["exception_identity_sha256"]) is not str
+            or re.fullmatch(r"[a-f0-9]{64}", value["exception_identity_sha256"]) is None
+            or (value["exception_type"] is None) != (value["exception_module"] is None)
+            or (value["exception_type"] is not None and (value["exception_module"] != "builtins"
+                or value["exception_type"] not in {"AssertionError", "AttributeError", "EOFError", "Exception",
+                    "FileNotFoundError", "ImportError", "IndexError", "KeyError", "LookupError", "ModuleNotFoundError",
+                    "NotImplementedError", "OSError", "PermissionError", "RecursionError", "RuntimeError", "StopIteration",
+                    "SyntaxError", "SystemExit", "TimeoutError", "TypeError", "UnicodeError", "ValueError", "ZeroDivisionError"}
+                or value["exception_identity_sha256"] != digest(["builtins", value["exception_type"]])))
+            or type(value["frames"]) is not list or type(value["frame_count"]) is not int or value["frame_count"] < 0
+            or len(value["frames"]) != min(32, value["frame_count"])
+            or type(value["frames_truncated"]) is not bool or value["frames_truncated"] != (value["frame_count"] > 32)
+            or value["redacted"] is not True or value["full_trace_replay"] != "unqualified"):
+        raise ValueError("acceptance_failure_diagnostic_binding")
+    for frame in value["frames"]:
+        if (type(frame) is not dict or set(frame) != {"path", "source_sha256", "line", "function", "location_sha256"}
+                or type(frame["location_sha256"]) is not str or re.fullmatch(r"[a-f0-9]{64}", frame["location_sha256"]) is None
+                or (frame["path"] is None and any(frame[name] is not None for name in ("source_sha256", "line", "function")))
+                or (frame["path"] is not None and (type(frame["path"]) is not str or len(frame["path"].encode()) > 256
+                    or Path(frame["path"]).is_absolute() or ".." in Path(frame["path"]).parts
+                    or type(frame["line"]) is not int or frame["line"] < 1
+                    or not token(frame["function"], r"[A-Za-z_][A-Za-z0-9_.-]{0,255}")
+                    or type(frame["source_sha256"]) is not str or re.fullmatch(r"[a-f0-9]{64}", frame["source_sha256"]) is None))):
+            raise ValueError("acceptance_failure_diagnostic_frame")
+        if frame["path"] is not None and source_locations is not None:
+            source = source_locations.get(frame["path"])
+            if source is None or source["sha256"] != frame["source_sha256"] or not any(
+                    name == frame["function"] and start <= frame["line"] <= end
+                    for name, _first, start, end in source["functions"]):
+                raise ValueError("acceptance_failure_diagnostic_source")
+    return value
 
 
 def bounded_json(value, maximum=MAX_RECORD_BYTES):
@@ -80,9 +159,11 @@ def bounded_json(value, maximum=MAX_RECORD_BYTES):
     return json.loads(raw)
 
 
-def policy():
+def policy(catalog="attack"):
     """Return detached fixed rules; challenge data cannot change thresholds."""
-    return {"version": "acceptance-policy/v2", "critical_bypasses_allowed": 0,
+    if catalog not in {"attack", "automatic"}:
+        raise ValueError("acceptance_catalog_profile")
+    value = {"version": "acceptance-policy/v2", "critical_bypasses_allowed": 0,
             "execution_order": "seeded-case-priority-module-blocks/v1",
             "all_exact_nodes_required": True, "all_assertions_required": True,
             "retry_budget": 0, "workers": 1, "max_cases": MAX_CASES, "max_nodes": MAX_NODES,
@@ -91,6 +172,19 @@ def policy():
             "all_challenges_critical": True, "max_artifacts_per_node": 32,
             "max_native_bytes_per_node": 8 * MAX_RECORD_BYTES, "max_native_file_bytes": MAX_RECORD_BYTES,
             "max_projected_records": 32, "max_owner_result_bytes": 32768, "max_event_bytes": 65536}
+    if catalog == "automatic":
+        value.update(catalog_profile="automatic", required_categories=sorted(AUTOMATIC_CATEGORIES))
+    return value
+
+
+def catalog_profile(cases):
+    """Recognize only the two fixed complete obligation families."""
+    categories = {category for case in cases for category in case["categories"]}
+    if categories == REQUIRED_CATEGORIES:
+        return "attack"
+    if categories == AUTOMATIC_CATEGORIES:
+        return "automatic"
+    raise ValueError("acceptance_category_inventory_incomplete")
 
 
 def validate_cases(cases):
@@ -108,7 +202,7 @@ def validate_cases(cases):
                 or type(case["categories"]) is not list or not case["categories"]
                 or any(type(category) is not str for category in case["categories"])
                 or len(set(case["categories"])) != len(case["categories"])
-                or not set(case["categories"]) <= REQUIRED_CATEGORIES
+                or not set(case["categories"]) <= REQUIRED_CATEGORIES | AUTOMATIC_CATEGORIES
                 or type(case["selectors"]) is not list or not 1 <= len(case["selectors"]) <= MAX_NODES):
             raise ValueError("acceptance_case_shape")
         identifiers.add(case["id"])
@@ -119,8 +213,7 @@ def validate_cases(cases):
                     or ".." in Path(selector.split("::")[0]).parts or selector in selectors):
                 raise ValueError("acceptance_selector_shape_or_duplicate")
             selectors.add(selector)
-    if categories != REQUIRED_CATEGORIES:
-        raise ValueError("acceptance_category_inventory_incomplete")
+    catalog_profile(cases)
     return cases
 
 
@@ -153,7 +246,7 @@ def freeze_manifest(cases, nodeids, *, inputs, seed=0, timeout_seconds=1200):
     priority_nodes = [node for identifier in order for node in nodeids if membership[node] == identifier]
     modules = list(dict.fromkeys(node.split("::", 1)[0] for node in priority_nodes))
     exact = [node for module in modules for node in priority_nodes if node.split("::", 1)[0] == module]
-    value = {"schema_version": "acceptance-manifest/v2", "cases": cases, "policy": policy(),
+    value = {"schema_version": "acceptance-manifest/v2", "cases": cases, "policy": policy(catalog_profile(cases)),
              "inputs": bounded_json(inputs), "seed": seed, "challenge_priority": order, "module_order": modules,
              "timeout_seconds": timeout_seconds, "collected_nodeids": list(nodeids),
              "exact_nodeids": exact, "membership": membership}
@@ -179,8 +272,12 @@ def grade_evidence(manifest, events, *, drift=False, process_complete=False, evi
     """Join one ordered actual-node lifecycle; known failures dominate gaps."""
     failures, gaps = [], []
     supplied = manifest
-    if type(supplied) is dict and supplied.get("policy") != policy():
-        failures.append("policy_drift")
+    if type(supplied) is dict:
+        try:
+            if supplied.get("policy") != policy(catalog_profile(supplied["cases"])):
+                failures.append("policy_drift")
+        except (ValueError, TypeError, KeyError):
+            failures.append("policy_drift")
     try:
         manifest = validate_manifest(supplied)
     except (ValueError, TypeError, KeyError, UnicodeError):
@@ -226,13 +323,20 @@ def grade_evidence(manifest, events, *, drift=False, process_complete=False, evi
             continue
         if kind == "report":
             required = {"event", "nodeid", "phase", "outcome", "wasxfail", "assertion_failure"}
-            if (not required <= set(event) or set(event) - required - {"failure_sha256"}
+            if (not required <= set(event) or set(event) - required - {"failure_sha256", "failure_diagnostic"}
                     or type(event["phase"]) is not str or event["phase"] not in {"setup", "call", "teardown"}
                     or type(event["outcome"]) is not str or event["outcome"] not in {"passed", "failed", "skipped"}
                     or type(event["assertion_failure"]) is not bool
                     or (event["wasxfail"] is not None and type(event["wasxfail"]) is not str)):
                 gaps.append("malformed_phase")
                 continue
+            if "failure_diagnostic" in event:
+                try:
+                    if event["outcome"] != "failed" or re.fullmatch(r"[a-f0-9]{64}", event.get("failure_sha256", "")) is None:
+                        raise ValueError("acceptance_failure_diagnostic_phase")
+                    validate_failure_diagnostic(event["failure_diagnostic"], nodeid=node, phase=event["phase"])
+                except (ValueError, TypeError, KeyError):
+                    gaps.append("malformed_failure_diagnostic")
             phase = event["phase"]
             allowed = {"setup": {"setup"}, "call": {"call", "asserted"}, "teardown": {"teardown", "setup_failed"}}
             if state not in allowed[phase]:

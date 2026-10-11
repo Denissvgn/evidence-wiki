@@ -16,7 +16,7 @@ from evidence_wiki.finite_domain import DOMAIN, observe_domain
 from evidence_wiki.qualification_calibration import CalibrationAuthority, calibration_suite, digest
 from evidence_wiki.reference_oracles import protected_cases
 from evidence_wiki.run_policy import RunPolicy
-from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
+from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3, WorkflowContractError
 from tests.test_finite_domain import inputs as domain_inputs
 from tests.test_qualification_calibration import EXPIRY, NOW, AuthenticatedHost
 from tests.test_run_policy import policy_document
@@ -137,7 +137,8 @@ def unlocked_gate(counter):
 def refresh_boundaries(monkeypatch, candidate, *, behavior="normal"):
     counter, recorded, calls = [0], [], []
     domain = copy.deepcopy(candidate.domain)
-    session = SimpleNamespace(execution=SimpleNamespace(profile=candidate.profile, qualifications=candidate.registry), root="/workspace")
+    session = SimpleNamespace(execution=SimpleNamespace(profile=candidate.profile, qualifications=candidate.registry),
+        root="/workspace", context=SimpleNamespace(require_grant=lambda *_: None))
     def service(request):
         calls.append(copy.deepcopy(request))
         assert counter[0] == 0, "External qualification callback ran inside canonical coordination gate."
@@ -154,8 +155,11 @@ def refresh_boundaries(monkeypatch, candidate, *, behavior="normal"):
     session.execution.executor = SimpleNamespace(qualification_configuration=service)
     monkeypatch.setattr(driver, "gate", lambda *_args, **_kwargs: unlocked_gate(counter))
     monkeypatch.setattr(driver, "_begin", lambda *_args: {"state": {"current": "answering"}})
+    monkeypatch.setattr(driver, "require_machine_compatible", lambda *_args: None)
     monkeypatch.setattr(probes, "domain_observation", lambda *_args: copy.deepcopy(domain))
     monkeypatch.setattr(driver, "deadline", lambda *_args: datetime.now(timezone.utc) + timedelta(seconds=60))
+    monkeypatch.setattr(driver, "retained", lambda *_args: [])
+    monkeypatch.setattr(driver, "execution_budget_overrun", lambda *_args: False)
     monkeypatch.setattr(driver, "append", lambda _session, kind, identifier, data: recorded.append((kind, identifier, copy.deepcopy(data))))
     return session, recorded, calls
 
@@ -177,6 +181,48 @@ def test_pure_qualification_gate_does_not_invoke_external_services(monkeypatch, 
     assert rows(candidate)[0]["qualified"] is True
 
 
+@pytest.mark.parametrize("failure", ["intake_grant", "evaluate_grant", "deadline", "overrun"])
+def test_explicit_current_probe_cannot_dispatch_without_original_authority_or_budget(monkeypatch, candidate, failure):
+    session, recorded, calls = refresh_boundaries(monkeypatch, candidate)
+    if failure.endswith("grant"):
+        grant = "research_session." + ("intake_observation" if failure == "intake_grant" else "host_job.evaluate")
+        def require(wanted):
+            if wanted == grant:
+                raise PermissionError("Missing explicit host grant.")
+        session.context.require_grant = require
+        expected = PermissionError
+    else:
+        expected = WorkflowContractError
+        if failure == "deadline":
+            monkeypatch.setattr(driver, "deadline", lambda *_: datetime.now(timezone.utc) - timedelta(seconds=1))
+        else:
+            monkeypatch.setattr(driver, "execution_budget_overrun", lambda *_: True)
+    with pytest.raises(expected) as caught:
+        probes.refresh(session, "bounded-current")
+    if expected is WorkflowContractError:
+        assert caught.value.error_code == "RESEARCH_BUDGET_EXHAUSTED"
+    assert not calls and not recorded
+
+
+def test_budget_loss_during_callback_retains_unknown_witness(monkeypatch, candidate):
+    session, recorded, calls = refresh_boundaries(monkeypatch, candidate)
+    monkeypatch.setattr(driver, "execution_budget_overrun", lambda *_: bool(calls))
+    probes.refresh(session, "bounded-current")
+    assert len(calls) == len(recorded) == 1
+    probe = recorded[0][2]["probe"]
+    assert not probe["configurations"] and probe["reasons"] == ["qualification_budget_exhausted"]
+
+
+def test_current_probe_observes_fresh_nonce_each_time_without_extending_lifetime(monkeypatch, candidate):
+    session, recorded, calls = refresh_boundaries(monkeypatch, candidate)
+    probes.refresh(session, "first-current")
+    probes.refresh(session, "second-current")
+    assert len(calls) == len(recorded) == 2 and calls[0]["nonce"] != calls[1]["nonce"]
+    for _, _, data in recorded:
+        probe = data["probe"]
+        assert (datetime.fromisoformat(probe["expires_utc"]) - datetime.fromisoformat(probe["observed_utc"])).total_seconds() == 30
+
+
 def replay_boundaries(monkeypatch, *, terminal=True, state="complete"):
     from evidence_wiki.research_session_contracts import STEP_V2
     from tests.test_execution_permission_adversarial import accepted_observation, isolated_boundaries
@@ -185,6 +231,8 @@ def replay_boundaries(monkeypatch, *, terminal=True, state="complete"):
     policy = RunPolicy(native_policy_document())
     isolated = isolated_boundaries(monkeypatch, policy)
     isolated.session.execution.profile.calibration = object()
+    isolated.session.execution.profile.readability = None
+    monkeypatch.setattr(driver, "machine_compatible", lambda *_: True)
     observed = accepted_observation(policy, 1)
     step = {"schema_version": STEP_V2, "request_id": "replay", "run_id": isolated.session.run_id,
         "binding_id": DIGEST, "before_basis_id": DIGEST, "outcome": "accepted" if terminal else "advanced",

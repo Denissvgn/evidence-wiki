@@ -16,6 +16,8 @@ import atexit
 import contextlib
 import hashlib
 import importlib.util
+import os
+import stat
 import sys
 import threading
 from collections import OrderedDict
@@ -64,6 +66,75 @@ _COMPILED_SOURCE: OrderedDict[tuple[str, bytes, str | None, int], tuple[CodeType
 _COMPILED_SOURCE_BYTES = 0
 _COMPILED_SOURCE_MAX_ENTRIES = 512
 _COMPILED_SOURCE_MAX_BYTES = 32 * 1024 * 1024
+_SCRIPT_TREE_MEMO: OrderedDict[Path, tuple[tuple, tuple, str, int]] = OrderedDict()
+_SCRIPT_TREE_MEMO_BYTES = 0
+_SCRIPT_TREE_MEMO_MAX_ROOTS = 128
+_SCRIPT_TREE_MEMO_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _script_tree_signature(root: Path) -> tuple:
+    """Observe the loader's original name/size/time/inode signature freshly."""
+    entries = []
+    with os.scandir(root) as children:
+        for child in children:
+            if not child.name.endswith(".py"):
+                continue
+            try:
+                observed = child.stat(follow_symlinks=True)
+            except OSError:
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                continue
+            entries.append((child.name, observed.st_size, observed.st_mtime_ns,
+                            observed.st_ctime_ns, observed.st_ino))
+    return tuple(sorted(entries))
+
+
+def _script_content_tree_hash(root: Path) -> str:
+    value = hashlib.sha256()
+    for child in sorted(root.glob("*.py"), key=lambda item: item.name):
+        if not child.is_file():
+            continue
+        value.update(child.name.encode("utf-8", errors="surrogatepass"))
+        value.update(b"\0")
+        value.update(hashlib.sha256(child.read_bytes()).digest())
+    return value.hexdigest()
+
+
+def script_tree_hash(root: Path) -> str:
+    """Share only an owner-computed code digest behind fresh original metadata.
+
+    This retains the copied loader's stat-signature limitations. No source bytes,
+    parsed configuration, permissions or current eligibility are remembered.
+    The private memo bounds payload bytes and root count; larger trees still hash
+    normally without being retained. No caller supplies computed cache material.
+    """
+    global _SCRIPT_TREE_MEMO_BYTES
+    root = Path(root).expanduser().resolve()
+    with _LOAD_LOCK:
+        owner_code = (_script_tree_signature.__code__, _script_content_tree_hash.__code__)
+        before = _script_tree_signature(root)
+        previous = _SCRIPT_TREE_MEMO.get(root)
+        if previous is not None and previous[0] == owner_code and previous[1] == before:
+            _SCRIPT_TREE_MEMO.move_to_end(root)
+            return previous[2]
+        if previous is not None:
+            _SCRIPT_TREE_MEMO_BYTES -= previous[3]
+            del _SCRIPT_TREE_MEMO[root]
+        digest = _script_content_tree_hash(root)
+        after = _script_tree_signature(root)
+        if after == before:
+            size = (sys.getsizeof(before) + sum(sys.getsizeof(row) +
+                    sum(sys.getsizeof(item) for item in row) for row in before) +
+                    len(str(root).encode("utf-8", errors="surrogatepass")) + sys.getsizeof(digest))
+            if size <= _SCRIPT_TREE_MEMO_MAX_BYTES:
+                while _SCRIPT_TREE_MEMO and (len(_SCRIPT_TREE_MEMO) >= _SCRIPT_TREE_MEMO_MAX_ROOTS or
+                        _SCRIPT_TREE_MEMO_BYTES + size > _SCRIPT_TREE_MEMO_MAX_BYTES):
+                    _key, dropped = _SCRIPT_TREE_MEMO.popitem(last=False)
+                    _SCRIPT_TREE_MEMO_BYTES -= dropped[3]
+                _SCRIPT_TREE_MEMO[root] = (owner_code, after, digest, size)
+                _SCRIPT_TREE_MEMO_BYTES += size
+        return digest
 
 
 def compiled_source_code(source: bytes, filename: str) -> CodeType:
@@ -202,7 +273,8 @@ def owner_generation() -> tuple[Path, str]:
     """Select the exact owner tree used by packaged in-process calls."""
     root = shared_assets_root() / resources.STARTER_DIR / "scripts"
     with _LOAD_LOCK:
-        return root.resolve(), _load_workspace_loader(root)._tree_hash(root.resolve())
+        _load_workspace_loader(root)
+        return root.resolve(), script_tree_hash(root)
 
 
 def load_packaged_script(assets_root: Path, stem: str) -> ModuleType:

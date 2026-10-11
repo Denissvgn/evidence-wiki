@@ -12,7 +12,7 @@ DOMAIN = "finite-structured-observation"
 OBSERVATION = "research-reference-domain-observation/v1"
 SOURCE = "finite-structured-observation/v1"
 DESCRIPTOR = {"schema_version": "research-reference-domain-descriptor/v1", "domain_ref": DOMAIN,
-    "source_schema": SOURCE, "classifier_version": "finite-observation-grammar/v2",
+    "source_schema": SOURCE, "classifier_version": "finite-observation-grammar/v3",
     "source_container": "plain JSON or exact normalized sections with finite JSON Extracted Text and no additional factual sections",
     "operations": ["sum", "difference", "product", "mean", "ratio"],
     "original_grammar": "Assess the exact declared finite observation[ for {scope}[ at {time}]].",
@@ -88,10 +88,12 @@ def finite_content(content):
                 for index, (name, match) in enumerate(zip(names, headings, strict=True))}
     empty = {"", "None extracted.", "- None extracted.", "None.", "- None.",
              "- None recorded.", "- No outline extracted.", "- No warnings."}
-    _require(sections["Abstract"] in empty | {"Host-provided text with explicit capture qualifications."})
+    _require(sections["Abstract"] in empty | {"Host-provided text with explicit capture qualifications.",
+        "Native extraction of a retained capture."})
     _require(all(sections[name] in empty for name in ("Outline", "Figures and Tables")))
     _require(sections["Parse Warnings"] in empty | {
-        "- Host origin, scope, completeness and rights are caller declarations; captured bytes are checked independently."})
+        "- Host origin, scope, completeness and rights are caller declarations; captured bytes are checked independently.",
+        "- Origin, scope, rights and completeness remain declarations; extraction and stored consistency confer no semantic approval."})
     return sections["Extracted Text"]
 
 

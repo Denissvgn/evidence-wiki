@@ -3,8 +3,6 @@
 import argparse
 import contextlib
 import json
-import os
-import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,34 +14,7 @@ MAX_OUTPUT = 1_048_576
 
 
 def load_services(path, root):
-    supplied = Path(path).expanduser().absolute()
-    if supplied.is_symlink() or supplied.resolve() != supplied:
-        raise ValueError('Live service factory must be a canonical owner-private file.')
-    descriptor = os.open(supplied,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 65_536:
-            raise ValueError('Live service factory must be an owner-private regular file, at most 64 KiB.')
-        data = b''
-        while chunk := os.read(descriptor,min(65536,65537-len(data))):
-            data += chunk
-            if len(data)>65536:
-                raise ValueError('Service factory exceeds byte bound.')
-        fields = ('st_dev','st_ino','st_mode','st_uid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
-        frozen = tuple(getattr(info,name) for name in fields)
-        if any(tuple(getattr(value,name) for name in fields)!=frozen for value in (os.fstat(descriptor),supplied.stat())):
-            raise ValueError('Service factory changed during selection.')
-    finally:
-        os.close(descriptor)
-    namespace = {'__name__':'selected_live_host_services','__file__':str(supplied)}
-    try:
-        exec(compile(data,str(supplied),'exec'),namespace)  # noqa: S102 - explicit owner-private trusted host code, never worker input.
-        runtime = namespace['build_runtime'](root)
-    except (Exception,SystemExit):
-        raise ValueError('Selected host services could not be loaded.') from None
-    if type(runtime) is not HostRuntime:
-        raise ValueError('The trusted factory must return public HostRuntime services.')
-    return runtime
+    return HostRuntime.from_factory(path, root)
 
 
 def live_runtime(args):
@@ -94,7 +65,7 @@ def main(argv=None):
     parser.add_argument('--workspace',help='Existing live host-provisioned workspace.')
     parser.add_argument('--runtime',help='Explicit owner-private runtime JSON (native supported file profile).')
     parser.add_argument('--services',help='Explicit trusted owner-private Python build_runtime(root) factory, for complete public services.')
-    parser.add_argument('--scenario',choices=('repair','abstain'),default='repair')
+    parser.add_argument('--scenario',choices=('repair','abstain','finite'),default='repair')
     parser.add_argument('--run-id',default='study')
     parser.add_argument('--request-id',default='drive')
     parser.add_argument('--max-steps',type=int,default=64)
@@ -108,8 +79,12 @@ def main(argv=None):
             if args.mode=='fake':
                 if not args.output or args.runtime or args.services or args.workspace:
                     raise ValueError('Fake mode requires a new --output and accepts no live services.')
-                from fixture_host import provision
-                root,runtime,setup = provision(Path(args.output),'What observation was retained?',scenario=args.scenario)
+                if args.scenario == 'finite':
+                    from finite_host import provision
+                    root,runtime,setup = provision(Path(args.output))
+                else:
+                    from fixture_host import provision
+                    root,runtime,setup = provision(Path(args.output),'What observation was retained?',scenario=args.scenario)
             else:
                 root,runtime,setup = live_runtime(args)
             result = execute(root,runtime,run_id=args.run_id,request_id=args.request_id,max_steps=args.max_steps,

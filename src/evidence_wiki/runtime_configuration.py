@@ -4,6 +4,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ._pack_io import json_document
@@ -93,51 +94,55 @@ class HostRuntime:
         return cls(policy, context, execution)
 
     @classmethod
-    def from_file(cls, value):
-        if value == "-":
-            refuse("stdin_runtime_forbidden")
-        descriptors = []
+    def from_factory(cls, value, workspace_root, *, operation_control=None):
+        """Select bounded trusted host code explicitly, outside worker inputs.
+
+        A timed-out factory may still have effects. It is unavailable, never
+        described as cancelled or retried. Hosts must supervise the enclosing
+        process, including filesystem/control setup, and keep this selection
+        outside model-controlled arguments. Factories must not read stdin or
+        write protocol stdout/stderr; their callback wait alone is bounded.
+        """
+        from .operation_control import OperationControl, checkpoint
+        from .research_execution import bounded_host_call
+
+        owned = operation_control is None
+        control = operation_control if not owned else OperationControl(
+            deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(), timeout_seconds=60)
         try:
-            supplied = Path(value).expanduser().absolute()
-            if supplied.is_symlink() or ".." in supplied.parts:
-                refuse("runtime_path_invalid")
-            if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
-                refuse("private_runtime_platform_unsupported")
-            descriptor = os.open(supplied.anchor, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-            descriptors.append(descriptor)
-            for part in supplied.parts[1:-1]:
-                descriptor = os.open(part, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=descriptor)
-                descriptors.append(descriptor)
-            file = os.open(supplied.name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=descriptor)
-            descriptors.append(file)
-            before = os.fstat(file)
-            if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o077 or before.st_nlink != 1
-                    or before.st_uid != os.geteuid() or before.st_size > 1_048_576):
-                refuse("runtime_file_not_private")
-            chunks, size = [], 0
-            while chunk := os.read(file, min(65536, 1_048_577-size)):
-                size += len(chunk)
-                if size > 1_048_576:
-                    refuse("runtime_file_bound")
-                chunks.append(chunk)
-            after = os.fstat(file)
-            current = os.stat(supplied.name, dir_fd=descriptor, follow_symlinks=False)
-            fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
-            frozen = tuple(getattr(before, name) for name in fields)
-            if any(tuple(getattr(view, name) for name in fields) != frozen for view in (after, current)):
-                refuse("runtime_file_changed")
-            for parent, child, part in zip(descriptors[:-2], descriptors[1:-1], supplied.parts[1:-1], strict=True):
-                actual, held = os.stat(part, dir_fd=parent, follow_symlinks=False), os.fstat(child)
-                if (actual.st_dev,actual.st_ino)!=(held.st_dev,held.st_ino):
-                    refuse("runtime_path_changed")
-            return cls.from_document(json_document(b"".join(chunks)))
+            checkpoint(control, "factory_selection")
+            supplied, data = _private_bytes(value, 65_536)
+            root = Path(workspace_root).expanduser().resolve(strict=True)
+            if not root.is_dir():
+                refuse("factory_workspace_invalid")
+            def build():
+                namespace = {"__name__": "selected_host_services", "__file__": str(supplied)}
+                exec(compile(data, str(supplied), "exec"), namespace)  # noqa: S102 -- explicit trusted owner-private host code.
+                return namespace["build_runtime"](root)
+            runtime, reason = bounded_host_call(build, (), min(60, control.remaining_seconds("factory_execution")))
+            if reason is not None:
+                refuse("factory_execution_uncertain" if reason == "host_wait_expired" else "factory_execution_unavailable")
+            checkpoint(control, "factory_returned")
+            if type(runtime) is not cls:
+                refuse("factory_services_invalid")
+            return runtime
         except EvidenceWikiError:
             raise
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-            refuse("runtime_file_unavailable_or_invalid")
+            refuse("factory_unavailable_or_invalid")
         finally:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
+            if owned:
+                control.close()
+
+    @classmethod
+    def from_file(cls, value):
+        try:
+            _supplied, data = _private_bytes(value, 1_048_576)
+            return cls.from_document(json_document(data))
+        except EvidenceWikiError:
+            raise
+        except (ValueError, TypeError, KeyError, RuntimeError):
+            refuse("runtime_file_unavailable_or_invalid")
 
     @classmethod
     def from_document(cls, data):
@@ -165,3 +170,51 @@ class HostRuntime:
             raise
         except (ValueError, TypeError, KeyError, OSError):
             refuse("runtime_configuration_invalid")
+
+
+def _private_bytes(value, maximum):
+    """Read one current owner-private regular file through anchored ancestors."""
+    if value == "-":
+        refuse("stdin_runtime_forbidden")
+    descriptors = []
+    try:
+        supplied = Path(value).expanduser().absolute()
+        if supplied.is_symlink() or ".." in supplied.parts:
+            refuse("runtime_path_invalid")
+        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+            refuse("private_runtime_platform_unsupported")
+        descriptor = os.open(supplied.anchor, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        descriptors.append(descriptor)
+        for part in supplied.parts[1:-1]:
+            descriptor = os.open(part, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=descriptor)
+            descriptors.append(descriptor)
+        file = os.open(supplied.name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=descriptor)
+        descriptors.append(file)
+        before = os.fstat(file)
+        if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o077 or before.st_nlink != 1
+                or before.st_uid != os.geteuid() or before.st_size > maximum):
+            refuse("runtime_file_not_private")
+        chunks, size = [], 0
+        while chunk := os.read(file, min(65536, maximum+1-size)):
+            size += len(chunk)
+            if size > maximum:
+                refuse("runtime_file_bound")
+            chunks.append(chunk)
+        after = os.fstat(file)
+        current = os.stat(supplied.name, dir_fd=descriptor, follow_symlinks=False)
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        frozen = tuple(getattr(before, name) for name in fields)
+        if any(tuple(getattr(view, name) for name in fields) != frozen for view in (after, current)):
+            refuse("runtime_file_changed")
+        for parent, child, part in zip(descriptors[:-2], descriptors[1:-1], supplied.parts[1:-1], strict=True):
+            actual, held = os.stat(part, dir_fd=parent, follow_symlinks=False), os.fstat(child)
+            if (actual.st_dev,actual.st_ino)!=(held.st_dev,held.st_ino):
+                refuse("runtime_path_changed")
+        return supplied, b"".join(chunks)
+    except EvidenceWikiError:
+        raise
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        refuse("runtime_file_unavailable_or_invalid")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)

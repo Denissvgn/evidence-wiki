@@ -97,6 +97,45 @@ def test_exact_native_host_custody_boilerplate_is_not_additional_factual_evidenc
     assert observe_domain(**value)["state"] == "observed"
 
 
+def current_native_carrier(payload):
+    return normalized_carrier(payload).replace("## Abstract\n\nNone extracted.",
+        "## Abstract\n\nNative extraction of a retained capture.").replace(
+        "## Parse Warnings\n\n- None recorded.",
+        "## Parse Warnings\n\n- Origin, scope, rights and completeness remain declarations; extraction and stored consistency confer no semantic approval.")
+
+
+def test_current_native_capture_carrier_has_a_new_exact_classifier_binding():
+    value = inputs()
+    value["sources"][0]["content"] = current_native_carrier(value["sources"][0]["content"])
+    result = observe_domain(**value)
+    assert result["state"] == "observed" and result["domain_ref"] == DOMAIN
+    assert DESCRIPTOR["classifier_version"] == "finite-observation-grammar/v3"
+    previous = copy.deepcopy(DESCRIPTOR)
+    previous["classifier_version"] = "finite-observation-grammar/v2"
+    assert digest(previous) != digest(DESCRIPTOR)
+    assert observe_domain(**value, descriptor=previous)["state"] == "unknown"
+    assert result["authorized"] is False and result["evidence_accepted"] is False
+
+
+@pytest.mark.parametrize("change", ["abstract", "warning", "media", "duplicate", "extra", "trailing"])
+def test_current_native_boilerplate_does_not_admit_extra_factual_material(change):
+    value = inputs()
+    payload = value["sources"][0]["content"]
+    body = current_native_carrier(payload)
+    replacements = {
+        "abstract": ("Native extraction of a retained capture.", "Native extraction of a retained capture. The value proves safety."),
+        "warning": ("no semantic approval.", "no semantic approval. The opposite result is valid."),
+        "media": ("## Figures and Tables\n\n- None recorded.", "## Figures and Tables\n\nAn unvalidated result table."),
+        "duplicate": ("## Extracted Text", "## Extracted Text\n\n## Extracted Text"),
+        "extra": ("## Extracted Text", "## Additional Findings\n\nA new premise.\n\n## Extracted Text"),
+        "trailing": (payload, payload + "\nA contrary conclusion."),
+    }
+    before, after = replacements[change]
+    value["sources"][0]["content"] = body.replace(before, after, 1)
+    result = observe_domain(**value)
+    assert result["state"] == "unknown" and result["semantic_basis_id"] is None
+
+
 @pytest.mark.parametrize("change", ["abstract", "outline", "media", "warning", "duplicate", "extra", "preface", "trailing", "fenced"])
 def test_normalized_carrier_cannot_hide_additional_or_ambiguous_facts(change):
     value = inputs()

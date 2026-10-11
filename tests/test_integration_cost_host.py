@@ -38,6 +38,25 @@ def observe(tmp_path, program="print('bounded output')", **options):
     return plan, argv, {key: options[key] for key in ("observer_key", "directory", "work_root")}, result
 
 
+@pytest.mark.parametrize("declared_timeout", [4200, 7200])
+def test_long_command_allowance_still_inherits_original_source_window(tmp_path, declared_timeout):
+    plan, argv, options, result = observe(tmp_path, timeout_seconds=declared_timeout)
+    intent = json.loads((options["directory"] / "selected.intent.json").read_bytes())
+    assert Decimal(intent["timeout_seconds"]) == declared_timeout
+    assert 0 < Decimal(intent["effective_timeout_seconds"]) < declared_timeout
+    assert result["receipt"]["status"] == "succeeded" and result["receipt"]["exit_code"] == 0
+    assert read_command_receipt(plan, "selected", argv, expected_receipt_sha256=result["receipt_sha256"], **options) == result
+    assert all(result["event"]["metrics"][name] is None for name in METRICS if name != "elapsed_seconds")
+
+
+@pytest.mark.parametrize("declared_timeout", [7200.01, float("inf"), float("nan")])
+def test_invalid_command_allowance_never_reserves_or_dispatches(tmp_path, monkeypatch, declared_timeout):
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: pytest.fail("invalid allowance dispatched"))
+    with pytest.raises(ValueError, match="cost_command_budget_invalid"):
+        observe(tmp_path, timeout_seconds=declared_timeout)
+    assert not list((tmp_path / "private").glob("*.json"))
+
+
 def test_receipt_authentication_replay_and_provider_usage_unknown(tmp_path, monkeypatch):
     plan, argv, options, result = observe(tmp_path)
     event = result["event"]

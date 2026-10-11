@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from _workspace_module_loader import load_workspace_module
+
 SCHEMA_VERSION = "1.0"
 STATUS_HEALTHY = "healthy"
 STATUS_DEGRADED = "degraded"
@@ -23,6 +25,7 @@ REQUIRED_FILES = (
 )
 REQUIRED_DIRECTORIES = ("scripts", "docs", "skills", "raw", "sources", "wiki")
 REQUIRED_CONFIG_SECTIONS = ("project", "raw", "sources", "wiki", "taxonomy", "ingest", "lint", "outputs", "integrations")
+_YAML_HELPER_CACHE = {}
 
 
 def finding(
@@ -62,7 +65,8 @@ def _load_config(project_root: Path, findings: list[dict[str, Any]]) -> dict[str
         )
         return {}
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        reader = load_workspace_module(Path(__file__).resolve().parent, "_yaml_safe", cache=_YAML_HELPER_CACHE)
+        document = reader.safe_load_current(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
         findings.append(
             finding(

@@ -107,6 +107,23 @@ def current_qualifications(session):
         originals=facts.view["accounting"]["original_outcomes"], packets=facts.packets, records=facts.records)
 
 
+def _current_identity(session):
+    """Reuse only an actual owner epoch's identity, with fresh eligibility.
+
+    Outside a held epoch this remains the ordinary complete current read. No
+    accounting, canonical release or usage view becomes a current substitute.
+    """
+    facts = _CURRENT_FACTS.get()
+    if facts is None:
+        return session.current()
+    if type(facts) is not _CurrentFacts:
+        refuse("CURRENT_OWNER_EPOCH_INVALID")
+    facts.require(session)
+    qualification = current_qualifications(session)
+    return detached({name: facts.view[name] for name in ("basis_id", "policy_id", "policy_compatible")} | {
+        "qualification": qualification})
+
+
 def child_id(identifier, label):
     """Stable bounded request identities for compound owner operations."""
     return identifier[:24] + "." + hashlib.sha256(canonical([identifier, label])).hexdigest()[:32]

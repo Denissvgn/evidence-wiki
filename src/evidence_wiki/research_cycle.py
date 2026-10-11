@@ -74,6 +74,12 @@ def drive(session, *, request_id, expected_basis_id=None, max_steps=64, planner_
     checkpoint(operation_control, "research_cycle_close")
     if step is None or not step["terminal"]:
         step = native.close_drive_bound(session,request_id=native.child_id(request_id,"bound"))
+    # The explicit write operation witnesses configuration again after durable
+    # finalization. Later reads still check this finite witness at their own time.
+    if (not step["historical"] and step["outcome"] in {"accepted", "partial"}
+            and session.execution.profile.calibration is not None):
+        from .calibration_probes import refresh
+        refresh(session, native.child_id(request_id, "closing_qualification"))
     current = session.current()
     records = session.execution.records(session)
     originals = _originals(current,records,terminal=step["terminal"])
