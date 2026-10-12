@@ -21,6 +21,12 @@
 
 ### Added
 
+- Decide release qualification automatically from pinned original conformance,
+  semantic, integration, cost, drift and uncertainty evidence. Frozen rules,
+  current-owner replay and exact citations preserve evidence classes and keep
+  fixture mechanics, bounded semantic assurance and observed business outcomes
+  separate. Decisions do not authorize or publish a release.
+
 - Compose bounded unattended qualification from original archive, acceptance,
   installed transport, reference and cost evidence with exact candidate replay.
   Separate product scenarios, expected abstentions and unresolved process stops
