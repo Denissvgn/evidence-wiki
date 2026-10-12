@@ -3,9 +3,57 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from evidence_wiki import Workspace
 from evidence_wiki import execution_session as native
 from tests.test_execution_session import fixture as fixture
+
+
+@pytest.mark.parametrize('operation', ['prepare', 'generate'])
+def test_calibrated_refresh_bootstrap_keeps_native_owner_action(monkeypatch, operation):
+    from evidence_wiki import execution_planning, refresh_session
+    session = SimpleNamespace(binding={'original_ids': ['q']},
+        execution=SimpleNamespace(profile=SimpleNamespace(calibration=object())))
+    records = [{'kind': 'execution_cycle', 'data': {'planner_config_ref': 'planner'}},
+        {'kind': 'execution_refresh', 'data': {'request_id': 'refresh',
+            'parent_usage_unknown': False, 'arguments': {'source_updates': []}}}]
+    view = {'qualification': {'state': 'unknown'}}
+    monkeypatch.setattr(execution_planning, 'configured', lambda *_: None)
+    if operation == 'generate':
+        records.extend([{'kind': 'execution_refresh_prepared', 'data': {'marker_sha256': 'marker'}},
+            {'kind': 'execution_prepared', 'data': {'original_id': 'q'}}])
+        monkeypatch.setattr(refresh_session, 'sha', lambda _: 'marker')
+        monkeypatch.setattr(refresh_session, 'owner', lambda _: SimpleNamespace(
+            capture_workspace=lambda _: SimpleNamespace(files={})))
+        session.root = 'root'
+    action = refresh_session.next_action(session, view, records)
+    assert action['operation'] == operation
+    assert execution_planning.proposed_action(session, view, records, action) is action
+    monkeypatch.setattr(native, '_terminal_action', lambda *_: {'operation': 'terminal'})
+    forged = dict(action, original_id='another-original')
+    assert execution_planning.proposed_action(session, view, records, forged)['operation'] == 'terminal'
+    assert execution_planning.proposed_action(session, view,
+        [row for row in records if row['kind'] != 'execution_refresh'], action)['operation'] == 'terminal'
+    instruction = next(row['data'] for row in records if row['kind'] == 'execution_refresh')
+    instruction['parent_usage_unknown'] = True
+    assert execution_planning.proposed_action(session, view, records, action)['operation'] == 'terminal'
+    instruction['parent_usage_unknown'] = False
+    if operation == 'prepare':
+        assert execution_planning.proposed_action(session, view, records,
+            dict(action, refresh_request_id='forged-refresh'))['operation'] == 'terminal'
+    else:
+        monkeypatch.setattr(refresh_session, 'sha', lambda _: 'changed-marker')
+        assert execution_planning.proposed_action(session, view, records, action)['operation'] == 'terminal'
+        monkeypatch.setattr(refresh_session, 'sha', lambda _: 'marker')
+        records.append({'kind': 'execution_applied', 'data': {'original_id': 'q', 'operation': 'generate'}})
+        assert execution_planning.proposed_action(session, view, records, action)['operation'] == 'terminal'
+        records.pop()
+    for refused in ['evaluate', 'repair', 'adjudicate']:
+        assert execution_planning.proposed_action(session, view, records,
+            {'operation': refused, 'original_id': 'q'})['operation'] == 'terminal'
+    session.execution.profile.calibration = None
+    assert execution_planning.proposed_action(session, view, records, action)['operation'] == 'terminal'
 
 
 def test_actual_planner_dispatch_authentication_and_application_before_draft(tmp_path, monkeypatch):

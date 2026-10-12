@@ -21,6 +21,12 @@
 
 ### Added
 
+- Run repeated native reference integrations through direct Python,
+  current-caller and scoped MCP routes, retaining same-workspace evidence changes,
+  original outcomes and measured burden. Frozen improvement rules preserve
+  missing work, current witness expiry and scoped usefulness without inferring
+  adoption or authorizing capability expansion.
+
 - Decide release qualification automatically from pinned original conformance,
   semantic, integration, cost, drift and uncertainty evidence. Frozen rules,
   current-owner replay and exact citations preserve evidence classes and keep

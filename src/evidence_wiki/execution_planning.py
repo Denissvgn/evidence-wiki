@@ -78,6 +78,17 @@ def proposed_action(session, view, records, owner_action):
         return owner_action
     configured(session,config_ref)
     if view["qualification"]["state"]!="qualified":
+        from .refresh_session import next_action, selected
+        instruction = selected(records)
+        if (session.execution.profile.calibration is not None and instruction is not None
+                and (owner_action["operation"] == "prepare"
+                    and owner_action.get("refresh_request_id") == instruction["request_id"]
+                    or owner_action["operation"] == "generate"
+                    and owner_action.get("reason") == "superseding_draft_required")
+                and owner_action == next_action(session, view, records)):
+            # Native refresh preparation and drafting establish the new review
+            # context; they do not consume a historical approval.
+            return owner_action
         from .execution_session import _terminal_action
         return _terminal_action(session,view,"blocked_external","qualification_unknown")
     key=digest({"basis_id":view["basis_id"],"owner_action":owner_action})

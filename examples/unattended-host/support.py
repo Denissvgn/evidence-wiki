@@ -59,6 +59,7 @@ GRANTS = {
     'run_controller.run_session_start','run_controller.run_session_record','run_controller.run_session_transition',
     'run_controller.run_session_finish','question_claim.run_claim','question_resolve.run_answer',
     'coverage_manifest.run_link','coverage_manifest.run_evaluate','evidence_usage.run_transact','evidence_usage.run_status',
+    'evidence_usage.run_materialize',
     'mutation_operations.revision','mutation_operations.prepare_request','mutation_operations.submit',
     'mutation_operations.inspect','mutation_operations.reconcile',
     'source_capture_operations.deliver','source_capture_operations.prepare',

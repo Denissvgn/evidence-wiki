@@ -204,6 +204,8 @@ accounting and independent replay.
 The [release decision guide](docs/release-qualification.md) describes frozen
 evidence rules, scoped qualification outcomes and current-owner replay without
 manual sign-off or publication.
+The [repeated integration guide](docs/repeated-integrations.md) covers scoped
+host scenarios, same-workspace evidence updates and frozen improvement selection.
 
 Managed execution refuses with `RUNNER_ISOLATION_UNAVAILABLE` when its required
 boundary is unavailable. The parent owns `runs/orchestrations/`; workers follow
