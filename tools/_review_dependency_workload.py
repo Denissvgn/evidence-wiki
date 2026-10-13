@@ -157,12 +157,13 @@ def failure_document(error):
         "FileNotFoundError", "PermissionError", "SystemExit", "TimeoutError", "ConfigError", "UsageError",
         "QualificationError", "ExecutionError", "MutationError", "WorkflowContractError", "_HostDeadline"}
     allowed_frames = {
-        "tools/run_review_dependency_workload.py": {"run_workload", "main", "validate_plan", "reference_plan", "read_pinned_artifact", "collect_journals"},
+        "tools/run_review_dependency_workload.py": {"run_workload", "main", "validate_plan", "reference_plan", "read_pinned_artifact", "collect_journals", "_owner_read"},
         "tools/_review_dependency_workload.py": {"provision", "drive", "call", "mutation", "retain", "reference_dependencies", "_deposit", "_example", "admit_diagnosed", "question_binding_preflight", "host_read_preflight"},
         "src/evidence_wiki/coverage_observation.py": {"observe"},
         "src/evidence_wiki/request_lifecycle_operations.py": {"_questions"},
         "src/evidence_wiki/research_session.py": {"guarded", "assemble_review_packet", "advance", "intake_observation", "_check"},
         "src/evidence_wiki/host_context.py": {"checked_operation", "require_grant", "require_path", "_refuse"},
+        "src/evidence_wiki/_host_qualification.py": {"guarded", "host_qualification", "_refuse"},
         "src/evidence_wiki/agent_qualification.py": {"issue", "registration", "_prepared_envelope", "_fail"},
         "src/evidence_wiki/execution_session.py": {"advance", "_apply", "_apply_owned", "_native_call", "_mutation"},
         "src/evidence_wiki/mutation_contracts.py": {"detached", "canonical", "checked", "refuse"}}
@@ -192,6 +193,8 @@ def failure_document(error):
         "workload_journal_collection_bound", "workload_artifact_binding_invalid", "workload_artifact_path_invalid",
         "workload_admission_diagnostics_invalid", "workload_admission_evidence_not_verified", "mechanical_grounding_unmatched",
         "workload_question_context_invalid", "workload_question_identity_collision"}
+    if getattr(error, "error_code", None) == "HOST_QUALIFICATION_REFUSED":
+        reasons |= {"attestation_current_context_mismatch", "native_current_review_changed"}
     details = getattr(error, "details", {})
     reason = details.get("reason") if type(details) is dict else None
     if type(reason) is not str or reason not in reasons:

@@ -114,3 +114,60 @@ def test_report_rejects_duplicate_or_reordered_boundary_cells(synthetic, indexes
     with pytest.raises(ConfigError) as caught:
         validate(HOST, result)
     assert caught.value.details["reason"] == "capability_matrix_selection_invalid"
+
+
+def test_signed_historical_review_survives_unrelated_global_basis_change_without_current_credit(tmp_path, monkeypatch):
+    import copy
+    from dataclasses import replace
+
+    from evidence_wiki import Workspace
+    from evidence_wiki import execution_session as native
+    from evidence_wiki.errors import EvidenceWikiError
+    from evidence_wiki.review_context import ReviewContext
+    from evidence_wiki.review_packet_execution import reserve_evaluator
+    from evidence_wiki.review_page_session import assembled
+    from tests.test_review_packet_execution import configured, finish
+
+    root, policy, execution, context, claim, _captured = configured.__wrapped__(tmp_path, monkeypatch)
+    context = replace(context, grants=context.grants | {"host_qualification.current", "service_authentication.status"})
+    with context.activate(), Workspace.open(root) as workspace:
+        with workspace.research.session(policy, run_id="retained-review", execution=execution) as session:
+            for config, task_role in (("profile-a", "evaluator"), ("profile-b", "critic")):
+                assembly_id = config + "-pages"
+                assembled(session, request_id=assembly_id, claim_id=claim["id"], task_role=task_role, page_chars=1024)
+                actual = reserve_evaluator(session, request_id=config + "-review", assembly_request_id=assembly_id,
+                    original_id="q", claim_id=claim["id"], config_ref=config)
+                completed = finish(session, actual, config)
+                native.intake(session, completed, request_id=config + "-final")
+                native._apply(session, actual.attempt_id)
+            records = execution.records(session)
+            attempts = [row["data"] for row in records if row["kind"] == "execution_attempt" and "review_context" in row["data"]]
+            assert attempts
+            retained = attempts[0]
+            attempt = execution.attempt(retained["attempt"])
+            packet = ReviewContext.restore(attempt.input_document["packet"], retained["review_context"])
+            before = workspace.strict.prepare_review(retained["claim_id"])
+            packet.check_owner(owner_snapshot=before["snapshot"], basis_id=before["result"]["basis_id"])
+            claims_path = root / "docs/research-claims.json"
+            inventory = json.loads(claims_path.read_bytes())
+            unrelated = copy.deepcopy(inventory["claims"][0])
+            unrelated.update(id="independent-observation", text="The retained independent observation states the same measured reflectance.")
+            inventory["claims"].append(unrelated)
+            claims_path.write_text(json.dumps(inventory))
+            after = workspace.strict.prepare_review(retained["claim_id"])
+            assert before["snapshot"] == after["snapshot"]
+            assert before["result"]["basis_id"] != after["result"]["basis_id"]
+            with native._current_facts(session, operation="current"):
+                witness = host_qualification(session)
+            historical = [row for row in witness["attempts"] if row["application_state"] == "registered"]
+            assert historical
+            assert all(row["context_state"] == "not_current" and row["attestation_state"] == "native_controller_verified" for row in historical)
+            assert witness["control"]["authenticated_review_controller_refs"] == []
+            assert witness["capability_matrix"][0]["state"] == "not_observed"
+            assert not witness["authorized"] and not witness["evidence_accepted"]
+            application = next(row["data"] for row in records if row["kind"] == "execution_application"
+                and row["data"].get("attempt_id") == attempt.attempt_id and "envelope" in row["data"])
+            forged = copy.deepcopy(application["envelope"])
+            forged["payload"]["body"]["review"]["basis_id"] = after["result"]["basis_id"]
+            with pytest.raises(EvidenceWikiError):
+                native._verify_review_controller(session, attempt, forged)

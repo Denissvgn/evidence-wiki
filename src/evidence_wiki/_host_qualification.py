@@ -102,6 +102,7 @@ def host_qualification(session):
                     sources, _ = driver._sources(session)
                 selected = set(retained["review_context"]["aliases"]["sources"])
                 try:
+                    context.check_owner(owner_snapshot=prepared["snapshot"], basis_id=prepared["result"]["basis_id"])
                     context.check(prepared["snapshot"], prepared["rubric"], [item for item in sources if item["source_id"] in selected])
                     row.update(context_state="current_immutable_packet" if context.document()["manifest"]["context_complete"] else "incomplete")
                 except ExecutionError:

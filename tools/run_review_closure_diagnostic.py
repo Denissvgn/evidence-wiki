@@ -15,6 +15,13 @@ sys.path.insert(0, str(ROOT))
 
 from evidence_wiki import Workspace
 from tools import run_review_dependency_workload as workload
+from tools._observation_freshness import (
+    observation_policy as select_observation_policy,
+)
+from tools._observation_freshness import (
+    validate_observation_policy,
+    validate_observer_window,
+)
 from tools._review_dependency_workload import (
     OriginalResponses,
     OwnedChildren,
@@ -32,12 +39,17 @@ from tools.decide_release import _HostDeadline, _read
 from tools.replay_qualification_native import verify_journal_closing
 
 PLAN_SCHEMA = "review-closure-diagnostic-plan/v1"
+POLICY_PLAN_SCHEMA = "review-closure-diagnostic-plan/v2"
 RESULT_SCHEMA = "review-closure-diagnostic-observation/v1"
+POLICY_RESULT_SCHEMA = "review-closure-diagnostic-observation/v2"
 PHASE_CAPS = {"setup": 180, "owner_read": 120, "cleanup": 60, "global_close": 120}
+BATCH_PHASE_CAPS = {"setup": 180, "owner_read": 600, "cleanup": 60, "global_close": 600}
 DIAGNOSTIC_REASONS = {"closure_journal_count_invalid", "closure_allocation_invalid",
     "closure_plan_expired_or_clock_invalid", "closure_witness_clock_invalid",
     "closure_unexpected_execution_records", "closure_review_attempt_observed",
-    "closure_freeze_arguments_required", "closure_run_arguments_required"}
+    "closure_freeze_arguments_required", "closure_run_arguments_required",
+    "observation_policy_invalid", "observer_clock_invalid", "observer_policy_binding_invalid",
+    "closure_owner_closing_changed", "closure_authority_clock_invalid"}
 
 
 def failure_document(error):
@@ -52,29 +64,43 @@ def allocation_seconds(caps):
     return caps["setup"] + 2 * caps["owner_read"] + caps["cleanup"] + caps["global_close"]
 
 
-def reference_plan(bundle, *, journal_count=4, phase_caps=None):
+def reference_plan(bundle, *, journal_count=4, phase_caps=None, observation_profile=None):
     """Bind the same full fixture and candidate before creating fresh services."""
     if type(journal_count) is not int or not 4 <= journal_count <= 13:
         raise ValueError("closure_journal_count_invalid")
-    caps = dict(PHASE_CAPS if phase_caps is None else phase_caps)
-    if (set(caps) != set(PHASE_CAPS)
-            or any(type(value) is not int or not 0 < value <= PHASE_CAPS[key] for key, value in caps.items())):
+    policy = None if observation_profile is None else select_observation_policy(observation_profile)
+    limits = BATCH_PHASE_CAPS if observation_profile == "batch" else PHASE_CAPS
+    caps = dict(limits if phase_caps is None else phase_caps)
+    if (set(caps) != set(limits)
+            or any(type(value) is not int or not 0 < value <= limits[key] for key, value in caps.items())
+            or allocation_seconds(caps) >= 7200):
         raise ValueError("closure_allocation_invalid")
     native = workload.reference_plan(bundle)
-    return {"schema_version": PLAN_SCHEMA, "candidate_sha256": native["candidate_sha256"],
+    result = {"schema_version": PLAN_SCHEMA if policy is None else POLICY_PLAN_SCHEMA,
+        "candidate_sha256": native["candidate_sha256"],
         "artifacts": native["artifacts"], "host": native["host"], "hard_limits": native["hard_limits"],
         "scope": native["scope"], "frozen_at": native["frozen_at"], "expires_at": native["expires_at"],
         "phase_caps": caps, "elapsed_cap_seconds": allocation_seconds(caps),
         "journal_count": journal_count, "run_ids": ["closure-journal-" + str(index) for index in range(journal_count)],
         "journal_mode": "native_execution_begin_without_review_attempts", "reference_checks": 200,
         "review_jobs": 0, "prior_authority_reuse": False, "qualification": False, "stdin": "closed"}
+    if policy is not None:
+        result.update(observation_policy=policy, observation_policy_sha256=digest(policy),
+            hard_limits=workload.runtime_hard_limits(policy), source_protocol_limits=native["hard_limits"])
+    return result
 
 
 def validate_plan(plan, expected_plan):
-    if type(plan) is not dict or plan.get("schema_version") != PLAN_SCHEMA or digest(plan) != expected_plan:
+    if type(plan) is not dict or plan.get("schema_version") not in {PLAN_SCHEMA, POLICY_PLAN_SCHEMA} or digest(plan) != expected_plan:
         raise ValueError("workload_plan_binding_invalid")
+    profile = None
+    if plan["schema_version"] == POLICY_PLAN_SCHEMA:
+        policy = validate_observation_policy(plan.get("observation_policy"))
+        if plan.get("observation_policy_sha256") != digest(policy):
+            raise ValueError("observer_policy_binding_invalid")
+        profile = policy["profile"]
     expected = reference_plan(Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent,
-        journal_count=plan["journal_count"], phase_caps=plan["phase_caps"])
+        journal_count=plan["journal_count"], phase_caps=plan["phase_caps"], observation_profile=profile)
     if set(plan) != set(expected) or any(plan[key] != expected[key] for key in expected if key not in {"frozen_at", "expires_at"}):
         raise ValueError("workload_candidate_or_recipe_changed")
     frozen, expires = (datetime.fromisoformat(plan[key]) for key in ("frozen_at", "expires_at"))
@@ -94,18 +120,28 @@ def preflight(plan, expected_plan):
 class WitnessOriginals(OriginalResponses):
     """Record first observed witness timing while retaining unchanged originals."""
 
-    def __init__(self, directory, report, started):
+    def __init__(self, directory, report, started, observation_policy=None):
         super().__init__(directory)
         self.report, self.started = report, started
+        self.observation_policy = observation_policy
+        self.capture_original_window = True
 
     def append(self, entry):
         label, value = entry
         first = None
-        if label.endswith("-native-host-qualification"):
+        authority = None
+        if label == "runtime-allocation" and self.observation_policy is not None:
+            authority = {key: value[key] for key in ("authority_start", "authority_end")}
+            self.report["runtime_authority"] = authority
+        if label.endswith("-native-host-qualification") and self.capture_original_window:
             instant = datetime.fromisoformat(value["observed_utc"])
             if instant.tzinfo is None:
                 raise ValueError("closure_witness_clock_invalid")
-            bound = instant + timedelta(seconds=30)
+            if self.observation_policy is not None and instant > datetime.now(timezone.utc):
+                super().append(entry)
+                raise ValueError("observer_clock_invalid")
+            limit = 30 if self.observation_policy is None else self.observation_policy["max_age_seconds"]
+            bound = instant + timedelta(seconds=limit)
             prior = self.report["first_witness"]
             if prior is None or instant < datetime.fromisoformat(prior["observed_utc"]):
                 first = {"observed_utc": instant.isoformat(),
@@ -113,9 +149,15 @@ class WitnessOriginals(OriginalResponses):
                     "retained_elapsed_seconds": time.monotonic() - self.started,
                     "closing_latency_seconds": None, "closed_within_original_bound": None}
                 self.report["first_witness"] = first
+                if self.observation_policy is not None:
+                    first.update(max_age_seconds=limit,
+                        observation_policy_version=self.observation_policy["schema_version"],
+                        observation_policy_sha256=digest(self.observation_policy))
         pin = super().append(entry)
         if first is not None:
             first["original_pin"] = pin
+        if authority is not None:
+            authority["original_pin"] = pin
         return pin
 
 
@@ -140,12 +182,14 @@ def create_journals(root, runtime, run_ids, originals):
 
 def run_diagnostic(plan, expected_plan, directory):
     validate_plan(plan, expected_plan)
+    policy = plan.get("observation_policy")
     directory = Path(directory).absolute()
     if directory.resolve() != directory or directory.exists() or directory.is_relative_to(ROOT):
         raise ValueError("workload_new_private_external_directory_required")
     directory.mkdir(mode=0o700)
     started = time.monotonic()
-    report = {"schema_version": RESULT_SCHEMA, "plan_sha256": expected_plan,
+    report = {"schema_version": RESULT_SCHEMA if policy is None else POLICY_RESULT_SCHEMA,
+        "plan_sha256": expected_plan,
         "candidate_sha256": plan["candidate_sha256"], "study": "closure_feasibility_diagnostic",
         "terminal_outcome": "started_stop_unknown", "failure": None, "failures": [],
         "pair_qualified": False, "pilot_completed": False, "automatic_canonical_completion": False,
@@ -156,7 +200,14 @@ def run_diagnostic(plan, expected_plan, directory):
         "initial_journal_receipts": [], "original_response_pins": [], "native_journal_pins": [],
         "input_pins": [], "candidate_checks": [], "cleanup": None, "child_cleanup": None,
         "retention": {"status": "unobserved"}, "elapsed_seconds": None}
-    originals = WitnessOriginals(directory / "observations", report, started)
+    if policy is not None:
+        report.update(observation_policy=policy, observation_policy_sha256=digest(policy),
+            hard_limits=plan["hard_limits"], source_protocol_limits=plan["source_protocol_limits"],
+            closing_owner_read=None, closing_owner_read_identity=None,
+            runtime_authority=None,
+            observation_freshness={"actual_age_seconds": None, "max_age_seconds": policy["max_age_seconds"],
+                "policy_version": policy["schema_version"], "policy_sha256": digest(policy)})
+    originals = WitnessOriginals(directory / "observations", report, started, policy)
     tracker = OwnedChildren(originals, expected_plan)
     root = runtime = None
     opened_runs, snapshots = [], []
@@ -191,6 +242,16 @@ def run_diagnostic(plan, expected_plan, directory):
             "plan_sha256": expected_plan, "observed_utc": datetime.now(timezone.utc).isoformat()}))
         report["candidate_checks"].append(pin)
 
+    def owner_read():
+        if policy is None:
+            return workload._owner_read(root, runtime, opened_runs, originals)
+        return workload._owner_read(root, runtime, opened_runs, originals, observation_policy=policy)
+
+    def check_records(records):
+        if (set(records) != set(opened_runs)
+                or any(len(rows) != 1 or rows[0]["kind"] != "execution_begin" for rows in records.values())):
+            raise ValueError("closure_unexpected_execution_records")
+
     try:
         tracker.open()
         main_cap = plan["phase_caps"]["setup"] + 2 * plan["phase_caps"]["owner_read"]
@@ -207,7 +268,10 @@ def run_diagnostic(plan, expected_plan, directory):
                 root, runtime, _, _, _ = provision(directory / "fixture", artifacts["fresh-fixture-input.json"]["fixture"],
                     originals, run_seconds=plan["elapsed_cap_seconds"], allocation_binding={
                         "plan_sha256": expected_plan, "candidate_sha256": plan["candidate_sha256"],
-                        "study": report["study"], "phase_caps": plan["phase_caps"], "run_ids": plan["run_ids"], "review_jobs": 0})
+                        "study": report["study"], "phase_caps": plan["phase_caps"], "run_ids": plan["run_ids"], "review_jobs": 0,
+                        **({"observation_policy": policy, "observation_policy_sha256": digest(policy),
+                            "hard_limits": plan["hard_limits"], "source_protocol_limits": plan["source_protocol_limits"]}
+                            if policy is not None else {})})
                 report["reference_checks"] = 200
                 retain(directory / "realized-input-manifest.json", file_manifest(root))
                 opened_runs.extend(plan["run_ids"])
@@ -216,13 +280,12 @@ def run_diagnostic(plan, expected_plan, directory):
             phase("setup", plan["phase_caps"]["setup"], setup)
             for index in range(2):
                 observed, round_snapshots, records = phase("owner-read-" + str(index + 1),
-                    plan["phase_caps"]["owner_read"], lambda: workload._owner_read(root, runtime, opened_runs, originals))
+                    plan["phase_caps"]["owner_read"], owner_read)
                 report["owner_reads"].append(observed)
                 snapshots.extend(round_snapshots)
                 identity = workload.owner_read_identity(observed)
                 report["owner_read_identities"].append(identity)
-                if any(len(rows) != 1 or rows[0]["kind"] != "execution_begin" for rows in records.values()):
-                    raise ValueError("closure_unexpected_execution_records")
+                check_records(records)
                 if len(report["owner_read_identities"]) == 2 and report["owner_read_identities"][0] != identity:
                     raise ValueError("workload_owner_two_pass_changed")
     except (Exception, SystemExit, _HostDeadline) as error:
@@ -277,6 +340,21 @@ def run_diagnostic(plan, expected_plan, directory):
             report["native_journal_pins"], report["retention"] = workload.collect_journals(root, directory)
             if report["retention"]["status"] != "complete":
                 errors.append(ValueError("workload_journal_collection_bound"))
+        if (policy is not None and policy["profile"] == "batch" and runtime is not None
+                and len(report["owner_reads"]) == 2 and report["failure"] is None and not errors):
+            originals.capture_original_window = False
+            try:
+                observed, closing_snapshots, records = owner_read()
+                report["closing_owner_read"] = observed
+                identity = workload.owner_read_identity(observed)
+                report["closing_owner_read_identity"] = identity
+                originals.append(("closing-owner-read", observed))
+                snapshots.extend(closing_snapshots)
+                check_records(records)
+                if any(prior != identity for prior in report["owner_read_identities"]):
+                    raise ValueError("closure_owner_closing_changed")
+            except (Exception, SystemExit, _HostDeadline) as error:
+                errors.append(error)
         check_candidate("after")
         if errors:
             raise errors[0]
@@ -285,12 +363,27 @@ def run_diagnostic(plan, expected_plan, directory):
         verify_journal_closing(snapshots)
         closing = datetime.now(timezone.utc)
         report["global_closing_utc"] = closing.isoformat()
+        if policy is not None and not datetime.fromisoformat(plan["frozen_at"]) <= closing < datetime.fromisoformat(plan["expires_at"]):
+            raise ValueError("closure_plan_expired_or_clock_invalid")
+        if policy is not None:
+            authority = report["runtime_authority"]
+            if authority is None:
+                raise ValueError("closure_authority_clock_invalid")
+            begin, end = (datetime.fromisoformat(authority[key]) for key in ("authority_start", "authority_end"))
+            if begin.tzinfo is None or end.tzinfo is None or not begin <= closing < end:
+                raise ValueError("closure_authority_clock_invalid")
         witness = report["first_witness"]
         if witness is None:
             raise ValueError("workload_owner_current_unavailable")
         witness["closing_latency_seconds"] = (closing - datetime.fromisoformat(witness["observed_utc"])).total_seconds()
         witness["closed_within_original_bound"] = datetime.fromisoformat(witness["observed_utc"]) <= closing < datetime.fromisoformat(witness["observer_recency_not_after"])
         report["closing_status"] = "within_original_bound" if witness["closed_within_original_bound"] else "original_witness_expired"
+        if policy is not None:
+            report["observation_freshness"]["actual_age_seconds"] = witness["closing_latency_seconds"]
+            for observed in report["owner_reads"]:
+                validate_observer_window(observed, closing, policy)
+            if policy["profile"] == "batch":
+                validate_observer_window(report["closing_owner_read"], closing, policy)
         if not witness["closed_within_original_bound"]:
             raise ValueError("workload_original_witness_expired")
         report["terminal_outcome"] = "diagnostic_completed_unqualified"
@@ -318,6 +411,7 @@ def main(argv=None):
     parser.add_argument("--expected-plan")
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--journal-count", type=int, default=4)
+    parser.add_argument("--observation-profile", choices=("interactive", "batch"), default="batch")
     args = parser.parse_args(argv)
     try:
         if args.action == "freeze":
@@ -326,7 +420,8 @@ def main(argv=None):
             path = args.output.absolute()
             if path.resolve() != path or path.is_relative_to(ROOT) or path.exists():
                 raise ValueError("workload_new_private_external_directory_required")
-            plan = reference_plan(args.bundle, journal_count=args.journal_count)
+            plan = reference_plan(args.bundle, journal_count=args.journal_count,
+                observation_profile=args.observation_profile)
             retain(path, plan)
             result = {"plan_path": str(path), "plan_sha256": digest(plan), "runtime_qualification": "NOT RUN"}
         else:

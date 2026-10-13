@@ -121,6 +121,19 @@ def test_missing_host_operation_failure_retains_only_known_code_and_reason():
     assert failure_document(error)["reason"] is None
 
 
+@pytest.mark.parametrize("reason", ["attestation_current_context_mismatch", "native_current_review_changed"])
+def test_native_host_failure_retains_only_its_exact_safe_current_reason(reason):
+    from evidence_wiki.errors import ConfigError
+
+    error = ConfigError("HOST_QUALIFICATION_REFUSED", "Private native text.", details={"reason": reason})
+    assert failure_document(error)["reason"] == reason
+    error.details["reason"] = reason + ":private_credential"
+    assert failure_document(error)["reason"] is None
+    error.details["reason"] = reason
+    error.error_code = "HOST_CONTEXT_REFUSED"
+    assert failure_document(error)["reason"] is None
+
+
 def test_native_host_read_preflight_checks_real_references_and_refuses_missing_status_grant(plan, tmp_path, monkeypatch):
     from dataclasses import replace
 

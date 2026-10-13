@@ -48,11 +48,15 @@ def harness(tmp_path, monkeypatch):
     def provision(base, fixture_input, originals, **kwargs):
         events.append("provision")
         assert fixture_input == {"sentinel": "fresh-input"}
-        assert kwargs["run_seconds"] == 600
+        assert kwargs["run_seconds"] == state.get("allocation_seconds", 600)
         assert kwargs["allocation_binding"]["review_jobs"] == 0
+        state["allocation_binding"] = kwargs["allocation_binding"]
         root = base / "workspace"
         root.mkdir(parents=True)
-        originals.append(("fresh-runtime-allocation", kwargs))
+        clock = datetime.now(timezone.utc)
+        originals.append(("runtime-allocation", dict(kwargs,
+            authority_start=clock.isoformat(),
+            authority_end=(clock + timedelta(seconds=state.get("authority_seconds", 7200))).isoformat())))
         return root, runtime, {}, {}, {}
 
     def receipt(run_id):
@@ -69,24 +73,37 @@ def harness(tmp_path, monkeypatch):
             (path / "events.jsonl").write_text('{"native":"execution_begin"}\n')
         return [receipt(run_id) for run_id in run_ids]
 
-    def read(root, selected, run_ids, originals):
+    def read(root, selected, run_ids, originals, *, observation_policy=None):
         state["read_count"] += 1
         events.append("owner-read-" + str(state["read_count"]))
-        observed = datetime.now(timezone.utc) - timedelta(seconds=state.get("witness_age", 0))
+        age = state.get("witness_ages", {}).get(state["read_count"], state.get("witness_age", 0))
+        observed = datetime.now(timezone.utc) - timedelta(seconds=age)
         witness = {"observed_utc": observed.isoformat(), "credentials": {"state": "ready"}}
         for run_id in run_ids:
             originals.append((run_id + "-native-host-qualification", witness))
         if state.get("read_failure") == state["read_count"]:
             raise _HostDeadline()
         receipts = [receipt(run_id) for run_id in run_ids]
-        if state.get("changed_identity") and state["read_count"] == 2:
+        if ((state.get("changed_identity") and state["read_count"] == 2)
+                or state.get("changed_closing_identity") and state["read_count"] == 3):
             receipts[0]["head_ref"] = "changed"
         result = {"strict": {"claims": [], "evaluated_at": observed.isoformat()},
             "publication": {"verdict": "no_ship", "evaluated_at": observed.isoformat()},
             "journal_receipts": receipts, "native_host_witnesses": [witness] * len(run_ids),
-            "observer_recency_not_after": (observed + timedelta(seconds=30)).isoformat()}
+            "observer_recency_not_after": (observed + timedelta(
+                seconds=30 if observation_policy is None else observation_policy["max_age_seconds"])).isoformat()}
+        if observation_policy is not None:
+            result.update(observation_policy=observation_policy, observation_policy_sha256=digest(observation_policy),
+                witness_semantics=observation_policy["witness_semantics"],
+                native_current=[{"observed_utc": observed.isoformat(), "policy_ref": "policy",
+                    "qualification": {"state": "qualified"}, "rights": "bound"} for _ in run_ids])
+            if state.get("changed_closing_policy") and state["read_count"] == 3:
+                result["observation_policy_sha256"] = "changed"
+            if state.get("changed_closing_current") and state["read_count"] == 3:
+                result["native_current"][0][state["changed_closing_current"]] = "withdrawn"
         originals.append(("owner-round-" + str(state["read_count"]), result))
-        if state.get("candidate_change") and state["read_count"] == 2:
+        if ((state.get("candidate_change") and state["read_count"] == 2)
+                or state.get("closing_candidate_change") and state["read_count"] == 3):
             candidate["sha256"] = "changed"
         return result, [{"run_id": run_id} for run_id in run_ids], {
             run_id: [{"kind": "execution_begin"}] for run_id in run_ids}
@@ -149,6 +166,8 @@ def test_phase_caps_cannot_extend_diagnostic_authority(harness, field, value):
 
 def test_complete_diagnostic_has_two_reads_then_cleanup_authentication_retention_and_closing(harness):
     report = run(harness)
+    assert report["schema_version"] == "review-closure-diagnostic-observation/v1"
+    assert "observation_policy" not in report and "source_protocol_limits" not in report
     assert report["terminal_outcome"] == "diagnostic_completed_unqualified"
     assert report["failure"] is None
     assert report["review_attempts"] == report["applied_jobs"] == report["acceptance_credits"] == 0
@@ -308,3 +327,203 @@ def test_unconfirmed_children_prevent_success_but_preserve_history_and_raw_journ
     assert report["retention"]["status"] == "complete"
     assert len(report["journal_receipts"]) == len(report["native_journal_pins"]) == 4
     assert report["global_closing_utc"] is None
+
+
+def batch_plan(harness):
+    harness.plan = diagnostic.reference_plan(harness.bundle, observation_profile="batch")
+    harness.state["allocation_seconds"] = 2040
+    return harness.plan
+
+
+def test_batch_plan_binds_closed_policy_without_changing_native_calibration(harness):
+    plan = batch_plan(harness)
+    assert plan["schema_version"] == "review-closure-diagnostic-plan/v2"
+    assert plan["phase_caps"] == diagnostic.BATCH_PHASE_CAPS
+    assert plan["elapsed_cap_seconds"] == 2040 < plan["hard_limits"]["protected_authority_seconds"]
+    assert "witness_seconds" not in plan["hard_limits"]
+    assert plan["hard_limits"]["each_owner_pass_read_seconds"] == 600
+    assert plan["hard_limits"]["global_close_seconds"] == 600
+    assert plan["hard_limits"]["observer_recency_seconds"] == 3600
+    assert plan["hard_limits"]["native_calibration_probe_lifetime_seconds"] == 30
+    assert plan["source_protocol_limits"] == diagnostic.workload.HARD_LIMITS
+    assert plan["observation_policy"]["max_age_seconds"] == 3600
+    assert plan["observation_policy_sha256"] == digest(plan["observation_policy"])
+    assert diagnostic.preflight(plan, digest(plan))["qualification"] is False
+
+
+@pytest.mark.parametrize("alteration", ["ttl", "digest", "unknown"])
+def test_policy_binding_refuses_tampering_before_children(harness, alteration):
+    plan = batch_plan(harness)
+    if alteration == "ttl":
+        plan["observation_policy"]["max_age_seconds"] += 1
+    elif alteration == "digest":
+        plan["observation_policy_sha256"] = "changed"
+    else:
+        plan["observation_policy"]["approval"] = True
+    with pytest.raises(ValueError, match="observation_policy_invalid|observer_policy_binding_invalid"):
+        run(harness)
+    assert harness.events == []
+
+
+@pytest.mark.parametrize("field,key,value", [
+    ("hard_limits", "each_owner_pass_read_seconds", 120),
+    ("hard_limits", "observer_recency_seconds", 30),
+    ("hard_limits", "native_calibration_probe_lifetime_seconds", 3600),
+    ("source_protocol_limits", "witness_seconds", 3600),
+])
+def test_runtime_limits_and_source_provenance_remain_exactly_bound(harness, field, key, value):
+    batch_plan(harness)
+    harness.plan = copy.deepcopy(harness.plan)
+    harness.plan[field][key] = value
+    with pytest.raises(ValueError, match="workload_candidate_or_recipe_changed"):
+        run(harness)
+    assert harness.events == []
+
+
+def test_batch_closing_refreshes_native_owner_after_cleanup_and_keeps_original_window(harness):
+    batch_plan(harness)
+    harness.state["witness_ages"] = {1: 90, 2: 60, 3: 0}
+    report = run(harness)
+    assert report["terminal_outcome"] == "diagnostic_completed_unqualified"
+    assert report["schema_version"] == "review-closure-diagnostic-observation/v2"
+    for field in ("observation_policy", "observation_policy_sha256", "hard_limits", "source_protocol_limits"):
+        assert report[field] == harness.plan[field] == harness.state["allocation_binding"][field]
+    assert len(report["owner_reads"]) == 2
+    assert report["closing_owner_read"] is not None
+    assert harness.state["read_count"] == 3
+    assert harness.events.index("child-close") < harness.events.index("owner-read-3")
+    assert harness.events.index("owner-read-3") < harness.events.index("verify-closing")
+    assert len(harness.state["verified_snapshots"]) == 12
+    assert report["closing_owner_read_identity"] == report["owner_read_identities"][0]
+    first = report["first_witness"]
+    assert 90 <= first["closing_latency_seconds"] < 3600
+    assert first["max_age_seconds"] == report["observation_freshness"]["max_age_seconds"] == 3600
+    assert report["observation_freshness"]["actual_age_seconds"] == first["closing_latency_seconds"]
+    assert datetime.fromisoformat(first["observer_recency_not_after"]) - datetime.fromisoformat(first["observed_utc"]) == timedelta(seconds=3600)
+    assert report["review_jobs"] == report["review_attempts"] == report["applied_jobs"] == report["acceptance_credits"] == 0
+    assert report["pair_qualified"] is report["pilot_completed"] is False
+    assert any(pin["label"] == "closing-owner-read" for pin in report["original_response_pins"])
+
+
+@pytest.mark.parametrize("age", [3600, 3601])
+def test_fresh_closing_owner_never_renews_expired_original_batch_window(harness, age):
+    batch_plan(harness)
+    harness.state["witness_ages"] = {1: age, 2: 20, 3: 0}
+    report = run(harness)
+    assert report["terminal_outcome"] == "diagnostic_failed_unqualified"
+    assert report["failure"]["reason"] == "workload_original_witness_expired"
+    assert report["closing_owner_read"] is not None
+    assert report["first_witness"]["closed_within_original_bound"] is False
+    assert report["retention"]["status"] == "complete"
+
+
+@pytest.mark.parametrize("round_number", [1, 2, 3])
+def test_batch_future_observation_is_refused(harness, round_number):
+    batch_plan(harness)
+    harness.state["witness_ages"] = {round_number: -60}
+    report = run(harness)
+    assert report["terminal_outcome"] == "diagnostic_failed_unqualified"
+    assert report["failure"]["reason"] == "observer_clock_invalid"
+    assert report["retention"]["status"] == "complete"
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("changed_closing_identity", "closure_owner_closing_changed"),
+    ("changed_closing_policy", "observer_policy_binding_invalid"),
+    ("closing_candidate_change", "workload_candidate_or_recipe_changed"),
+])
+def test_closing_change_cannot_turn_batch_freshness_into_approval(harness, change, reason):
+    batch_plan(harness)
+    harness.state[change] = True
+    report = run(harness)
+    assert report["terminal_outcome"] == "diagnostic_failed_unqualified"
+    assert report["failure"]["reason"] == reason
+    assert report["closing_owner_read"] is not None
+    assert report["retention"]["status"] == "complete"
+    assert report["applied_jobs"] == report["acceptance_credits"] == 0
+
+
+def test_explicit_interactive_policy_keeps_short_bound_and_two_owner_reads(harness):
+    harness.plan = diagnostic.reference_plan(harness.bundle, observation_profile="interactive")
+    assert harness.plan["hard_limits"]["each_owner_pass_read_seconds"] == 120
+    assert harness.plan["hard_limits"]["global_close_seconds"] == 120
+    assert harness.plan["hard_limits"]["observer_recency_seconds"] == 30
+    assert harness.plan["hard_limits"]["native_calibration_probe_lifetime_seconds"] == 30
+    report = run(harness)
+    assert report["terminal_outcome"] == "diagnostic_completed_unqualified"
+    assert harness.state["read_count"] == 2
+    assert report["closing_owner_read"] is None
+    assert report["observation_freshness"]["max_age_seconds"] == 30
+
+
+@pytest.mark.parametrize("field", ["policy_ref", "qualification", "rights"])
+def test_changed_current_owner_authority_refuses_batch_closing(harness, field):
+    batch_plan(harness)
+    harness.state["changed_closing_current"] = field
+    report = run(harness)
+    assert report["failure"]["reason"] == "closure_owner_closing_changed"
+    assert report["retention"]["status"] == "complete"
+    assert report["pair_qualified"] is False
+
+
+def test_closing_owner_runs_after_raw_retention(harness, monkeypatch):
+    batch_plan(harness)
+    collect = diagnostic.workload.collect_journals
+
+    def retain_then_withdraw(root, directory):
+        result = collect(root, directory)
+        harness.events.append("raw-retention")
+        harness.state["changed_closing_current"] = "rights"
+        return result
+
+    monkeypatch.setattr(diagnostic.workload, "collect_journals", retain_then_withdraw)
+    report = run(harness)
+    assert harness.events.index("raw-retention") < harness.events.index("owner-read-3")
+    assert report["failure"]["reason"] == "closure_owner_closing_changed"
+
+
+def test_actual_authority_interval_limits_final_batch_clock(harness):
+    batch_plan(harness)
+    harness.state["authority_seconds"] = -1
+    report = run(harness)
+    assert report["failure"]["reason"] == "closure_authority_clock_invalid"
+    assert report["closing_owner_read"] is not None
+    assert report["global_closing_utc"] is not None
+    pin = report["runtime_authority"]["original_pin"]
+    assert any(all(original[key] == value for key, value in pin.items()) for original in report["original_response_pins"])
+
+
+def test_plan_expiry_is_checked_after_final_owner_and_snapshot_validation(harness, monkeypatch):
+    batch_plan(harness)
+    future = datetime.fromisoformat(harness.plan["expires_at"]) + timedelta(seconds=1)
+
+    class ClosingClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return future if harness.state.get("final_validation") else datetime.now(tz)
+
+    verify = diagnostic.verify_journal_closing
+
+    def completed_validation(snapshots):
+        verify(snapshots)
+        harness.state["final_validation"] = True
+
+    monkeypatch.setattr(diagnostic, "datetime", ClosingClock)
+    monkeypatch.setattr(diagnostic, "verify_journal_closing", completed_validation)
+    report = run(harness)
+    assert report["failure"]["reason"] == "closure_plan_expired_or_clock_invalid"
+    assert report["closing_owner_read"] is not None
+
+
+def test_partial_closing_failure_preserves_original_window_and_raw_history(harness):
+    batch_plan(harness)
+    harness.state["witness_ages"] = {1: 90, 2: 60}
+    harness.state["read_failure"] = 3
+    report = run(harness)
+    assert report["failure"]["kind"] == "_HostDeadline"
+    assert report["first_witness"]["closing_latency_seconds"] is None
+    assert report["closing_owner_read"] is None
+    assert report["retention"]["status"] == "complete"
+    assert len(report["native_journal_pins"]) == 4
+    assert len([pin for pin in report["original_response_pins"]
+        if pin["label"].endswith("-native-host-qualification")]) == 12

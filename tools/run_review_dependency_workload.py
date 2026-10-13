@@ -21,6 +21,8 @@ sys.path.insert(0, str(ROOT))
 from evidence_wiki import Workspace
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.research_journal_contracts import canonical_records, digest_record, digest_records
+from tools._observation_freshness import observation_policy as select_observation_policy
+from tools._observation_freshness import validate_observation_policy, validate_observer_window
 from tools._release_decision import _original
 from tools._review_dependency_workload import (
     CLAIM_IDS,
@@ -49,8 +51,11 @@ from tools.verify_acceptance_paths import candidate_manifest
 
 PLAN_SCHEMA = "review-dependency-workload-plan/v2"
 RESULT_SCHEMA = "review-dependency-workload-observation/v2"
+PLAN_SCHEMA_CURRENT = "review-dependency-workload-plan/v3"
+RESULT_SCHEMA_CURRENT = "review-dependency-workload-observation/v3"
 ARTIFACTS = ("fresh-fixture-input.json", "pilot-job-inputs.json", "role-claim-journal-inputs.json", "measurement-protocol.json", "adapter-contracts.json", "acceptance-cases.json")
 PILOT_CAPS = {"setup": 600, "job": 600, "mutation": 600, "owner_read": 120, "global_close": 120, "cleanup": 60}
+BATCH_PILOT_CAPS = dict(PILOT_CAPS, owner_read=600, global_close=600)
 HARD_LIMITS = {"each_owner_pass_read_seconds": 120, "job_and_MCP_seconds": 600,
     "native_artifact_payload_bytes": 4194304, "native_collection_nodes": 65536,
     "native_record_collection_bytes": 1048576, "native_record_depth": 16,
@@ -58,6 +63,15 @@ HARD_LIMITS = {"each_owner_pass_read_seconds": 120, "job_and_MCP_seconds": 600,
     "protected_authority_seconds": 7200, "raw_aggregate_retention_bytes": 67108864,
     "raw_journal_retention_bytes": 16777216, "raw_retention_entries": 4096,
     "raw_retention_files": 256, "raw_retention_seconds": 10, "witness_seconds": 30}
+
+
+def runtime_hard_limits(policy):
+    policy = validate_observation_policy(policy)
+    caps = BATCH_PILOT_CAPS if policy["profile"] == "batch" else PILOT_CAPS
+    limits = {key: value for key, value in HARD_LIMITS.items() if key != "witness_seconds"}
+    return dict(limits, each_owner_pass_read_seconds=caps["owner_read"],
+        global_close_seconds=caps["global_close"], observer_recency_seconds=policy["max_age_seconds"],
+        native_calibration_probe_lifetime_seconds=30)
 
 
 def read_pinned_artifact(row):
@@ -182,34 +196,108 @@ def completed_pilot_measurements(measured, candidate_sha256):
         raise ValueError("workload_pilot_measurement_invalid")
     report, _ = read_pinned_artifact(measured["pilot_report_pin"])
     prior_plan, _ = read_pinned_artifact(measured["pilot_plan_pin"])
-    expected_prior = reference_plan(Path(prior_plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent)
+    policy = prior_plan.get("observation_policy") if prior_plan.get("schema_version") == PLAN_SCHEMA_CURRENT else None
+    profile = policy["profile"] if policy is not None else None
+    ceilings = BATCH_PILOT_CAPS if profile == "batch" else PILOT_CAPS
+    expected_prior = reference_plan(Path(prior_plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent, observation_profile=profile)
     if set(prior_plan) != set(expected_prior) or any(prior_plan[key] != expected_prior[key] for key in expected_prior if key not in {"frozen_at", "expires_at"}):
         raise ValueError("workload_pilot_measurement_invalid")
     if (report.get("terminal_outcome") != "pilot_completed_unqualified" or report.get("study") != "pilot"
             or report.get("candidate_sha256") != candidate_sha256 or prior_plan.get("candidate_sha256") != candidate_sha256
-            or digest(prior_plan) != report.get("plan_sha256") or prior_plan.get("schema_version") != PLAN_SCHEMA
-            or prior_plan.get("study") != "pilot" or prior_plan.get("phase_caps") != PILOT_CAPS
-            or prior_plan.get("elapsed_cap_seconds") != 5220 or prior_plan.get("group_overhead_cap_seconds") != 0
+            or digest(prior_plan) != report.get("plan_sha256") or prior_plan.get("schema_version") not in {PLAN_SCHEMA, PLAN_SCHEMA_CURRENT}
+            or prior_plan.get("study") != "pilot" or prior_plan.get("phase_caps") != ceilings
+            or prior_plan.get("elapsed_cap_seconds") != allocation_seconds(ceilings, 6) or prior_plan.get("group_overhead_cap_seconds") != 0
             or report.get("applied_jobs") != 6 or report.get("pair_qualified") is not False
             or len(report.get("assignments", [])) != 6 or len(report.get("job_elapsed", [])) != 6):
         raise ValueError("workload_pilot_measurement_invalid")
-    if (report.get("schema_version") != RESULT_SCHEMA or report.get("failure") is not None
+    if (report.get("schema_version") != (RESULT_SCHEMA_CURRENT if policy is not None else RESULT_SCHEMA) or report.get("failure") is not None
             or report.get("mode") != "legacy" or report.get("host_id") != "direct" or report.get("case_id") != "independent-claim-text"
             or report.get("automatic_canonical_completion") is not False or report.get("cleanup", {}).get("status") != "confirmed"
             or report.get("child_cleanup", {}).get("status") != "confirmed" or report.get("retention", {}).get("status") != "complete"
             or type(report.get("elapsed_seconds")) not in (int, float) or not math.isfinite(report["elapsed_seconds"])
-            or not 0 < report["elapsed_seconds"] <= 5220 or len(report.get("owner_reads", [])) != 2
+            or not 0 < report["elapsed_seconds"] <= prior_plan["elapsed_cap_seconds"] or len(report.get("owner_reads", [])) != 2
             or report.get("control", {}).get("native_error_code") != "RESEARCH_BASIS_CHANGED"
             or report["control"].get("applied") is not False or report.get("control_accounting") != "reserved_unstarted_no_review_credit"
             or report.get("cross_journal_compatibility") != "authenticated_partial_scope"):
         raise ValueError("workload_pilot_measurement_invalid")
     first, second = report["owner_reads"]
-    if owner_read_identity(first) != owner_read_identity(second) or report["current_gate_results"] != second:
+    current_gate = report["current_gate_results"]
+    gate_bound = (type(current_gate) is dict and set(current_gate) == {"owner_read_index"}
+        and type(current_gate["owner_read_index"]) is int and current_gate["owner_read_index"] == 1) if policy is not None else current_gate == second
+    if owner_read_identity(first) != owner_read_identity(second) or not gate_bound:
         raise ValueError("workload_pilot_measurement_invalid")
     closing = datetime.fromisoformat(report["global_closing_utc"])
     if closing.tzinfo is None:
         raise ValueError("workload_pilot_measurement_invalid")
+    if policy is not None:
+        if report.get("observation_policy") != policy or report.get("observation_policy_sha256") != digest(policy):
+            raise ValueError("workload_pilot_measurement_invalid")
+        allocation_pins = [pin for pin in report["original_response_pins"] if pin["label"] == "runtime-allocation"]
+        if len(allocation_pins) != 1:
+            raise ValueError("workload_pilot_measurement_invalid")
+        allocation, _ = read_pinned_artifact(allocation_pins[0])
+        binding = allocation["allocation_binding"]
+        if (binding.get("plan_sha256") != digest(prior_plan)
+                or binding.get("candidate_sha256") != candidate_sha256
+                or binding.get("phase_caps") != prior_plan["phase_caps"]
+                or binding.get("observation_policy") != policy
+                or binding.get("observation_policy_sha256") != digest(policy)
+                or binding.get("hard_limits") != prior_plan["hard_limits"]
+                or binding.get("source_protocol_limits") != HARD_LIMITS
+                or report.get("hard_limits") != prior_plan["hard_limits"]
+                or report.get("source_protocol_limits") != HARD_LIMITS
+                or not datetime.fromisoformat(prior_plan["frozen_at"]) <= closing < datetime.fromisoformat(prior_plan["expires_at"])
+                or not datetime.fromisoformat(allocation["authority_start"]) <= closing < datetime.fromisoformat(allocation["authority_end"])):
+            raise ValueError("workload_pilot_measurement_invalid")
+        rounds = [first, second] + ([report["closing_current_results"]] if profile == "batch" and report.get("closing_current_results") else [])
+        labels = {"owner-strict-current": [value["strict"] for value in rounds],
+            "owner-publication-current": [value["publication"] for value in rounds]}
+        for field, suffix in (("native_current", "-current"), ("native_host_witnesses", "-native-host-qualification")):
+            for observed_round in rounds:
+                for value in observed_round[field]:
+                    labels.setdefault(value["run_id"] + suffix, []).append(value)
+        for label, values in labels.items():
+            originals = [pin for pin in report["original_response_pins"] if pin["label"] == label]
+            if len(originals) != len(values) or any(read_pinned_artifact(pin)[0] != value for pin, value in zip(originals, values, strict=True)):
+                raise ValueError("workload_pilot_measurement_invalid")
+        if profile == "batch":
+            current = report.get("closing_current_results")
+            if not current or owner_read_identity(current) != owner_read_identity(second):
+                raise ValueError("workload_pilot_measurement_invalid")
+            validate_observer_window(current, closing, policy)
+            if (not report.get("closing_current_snapshots") or not report.get("closing_current_source_manifest")
+                    or not report.get("closing_current_original_pins")
+                    or type(report.get("closing_current_elapsed_seconds")) not in (int, float)
+                    or not 0 < report["closing_current_elapsed_seconds"] <= ceilings["global_close"]):
+                raise ValueError("workload_pilot_measurement_invalid")
+            pins = report["closing_current_original_pins"]
+            for pin in pins:
+                if pin not in report["original_response_pins"]:
+                    raise ValueError("workload_pilot_measurement_invalid")
+                if pin["label"].endswith("-authenticated"):
+                    value, raw = read_pinned_native_records(pin)
+                else:
+                    value, raw = read_pinned_artifact(pin)
+                if len(raw) != pin["size_bytes"]:
+                    raise ValueError("workload_pilot_measurement_invalid")
+            expected_labels = {"owner-strict-current": current["strict"], "owner-publication-current": current["publication"]}
+            for view in current["native_current"]:
+                expected_labels[view["run_id"] + "-current"] = view
+            for witness in current["native_host_witnesses"]:
+                expected_labels[witness["run_id"] + "-native-host-qualification"] = witness
+            for label, value in expected_labels.items():
+                matches = [pin for pin in pins if pin["label"] == label]
+                if len(matches) != 1 or read_pinned_artifact(matches[0])[0] != value:
+                    raise ValueError("workload_pilot_measurement_invalid")
+            for label, value in (("closing-current-snapshots", report["closing_current_snapshots"]),
+                    ("closing-current-source-manifest", report["closing_current_source_manifest"])):
+                matches = [pin for pin in report["original_response_pins"] if pin["label"] == label]
+                if len(matches) != 1 or read_pinned_artifact(matches[0])[0] != value:
+                    raise ValueError("workload_pilot_measurement_invalid")
     for observed in (first, second):
+        if policy is not None:
+            validate_observer_window(observed, closing, policy)
+            continue
         witnesses = observed["native_host_witnesses"]
         clocks = [datetime.fromisoformat(witness["observed_utc"]) for witness in witnesses]
         if (observed["witness_semantics"] != "observer_recency_bound_not_native_calibration_witness"
@@ -268,7 +356,7 @@ def completed_pilot_measurements(measured, candidate_sha256):
     if len(phases) != len(report["phase_elapsed"]) or set(phases) != expected_phases:
         raise ValueError("workload_pilot_measurement_invalid")
     for label, phase in phases.items():
-        expected_cap = 1200 if label in groups else PILOT_CAPS["owner_read" if label.startswith("owner-read-") else label.replace("-", "_")]
+        expected_cap = 1200 if label in groups else ceilings["owner_read" if label.startswith("owner-read-") else label.replace("-", "_")]
         if (phase["cap_seconds"] != expected_cap or type(phase["elapsed_seconds"]) not in (int, float)
                 or not math.isfinite(phase["elapsed_seconds"]) or not 0 < phase["elapsed_seconds"] <= expected_cap):
             raise ValueError("workload_pilot_measurement_invalid")
@@ -285,7 +373,7 @@ def completed_pilot_measurements(measured, candidate_sha256):
     return worst, max(overheads)
 
 
-def reference_plan(bundle, *, study="pilot", host="direct", case_id="independent-claim-text", measured_recipe=None):
+def reference_plan(bundle, *, study="pilot", host="direct", case_id="independent-claim-text", measured_recipe=None, observation_profile=None):
     """Freeze exact candidate, assignments and prospective phase caps before work."""
     bundle = Path(bundle).absolute()
     if bundle.resolve(strict=True) != bundle or study not in {"pilot", "full"}:
@@ -293,7 +381,9 @@ def reference_plan(bundle, *, study="pilot", host="direct", case_id="independent
     pins = _inputs(bundle)
     artifacts = {name: read_pinned_artifact(pin)[0] for name, pin in pins.items()}
     assignments, case = validate_inputs(artifacts, study, host, case_id)
-    caps = dict(PILOT_CAPS)
+    policy = select_observation_policy(observation_profile) if observation_profile is not None else None
+    ceilings = BATCH_PILOT_CAPS if observation_profile == "batch" else PILOT_CAPS
+    caps = dict(ceilings)
     group_overhead_cap = 0
     recipe_pin = None
     if study == "full":
@@ -304,19 +394,22 @@ def reference_plan(bundle, *, study="pilot", host="direct", case_id="independent
         measured, _ = read_pinned_artifact(recipe_pin)
         caps = measured["phase_caps"]
         worst, observed_overhead = completed_pilot_measurements(measured, digest(candidate_manifest(ROOT)))
+        prior_pilot, _ = read_pinned_artifact(measured["pilot_plan_pin"])
+        if prior_pilot.get("observation_policy") != policy:
+            raise ValueError("workload_pilot_policy_mismatch")
         group_overhead_cap = measured["group_overhead_cap_seconds"]
         if (measured["observed_worst_seconds"] != worst or measured["observed_group_overhead_seconds"] != observed_overhead
                 or type(group_overhead_cap) is not int or not math.ceil(observed_overhead * 1.25) <= group_overhead_cap <= 7200):
             raise ValueError("workload_measured_allocation_required")
         if (set(caps) != set(PILOT_CAPS) or set(worst) != set(PILOT_CAPS)
-                or any(type(caps[key]) is not int or not 0 < caps[key] <= PILOT_CAPS[key]
+                or any(type(caps[key]) is not int or not 0 < caps[key] <= ceilings[key]
                     or type(worst[key]) not in (int, float) or not math.ceil(worst[key] * 1.25) <= caps[key] for key in caps)):
             raise ValueError("workload_measured_allocation_required")
     outer = allocation_seconds(caps, len(assignments)) + (2 * caps["global_close"] if study == "full" else 0) + len(assignment_groups(assignments)) * group_overhead_cap
-    if outer > 7200 or study == "pilot" and outer != 5220:
+    if outer > 7200 or study == "pilot" and outer != allocation_seconds(ceilings, 6):
         raise ValueError("workload_allocation_exceeds_authority")
     instant = datetime.now(timezone.utc)
-    return {"schema_version": PLAN_SCHEMA, "candidate_sha256": digest(candidate_manifest(ROOT)), "artifacts": pins,
+    plan = {"schema_version": PLAN_SCHEMA_CURRENT if policy is not None else PLAN_SCHEMA, "candidate_sha256": digest(candidate_manifest(ROOT)), "artifacts": pins,
         "host": host_identity(host), "case_id": case_id, "study": study, "assignments": assignments,
         "phase_caps": caps, "group_overhead_cap_seconds": group_overhead_cap, "elapsed_cap_seconds": outer, "hard_limits": HARD_LIMITS, "measured_recipe": recipe_pin,
         "control_run_id": "control-" + digest_bytes((host + "/" + case_id).encode())[:24],
@@ -324,14 +417,19 @@ def reference_plan(bundle, *, study="pilot", host="direct", case_id="independent
         "review_journals": len(assignment_groups(assignments)), "control_journals": 1,
         "frozen_at": instant.isoformat(), "expires_at": (instant + timedelta(seconds=7200)).isoformat(),
         "stdin": "closed", "scope": "all_six_claims_two_questions_global_policy_sources_computation"}
+    if policy is not None:
+        plan.update(observation_policy=policy, observation_policy_sha256=digest(policy),
+            source_protocol_limits=HARD_LIMITS, hard_limits=runtime_hard_limits(policy))
+    return plan
 
 
 def validate_plan(plan, expected_plan):
-    if type(plan) is not dict or plan.get("schema_version") != PLAN_SCHEMA or digest(plan) != expected_plan:
+    if type(plan) is not dict or plan.get("schema_version") not in {PLAN_SCHEMA, PLAN_SCHEMA_CURRENT} or digest(plan) != expected_plan:
         raise ValueError("workload_plan_binding_invalid")
     expected = reference_plan(Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent,
         study=plan["study"], host=plan["host"]["host_id"], case_id=plan["case_id"],
-        measured_recipe=plan["measured_recipe"]["path"] if plan["measured_recipe"] else None)
+        measured_recipe=plan["measured_recipe"]["path"] if plan["measured_recipe"] else None,
+        observation_profile=plan["observation_policy"]["profile"] if plan["schema_version"] == PLAN_SCHEMA_CURRENT else None)
     if set(plan) != set(expected) or any(plan[key] != expected[key] for key in expected if key not in {"frozen_at", "expires_at"}):
         raise ValueError("workload_candidate_or_recipe_changed")
     frozen, expires = (datetime.fromisoformat(plan[key]) for key in ("frozen_at", "expires_at"))
@@ -349,7 +447,9 @@ def preflight(plan, expected_plan):
         "qualification": False}
 
 
-def _owner_read(root, runtime, run_ids, originals):
+def _owner_read(root, runtime, run_ids, originals, observation_policy=None):
+    if observation_policy is not None:
+        validate_observation_policy(observation_policy)
     snapshots, receipts, records = [], [], {}
     # Authenticate complete histories before obtaining any short current witness.
     for run_id in run_ids:
@@ -379,13 +479,17 @@ def _owner_read(root, runtime, run_ids, originals):
                             or qualification != view["qualification"]):
                         raise ValueError("workload_owner_current_unavailable")
                 native_witnesses.append(witness)
-                witness_expiries.append(datetime.fromisoformat(witness["observed_utc"]) + timedelta(seconds=30))
+                witness_expiries.append(datetime.fromisoformat(witness["observed_utc"]) + timedelta(
+                    seconds=30 if observation_policy is None else observation_policy["max_age_seconds"]))
                 current.append(view)
-    return {"strict": strict, "publication": publication, "journal_receipts": receipts,
+    observed = {"strict": strict, "publication": publication, "journal_receipts": receipts,
         "native_host_witnesses": native_witnesses, "native_current": current,
         "observer_recency_not_after": min(witness_expiries).isoformat(),
         "witness_semantics": "observer_recency_bound_not_native_calibration_witness",
-        "native_calibration_witness": "unavailable_legacy_qualification_profile"}, snapshots, records
+        "native_calibration_witness": "unavailable_legacy_qualification_profile"}
+    if observation_policy is not None:
+        observed.update(observation_policy=observation_policy, observation_policy_sha256=digest(observation_policy))
+    return observed, snapshots, records
 
 
 
@@ -395,6 +499,25 @@ def owner_read_identity(observed):
     for name in ("strict", "publication"):
         semantic[name] = {key: value for key, value in observed[name].items() if key != "evaluated_at"}
     semantic["journals"] = [{key: row[key] for key in ("run_id", "records_sha256", "head_ref", "source_sha256", "state_sha256")} for row in observed["journal_receipts"]]
+    if "observation_policy" in observed:
+        semantic["observation_policy"] = validate_observation_policy(observed["observation_policy"])
+        semantic["native_current"] = copy.deepcopy(observed["native_current"])
+        for current in semantic["native_current"]:
+            current.pop("observed_utc", None)
+            current.get("canonical_release", {}).get("publication", {}).pop("evaluated_at", None)
+            current.get("usage", {}).pop("seconds", None)
+        semantic["native_host_witnesses"] = copy.deepcopy(observed["native_host_witnesses"])
+        for witness in semantic["native_host_witnesses"]:
+            witness.pop("observed_utc", None)
+            witness.get("credentials", {}).pop("observed_at", None)
+            # Each live credential authentication signs a fresh nonce. Keep
+            # all credential identities and verified states, not its nonce.
+            for service in witness.get("credentials", {}).get("services", []):
+                service.pop("challenge_ref", None)
+            # Historical dispatch leases expire independently of retained
+            # signed review validity, which the actual native owner checks.
+            for attempt in witness.get("attempts", []):
+                attempt.pop("lease_state", None)
     return digest(semantic)
 
 
@@ -408,7 +531,9 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
     directory.mkdir(mode=0o700)
     originals = OriginalResponses(directory / "observations")
     rows = copy.deepcopy(plan["assignments"])
-    report = {"schema_version": RESULT_SCHEMA, "candidate_sha256": plan["candidate_sha256"], "plan_sha256": expected_plan,
+    policy = plan.get("observation_policy")
+    batch = policy is not None and policy["profile"] == "batch"
+    report = {"schema_version": RESULT_SCHEMA_CURRENT if policy is not None else RESULT_SCHEMA, "candidate_sha256": plan["candidate_sha256"], "plan_sha256": expected_plan,
         "host_id": host, "case_id": case_id, "study": plan["study"], "mode": mode, "terminal_outcome": "started_stop_unknown",
         "failure": None, "assignments": rows, "applied_jobs": None, "pair_qualified": False,
         "automatic_canonical_completion": False, "cross_journal_compatibility": "unobserved", "phase_elapsed": [],
@@ -418,6 +543,11 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
         "current_gate_results": None, "strict_accepted_claim_ids": [], "question_accepted_ids": [], "work_attribution": [],
         "reference_dependency_changes": None, "control_accounting": "reserved_unstarted_no_review_credit",
         "retention": {"status": "unobserved"}, "elapsed_seconds": None}
+    if policy is not None:
+        report.update(observation_policy=policy, observation_policy_sha256=digest(policy),
+            hard_limits=plan["hard_limits"], source_protocol_limits=plan["source_protocol_limits"],
+            closing_current_results=None, closing_current_snapshots=[], closing_current_source_manifest=None,
+            closing_current_original_pins=[])
     root = runtime = None
     opened_runs, snapshots = [], []
     final_close = earliest_witness = None
@@ -458,7 +588,10 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
                 root, runtime, source_rows, signing_keys, admitted_claims = provision(directory / "fixture", fixture_input, originals,
                     run_seconds=plan["elapsed_cap_seconds"], allocation_binding={"plan_sha256": expected_plan,
                         "candidate_sha256": plan["candidate_sha256"], "assignments": rows, "phase_caps": plan["phase_caps"],
-                        "group_overhead_cap_seconds": plan["group_overhead_cap_seconds"], "control_run_id": plan["control_run_id"]})
+                        "group_overhead_cap_seconds": plan["group_overhead_cap_seconds"], "control_run_id": plan["control_run_id"],
+                        **({"observation_policy": policy, "observation_policy_sha256": digest(policy),
+                            "hard_limits": plan["hard_limits"], "source_protocol_limits": plan["source_protocol_limits"]}
+                            if policy is not None else {})})
                 retain(directory / "realized-input-manifest.json", file_manifest(root))
                 retain(directory / "native-id-translation.json", {name: {key: row[key] for key in ("source_id", "normalized_path", "revision")} for name, row in source_rows.items()})
                 dependencies = reference_dependencies(root, runtime)
@@ -518,7 +651,7 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
                                 for original in runtime.policy.to_dict()["scope"]["question_ids"]:
                                     native._resolve(session, original)
                                 originals.append_records(cycle + "-global-resolution", runtime.execution.records(session))
-                        return _owner_read(root, runtime, cycle_runs, originals)
+                        return _owner_read(root, runtime, cycle_runs, originals, observation_policy=policy)
                     observed, _, by_run = phase(cycle + "-global", plan["phase_caps"]["global_close"], resolve_global)
                     complete = [record for records in by_run.values() for record in records if record["kind"] == "execution_applied"]
                     if not completed_native_cycle(observed["strict"], complete, observed["publication"]):
@@ -530,7 +663,7 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
             earliest_witness = None
             for index in range(2):
                 observed, round_snapshots, _ = phase("owner-read-" + str(index), plan["phase_caps"]["owner_read"],
-                    lambda: _owner_read(root, runtime, [*review_runs, plan["control_run_id"]], originals))
+                    lambda: _owner_read(root, runtime, [*review_runs, plan["control_run_id"]], originals, **({"observation_policy": policy} if policy is not None else {})))
                 if closing_start is None:
                     closing_start = time.monotonic()
                 identity = owner_read_identity(observed)
@@ -544,11 +677,35 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
             def close():
                 from tools.replay_qualification_native import verify_journal_closing
                 verify_journal_closing(snapshots)
-                if datetime.now(timezone.utc) >= earliest_witness:
+                if policy is not None:
+                    if batch:
+                        if file_manifest(root) != report["closing_current_source_manifest"]:
+                            raise ValueError("workload_closing_source_changed")
+                        for pin in originals.pins:
+                            if digest_bytes(Path(pin["path"]).read_bytes()) != pin["raw_sha256"]:
+                                raise ValueError("workload_artifact_binding_invalid")
+                        for pin in report["native_journal_pins"]:
+                            raw = Path(pin["original_path"]).read_bytes()
+                            if digest_bytes(raw) != pin["raw_sha256"]:
+                                raise ValueError("workload_closing_source_changed")
+                        allocation_pins = [pin for pin in originals.pins if pin["label"] == "runtime-allocation"]
+                        if len(allocation_pins) != 1:
+                            raise ValueError("workload_artifact_binding_invalid")
+                        allocation, _ = read_pinned_artifact(allocation_pins[0])
+                instant = datetime.now(timezone.utc)
+                if policy is not None:
+                    for prior in report["owner_reads"]:
+                        validate_observer_window(prior, instant, policy)
+                    if batch:
+                        validate_observer_window(report["closing_current_results"], instant, policy)
+                        if (not datetime.fromisoformat(plan["frozen_at"]) <= instant < datetime.fromisoformat(plan["expires_at"])
+                                or not datetime.fromisoformat(allocation["authority_start"]) <= instant < datetime.fromisoformat(allocation["authority_end"])):
+                            raise ValueError("workload_plan_expired_or_clock_invalid")
+                if instant >= earliest_witness:
                     raise ValueError("workload_original_witness_expired")
-                report["global_closing_utc"] = datetime.now(timezone.utc).isoformat()
+                report["global_closing_utc"] = instant.isoformat()
             final_close = close
-            report["current_gate_results"] = observed
+            report["current_gate_results"] = {"owner_read_index": 1} if policy is not None else observed
             report["strict_accepted_claim_ids"] = sorted(row["claim"]["id"] for row in observed["strict"]["claims"] if row["accepted"])
             report["question_accepted_ids"] = sorted(row["original_id"] for row in observed["publication"]["original_outcomes"] if row["accepted"])
             if plan["study"] == "pilot" and (all(row["accepted"] for row in observed["strict"]["claims"])
@@ -608,6 +765,22 @@ def run_workload(plan, expected_plan, host, case_id, mode, directory):
             report["native_journal_pins"], report["retention"] = collect_journals(root, directory)
             if report["retention"]["status"] != "complete":
                 raise ValueError("workload_journal_collection_bound")
+        if batch and report["terminal_outcome"] in {"completed", "pilot_completed_unqualified"}:
+            start_pin = len(originals.pins)
+            tick = time.monotonic()
+            current, closing_snapshots, _ = _owner_read(root, runtime, [*review_runs, plan["control_run_id"]], originals, observation_policy=policy)
+            report["closing_current_results"] = current
+            report["closing_current_snapshots"] = [{key: snapshot[key] for key in
+                ("run_id", "source_path", "source_sha256", "state_path", "state_sha256")}
+                for snapshot in closing_snapshots]
+            report["closing_current_original_pins"] = originals.pins[start_pin:]
+            originals.append(("closing-current-snapshots", report["closing_current_snapshots"]))
+            report["closing_current_source_manifest"] = file_manifest(root)
+            originals.append(("closing-current-source-manifest", report["closing_current_source_manifest"]))
+            report["closing_current_elapsed_seconds"] = time.monotonic() - tick
+            if any(owner_read_identity(prior) != owner_read_identity(current) for prior in report["owner_reads"]):
+                raise ValueError("workload_closing_current_changed")
+            snapshots.extend(closing_snapshots)
         validate_plan(plan, expected_plan)
         if history_failed:
             raise ValueError("workload_owner_current_unavailable")
@@ -640,6 +813,7 @@ def main(argv=None):
     parser.add_argument("--case", default="independent-claim-text")
     parser.add_argument("--study", choices=("pilot", "full"), default="pilot")
     parser.add_argument("--measured-recipe", type=Path)
+    parser.add_argument("--observation-profile", choices=("interactive", "batch"), default="batch")
     parser.add_argument("--mode", choices=("legacy", "selective"), default="legacy")
     parser.add_argument("--directory", type=Path)
     args = parser.parse_args(argv)
@@ -650,7 +824,7 @@ def main(argv=None):
             path = args.output.absolute()
             if path.resolve() != path or path.is_relative_to(ROOT) or path.exists():
                 raise ValueError("workload_new_private_external_directory_required")
-            plan = reference_plan(args.bundle, study=args.study, host=args.host, case_id=args.case, measured_recipe=args.measured_recipe)
+            plan = reference_plan(args.bundle, study=args.study, host=args.host, case_id=args.case, measured_recipe=args.measured_recipe, observation_profile=args.observation_profile)
             retain(path, plan)
             result = {"plan_path": str(path), "plan_sha256": digest(plan), "runtime_qualification": "NOT RUN"}
         else:
