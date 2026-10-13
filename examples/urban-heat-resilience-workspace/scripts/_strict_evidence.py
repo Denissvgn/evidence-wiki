@@ -29,6 +29,7 @@ from _strict_contract import (
     review_document,
 )
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current as safe_load
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 _SIBLINGS = {}
@@ -78,7 +79,7 @@ def configuration(root):
     capture = capture_workspace(root)
     data = capture.files.get("research.yml", b"")
     require(len(data) <= MAX_BYTES, "strict_configuration_bound_exceeded")
-    config = yaml.safe_load(data)
+    config = safe_load(data)
     require(isinstance(config, dict), "strict_configuration_invalid")
     sibling("_selected_publication").validate_config_paths(config)
     return config
@@ -428,7 +429,7 @@ def machine_compatibility(root, *, question_slugs=None):
     """Read current policy and coverage requirements without granting a review."""
     root = Path(root).resolve()
     capture = capture_workspace(root)
-    config = yaml.safe_load(capture.files.get("research.yml", b""))
+    config = safe_load(capture.files.get("research.yml", b""))
     require(isinstance(config, dict), "strict_configuration_invalid")
     sibling("_selected_publication").validate_config_paths(config)
     policy = resolve_policy(root, config)

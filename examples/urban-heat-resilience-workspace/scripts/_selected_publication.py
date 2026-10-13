@@ -14,10 +14,12 @@ import yaml
 from _evidence_revision import MAX_ATTEMPTS, capture_workspace, content_id, refuse
 from _publication_context import authorized_capture
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current as safe_load
 
 SCHEMA_VERSION = "evidence-selected-publication/v1"
 SCRIPT_DIR = Path(__file__).resolve().parent
 _STRICT_CACHE = {}
+_READ_HELPER_CACHE = {}
 GLOBAL_GATES = (
     "configuration_and_workspace_health", "source_integrity_and_normalization",
     "source_requests", "candidate_lifecycle", "claims_and_contradictions",
@@ -86,7 +88,7 @@ def logical_paths(value: Any, temporary_root: Path) -> Any:
 def validate_before_materialization(files: Any, readiness: Any, *, usage_view=None, purpose=None, consumer=None, expected_config=None) -> tuple[dict[str, Any], Any]:
     """Validate config and detect known secret forms before copying retained bytes."""
     try:
-        config = yaml.safe_load(files.get("research.yml", b""))
+        config = safe_load(files.get("research.yml", b""))
     except (ValueError, RecursionError, yaml.YAMLError) as error:
         raise refuse("PUBLICATION_CONFIG_INVALID", "research.yml is not readable YAML.") from error
     if not isinstance(config, dict):
@@ -152,18 +154,18 @@ def run_selected_publication(
         raise refuse("EVIDENCE_REVISION_INVALID", "Expected revision must be a canonical sha256 identity.")
     root = Path(project_root).expanduser().resolve()
     producer = producer_identity()
-    readiness = load_workspace_module(SCRIPT_DIR, "publication_readiness")
-    questions = load_workspace_module(SCRIPT_DIR, "question_status")
-    status_module = load_workspace_module(SCRIPT_DIR, "workspace_status")
-    lint_module = load_workspace_module(SCRIPT_DIR, "lint")
-    export_module = load_workspace_module(SCRIPT_DIR, "export_answers")
+    readiness = load_workspace_module(SCRIPT_DIR, "publication_readiness", cache=_READ_HELPER_CACHE)
+    questions = load_workspace_module(SCRIPT_DIR, "question_status", cache=_READ_HELPER_CACHE)
+    status_module = load_workspace_module(SCRIPT_DIR, "workspace_status", cache=_READ_HELPER_CACHE)
+    lint_module = load_workspace_module(SCRIPT_DIR, "lint", cache=_READ_HELPER_CACHE)
+    export_module = load_workspace_module(SCRIPT_DIR, "export_answers", cache=_READ_HELPER_CACHE)
     if producer_identity() != producer:
         raise refuse("EVIDENCE_REVISION_CHANGED", "Publication implementation changed while loading.")
     for _attempt in range(MAX_ATTEMPTS):
         revision = capture_workspace(root)
         strict = load_workspace_module(SCRIPT_DIR, "_strict_evidence", cache=_STRICT_CACHE)
         try:
-            candidate_config = yaml.safe_load(revision.files.get("research.yml", b""))
+            candidate_config = safe_load(revision.files.get("research.yml", b""))
         except yaml.YAMLError:
             candidate_config = None  # The owning config validation below emits the refusal.
         if strict.configured(root, candidate_config):

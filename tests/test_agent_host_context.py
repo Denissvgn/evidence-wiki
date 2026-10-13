@@ -10,6 +10,7 @@ import pytest
 
 from evidence_wiki import AgentHostContext, Onboarding
 from evidence_wiki.errors import UsageError
+from tests._script_loader import load_module_uncached
 
 pytest_plugins = ["tests.test_unattended_example"]
 
@@ -177,12 +178,10 @@ def test_installed_live_startup_is_terminal_and_secret_safe(agent_host):
 
 @pytest.mark.parametrize('human_required',[False,True])
 def test_live_context_uses_the_selected_policy_objective_and_review_profile(tmp_path,monkeypatch,human_required):
-    import importlib.util
-
     example=Path(__file__).resolve().parents[1]/'examples/agent-host'
     monkeypatch.syspath_prepend(str(example))
-    specification=importlib.util.spec_from_file_location('selected_agent_host',example/'agent_host.py')
-    module=importlib.util.module_from_spec(specification);specification.loader.exec_module(module)
+    # Each case patches module globals and needs an independent host module.
+    module=load_module_uncached('selected_agent_host',example/'agent_host.py')
     selected_policy={'objective':'Assess a different original objective.','human_review':human_required,
         'required_evaluators':[{'human_required':False}]}
     runtime=SimpleNamespace(policy=SimpleNamespace(to_dict=lambda:selected_policy),

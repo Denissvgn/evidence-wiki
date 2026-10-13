@@ -1,19 +1,16 @@
 """Prospective fixture duration is bound before native state is created."""
 
-import importlib.util
 from pathlib import Path
 
 import pytest
 
+from tests._script_loader import load_module
 from tools._repeated_integration_host import run_scenario
 
 
 def support_module():
     path = Path(__file__).resolve().parents[1] / "examples/unattended-host/support.py"
-    spec = importlib.util.spec_from_file_location("reference_duration_support", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_module("reference_duration_support", path)
 
 
 def test_new_duration_changes_only_policy_identity_and_time_budget(tmp_path):

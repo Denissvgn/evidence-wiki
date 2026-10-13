@@ -7,9 +7,9 @@ import hashlib
 import json
 from pathlib import Path
 
-import yaml
 from _evidence_revision import canonical_bytes, capture_workspace, content_id
 from _pack_revision_guard import inputs, require, research_input, sibling
+from _yaml_safe import safe_load_current as safe_load
 
 MAX_QUESTIONS = 300
 MAX_REQUESTS = 200
@@ -110,7 +110,7 @@ def outstanding(root, state, slug, manifest):
 def inspect(root, state, incoming, effective, candidate_files, desired_files):
     root = Path(root)
     capture = capture_workspace(root)
-    config = yaml.safe_load(capture.files["research.yml"])
+    config = safe_load(capture.files["research.yml"])
     base = state["normalized_overlay"]
     delta = differences(base, incoming)
     actual = differences(config, effective)
@@ -169,7 +169,7 @@ def inspect(root, state, incoming, effective, candidate_files, desired_files):
         slug = Path(name).stem
         fm = frontmatter[name]
         path = coverage.selected_manifest_path(root, config, slug, fm.get("coverage_manifest")).relative_to(root).as_posix()
-        manifest = yaml.safe_load(capture.files[path]) if path in capture.files else None
+        manifest = safe_load(capture.files[path]) if path in capture.files else None
         require(manifest is None or isinstance(manifest, dict), "revision_coverage_shape")
         facets = [*(manifest or {}).get("required_facets", []), *(manifest or {}).get("optional_facets", [])]
         refs = {facet.get(field) for facet in facets for field in ("source_policy", "freshness_policy", "identity_policy")}
