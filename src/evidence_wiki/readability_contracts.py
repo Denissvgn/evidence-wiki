@@ -9,6 +9,7 @@ from ._pack_io import bounded
 from .errors import EvidenceWikiError, UsageError
 from .mutation_contracts import canonical, detached, digest
 from .onboarding_contract import _bounded_nesting, _matches
+from .research_journal_contracts import detached_record
 
 INPUT = "research-readability-input/v1"
 OUTPUT = "research-readability-issues/v1"
@@ -236,7 +237,7 @@ def restored_preparation(value, execution):
 
 def check_persisted_record(record):
     """Check the complete escaped native envelope, never just inner input bytes."""
-    detached(record)
+    detached_record(record)
     encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(encoded) > MAX_JOURNAL_BYTES:
         refuse("persistence_bound")

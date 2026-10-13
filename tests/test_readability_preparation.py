@@ -107,7 +107,7 @@ def preparation(monkeypatch):
         "nonce": "fixed-nonce", "input": {"raw": "exact input"}}
     attempt_record = {"attempt": attempt, "purpose": "readability", "reservation": {"seconds": "30"},
         "readability_parent": {"order_seed": "fixed-seed", "binding": {"context_id": "fixed-context"}}}
-    session = SimpleNamespace(execution=SimpleNamespace(profile=SimpleNamespace(total_steps=10),
+    session = SimpleNamespace(binding={}, execution=SimpleNamespace(profile=SimpleNamespace(total_steps=10),
         attempt=lambda document: SimpleNamespace(document=lambda: detached(document), attempt_id=document["job"]["id"])))
     view = {"basis_id": "basis", "execution": {"steps_used": 0}}
     @contextmanager
@@ -143,8 +143,10 @@ def preparation(monkeypatch):
     # separate tests with real ExecutionAttempt and ResearchExecution codecs.
     monkeypatch.setattr(execution, "stored_preparation", lambda value, _owner: detached(value))
     monkeypatch.setattr(execution, "restored_preparation", lambda value, _owner: detached(value))
-    session.execution.seal_record = lambda _s, kind, identity, data, **_k: {
-        "kind": kind, "request_id": identity, "data": detached(data)}
+    journal = object.__new__(research_execution.ResearchExecution)
+    journal._observer_key = b"o" * 32
+    session.execution.seal_record = lambda current, kind, identity, data, **_k: journal.seal_record(
+        current, kind, identity, data, records=records)
     return session, records, calls, attempt_record
 
 
@@ -158,7 +160,7 @@ def test_interruption_after_each_append_never_regenerates_identity_or_reinvokes(
         count += 1
         if count == fault and not written:
             raise RuntimeError("Controlled before-write interruption")
-        records.append({"kind": kind, "request_id": request_id, "data": detached(data)})
+        records.append(session.execution.seal_record(session, kind, request_id, data))
         if count == fault:
             raise RuntimeError("Controlled after-write interruption")
     monkeypatch.setattr(native, "append", append)

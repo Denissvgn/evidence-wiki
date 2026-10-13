@@ -14,6 +14,7 @@ import re
 from . import execution_accounting as accounting
 from .agent_execution import ExecutionProfile
 from .mutation_contracts import _shape, canonical, detached, digest
+from .research_journal_contracts import canonical_record, detached_record, digest_record
 from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, RunPolicy
 from .run_policy import validate_document as policy_document
 from .telemetry import _SECRET
@@ -180,7 +181,7 @@ def _decision(policy, value, observed):
 def _metadata(record, policy, attempts=None, configured_roles=None):
     data = record["data"]
     result = {"sequence": record["sequence"], "event_ref": record["event_ref"],
-        "record_ref": digest({key: value for key, value in record.items() if key != "event_ref"}),
+        "record_ref": digest_record({key: value for key, value in record.items() if key != "event_ref"}),
         "kind": record["kind"], "request_id": record["request_id"],
         **dict.fromkeys(("attempt_id", "job_id", "purpose", "role", "controller_ref", "model_ref", "prompt_version", "input_ref", "output_ref",
             "basis_ref", "issued_at", "deadline_at", "started_at", "completed_at", "observed_at", "state", "usage", "timing", "decision"))}
@@ -309,8 +310,8 @@ def report(policy, profile, binding_id, run_id, records, accounting_report, *, a
     snapshot_bytes = 2
     chain_complete = True
     for record in records:
-        record = detached(record)
-        raw = canonical(record)
+        record = detached_record(record)
+        raw = canonical_record(record)
         snapshot_bytes += len(raw) + (1 if checked_records else 0)
         if snapshot_bytes > MAX_JOURNAL_BYTES:
             refuse("LIMIT")
@@ -330,7 +331,7 @@ def report(policy, profile, binding_id, run_id, records, accounting_report, *, a
         if record["sequence"] != expected_sequence:
             chain_complete = False
             missing.extend(range(expected_sequence, record["sequence"]))
-        elif record["previous_record_ref"] != (None if previous is None else digest(previous)):
+        elif record["previous_record_ref"] != (None if previous is None else digest_record(previous)):
             refuse("JOURNAL_CONFLICT")
         sequences.append(record["sequence"])
         previous = {key: value for key, value in record.items() if key != "event_ref"}

@@ -43,6 +43,14 @@ expiry requirements. An outer supervisor must cover startup,
 native children and ordinary cleanup. Failed or timed-out work must remain in
 the original inventory; exact replay never dispatches another integration.
 
+The optional plan scope `native_run_seconds` freezes the new reference run's
+elapsed budget before provisioning and qualification. It defaults to 1800
+seconds, is bounded to 25200 seconds and cannot exceed the frozen study window.
+For serialized host runs, reserve enough time for the first run's closing
+observation after later hosts finish. This changes the new policy identity;
+existing policies and deadlines retain their original values. Slot controls,
+the MCP call deadline and the short native witness remain separately enforced.
+
 The plan pins candidate bytes, actual local interpreter/system/machine and
 reference host implementation bytes, route scenarios, all nine input identities,
 cost caps, policy and proposal thresholds before trial evidence is consumed.
@@ -134,6 +142,14 @@ preserved; the study deadline cannot renew that witness. All owners are read
 twice and final candidate/host, evidence and expiry checks precede publication.
 Input bounds and strict duplicate-key checks apply. Exclusive output preserves
 earlier artifacts. A retained decision requires current replay, not blind reuse.
+
+A trusted host may freeze `--owner-read-workers 1`, `2` or `3` when creating a
+new plan to read independent hosts in bounded processes. The plan pins the
+controller source; each host's slots remain serial, and all original admission,
+two-pass comparison and final expiry checks still apply. Without this option,
+reads retain the existing serial behavior. Process isolation requires disjoint
+original fixture and control roots. An unfinished or unclosed worker supplies
+unavailable evidence; its output cannot establish a positive result.
 
 Frozen precedence is `stop`, `revise`, `narrow`, `continue`. Unsafe invariants,
 source/host integrity changes and exceeded caps stop. Functional failures,

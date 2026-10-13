@@ -7,6 +7,7 @@ from .host_capabilities import scope_allows
 from .mutation_contracts import digest
 from .pack_discovery import owner
 from .requirements_operations import REQUIREMENTS, instruction_matches, verifylineage
+from .research_journal_contracts import digest_record
 
 
 def baseline_time(session):
@@ -79,7 +80,7 @@ def history(session, original_id):
             previous=records[-1] if records else None
             if (set(row)!={"schema_version","kind","binding_id","request_id","sequence","previous_record_ref","data","authentication"}
                     or row["binding_id"]!=digest(binding) or row["request_id"]!=data.get("request_id")
-                    or row["sequence"]!=len(records) or row["previous_record_ref"]!=(digest(previous) if previous else None)):
+                    or row["sequence"]!=len(records) or row["previous_record_ref"]!=(digest_record(previous) if previous else None)):
                 refuse("acquisition_run_history_invalid")
             if binding.get("observer_id")!=session.binding["observer_id"]:
                 refuse("acquisition_history_observer_unknown")

@@ -325,13 +325,18 @@ def additional_snapshot(runtime, child, owner):
     return result
 
 
-def replay(root, factory, run_id, additional_run_ids=()):
+def replay(root, factory, run_id, additional_run_ids=(), *, expected_control_root=None):
     import secrets
 
     from evidence_wiki import BoundedSubprocessExecutor, execution_session
     from evidence_wiki.calibration_probes import refresh
 
     runtime = HostRuntime.from_factory(factory,root)
+    if expected_control_root is not None:
+        expected = Path(expected_control_root)
+        if (expected != Path(root).parent / 'fixture-control' or expected.resolve(strict=True) != expected
+                or runtime.context.mutation_control_directory != expected):
+            raise ValueError('integration_current_binding_changed')
     if type(runtime.execution.executor) is not BoundedSubprocessExecutor:
         raise ValueError('The fixed native producer requires its supported bounded local host.')
     private = Path(factory).parent

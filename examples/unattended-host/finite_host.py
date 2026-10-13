@@ -42,11 +42,11 @@ from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
 REVIEWERS = (('evidence', 'evaluator'), ('scope', 'evaluator'), ('critic', 'critic'), ('adjudicator', 'adjudicator'))
 
 
-def provision(base, *, observation_sink=None):
+def provision(base, *, observation_sink=None, run_seconds=1800):
     """Create the finite fixture once; restore retains its exact keys and IDs."""
     from fixture_host import provision as create
     return create(base, 'Assess the exact declared finite observation for fixture-cohort at fixture-observation.',
-        finite=True, observation_sink=observation_sink)
+        finite=True, observation_sink=observation_sink, run_seconds=run_seconds)
 
 
 def configuration(profile, config):

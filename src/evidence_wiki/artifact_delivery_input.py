@@ -12,6 +12,7 @@ from . import execution_accounting as accounting
 from . import execution_session as native
 from .artifact_delivery_contracts import refuse
 from .mutation_contracts import canonical, digest
+from .research_journal_contracts import canonical_records
 
 _ACTIVE = ContextVar("native_artifact_publication", default=None)
 _DISPATCH = ContextVar("native_artifact_effect_dispatch", default=None)
@@ -43,7 +44,7 @@ class _PublicationAdmission:
 
     def __init__(self, session, identifier, arguments, control):
         self.session, self.identifier, self.arguments, self.control = session, identifier, canonical(arguments), control
-        self.records = canonical(native.retained(session))
+        self.records = canonical_records(native.retained(session))
         self.thread = threading.get_ident()
         self.active = False
         self.origin = self
@@ -51,7 +52,7 @@ class _PublicationAdmission:
     def held(self, session):
         if (self.origin is not self or _ACTIVE.get() is not self or not self.active
                 or session is not self.session or self.thread != threading.get_ident()
-                or canonical(native.retained(session)) != self.records):
+                or canonical_records(native.retained(session)) != self.records):
             refuse("publication_custody_not_held")
         self.control.checkpoint("current_publication_input")
 

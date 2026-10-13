@@ -26,6 +26,7 @@ from .readability_contracts import (
     stored_preparation,
 )
 from .readability_reference import observe_domain
+from .research_journal_contracts import canonical_records, digest_records
 from .resolution_operations import _held_current
 from .service_authentication import owned, readability_credential
 from .workflow_contracts import EXECUTION_OBSERVATION, JOB_V3, validate_job
@@ -38,7 +39,7 @@ class _InputDispatch:
 
     def __init__(self, session, request_id, attempt, records):
         self.session, self.request_id, self.attempt = session, request_id, attempt
-        self.records = canonical(records)
+        self.records = canonical_records(records)
         self.thread = threading.get_ident()
         self.state = "created"
         self.invalidated = False
@@ -55,7 +56,7 @@ class _InputDispatch:
     def require(self, session, attempt):
         if (self._origin is not self or session is not self.session or self.request_id != self.attempt.job["id"]
                 or self.request_id != self.attempt.attempt_id or attempt.document() != self.attempt.document() or self.invalidated
-                or canonical(native.retained(session)) != self.records):
+                or canonical_records(native.retained(session)) != self.records):
             refuse("input_dispatch_identity_changed")
 
     def transfer(self, session, attempt):
@@ -173,7 +174,7 @@ def _admit_input_dispatch(session, request_id, attempt):
         refuse("input_dispatch_identity_changed")
     prepared = restored_preparation(rows[0]["data"]["readability_preparation"], session.execution)
     if (prepared["attempt_record"] != rows[2]["data"] or prepared["probe_record"] != rows[1]["data"]
-            or prepared["predecessor_records_ref"] != digest(records[:-3])
+            or prepared["predecessor_records_ref"] != digest_records(records[:-3])
             or stored_attempt(attempt, session.execution.profile) != rows[2]["data"]["attempt"]):
         refuse("input_dispatch_identity_changed")
     _INPUT_DISPATCH.set(_InputDispatch(session, request_id, attempt, records))
@@ -675,7 +676,7 @@ def prepare_step(session, request_id, expected_basis_id):
                 refuse("application_deadline_expired")
             probe_record = witness.consume(session)
             preparation = {"attempt_record": attempt_record, "probe_record": probe_record,
-                "predecessor_records_ref": digest(records)}
+                "predecessor_records_ref": digest_records(records)}
             preparation = stored_preparation(preparation, session.execution)
             restored_preparation(preparation, session.execution)
             intent_data = {"advance_id": request_id, "before_basis_id": expected_basis_id, "action": action,

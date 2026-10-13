@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- Inspect and recover deeply nested mutation records without reducing the
+  accepted request's nesting allowance. Each retained child keeps its original
+  validation limits; fixed inspection wrappers retain the aggregate bounds.
+
+- Preserve complete bounded review data in authenticated execution journals.
+  Journal headers and collections retain canonical bytes, signatures and chain
+  references without consuming the child payload's nesting allowance.
+
+- Authenticate retained integration history before acquiring a short current
+  witness, while preserving closing source, authority and journal checks.
+
+- Refresh current reference conformance before a standalone integration brief
+  within the original operation allowance, retaining a separate host action.
+
 - Keep complete agent bootstrap JSON within its existing byte bound when host
   qualification resources are present.
 
@@ -20,6 +34,10 @@
   retained refresh identities and finite host deadlines.
 
 ### Added
+
+- Allow a trusted integration host to freeze bounded process scheduling for
+  current original reads, preserving serial defaults, original admission and
+  closing expiry checks.
 
 - Run repeated native reference integrations through direct Python,
   current-caller and scoped MCP routes, retaining same-workspace evidence changes,

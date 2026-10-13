@@ -40,7 +40,9 @@ class FixtureMeter:
         return {'seconds':summary['seconds'],'model_calls':1,'tool_calls':1,'tokens':0,'cost':'0'}
 
 
-def provision(base, objective, *, scenario='repair', observation_sink=None, finite=False):
+def provision(base, objective, *, scenario='repair', observation_sink=None, finite=False, run_seconds=1800):
+    if type(run_seconds) is not int or not 1 <= run_seconds <= 25200:
+        raise ValueError('Fixture run duration must be frozen before provisioning.')
     base = base.resolve()
     if base.exists():
         raise ValueError('Fixture output must be a new directory; use live mode to reopen a provisioned runtime.')
@@ -97,7 +99,7 @@ def provision(base, objective, *, scenario='repair', observation_sink=None, fini
             for principal,(controller,roles) in role_map.items()},'revoked_keys':[],'revoked_envelopes':[]}
     authority_path = private/'authority.json'
     private_write(authority_path,canonical(authority))
-    run_policy = policy(root,objective)
+    run_policy = policy(root,objective,run_seconds=run_seconds)
     roles = (ExecutionRole('generator','host_worker','generator-controller','simulated/fixture-generator','generate/v1'),
         ExecutionRole('evidence','evaluator','evidence-controller','simulated/fixture-evidence','review/v1'),
         ExecutionRole('critic','evaluator','critic-controller','simulated/fixture-critic','review/v1'),

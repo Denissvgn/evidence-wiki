@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from evidence_wiki import execution_session as native
 from evidence_wiki.mutation_contracts import MAX_BYTES, detached, digest
 from evidence_wiki.pack_discovery import owner
+from evidence_wiki.research_journal_contracts import canonical_record, digest_record
 from evidence_wiki.research_session import ResearchSession
 
 from .resolution_contracts import refuse
@@ -159,7 +160,7 @@ def _journal_proof(session, facts):
     complete.update(b"[")
     size, nodes, ordered = 2, 1, []
     for index, record in enumerate(facts.records):
-        raw = native.canonical(record)
+        raw = canonical_record(record)
         size += len(raw) + (1 if index else 0)
         pending = [record]
         while pending:
@@ -177,7 +178,7 @@ def _journal_proof(session, facts):
         ordered.append({"sequence": record["sequence"], "event_ref": record["event_ref"],
             "previous_record_ref": record["previous_record_ref"],
             "record_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
-            "chain_record_ref": native.digest({key: value for key, value in record.items() if key != "event_ref"}),
+            "chain_record_ref": digest_record({key: value for key, value in record.items() if key != "event_ref"}),
             "canonical_bytes": len(raw)})
     complete.update(b"]")
     return detached({"schema_version": "private-resolution-journal-proof/v1",

@@ -283,20 +283,52 @@ def detached(value: Any) -> Any:
             elif item is not None and type(item) not in (str, bool, int, float):
                 refuse("INVALID")
         _bounded_tree(value)
-        chunks, size = [], 0
-        for text in json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).iterencode(value):
-            raw = text.encode()
-            size += len(raw)
-            if size > MAX_BYTES:
-                refuse("LIMIT")
-            chunks.append(raw)
-        return json.loads(b"".join(chunks))
+        return json.loads(_serialized(value))
     except MutationError:
         raise
     except UsageError:
         refuse("INVALID")
     except (TypeError, ValueError, UnicodeError, RecursionError):
         refuse("INVALID")
+
+
+def _serialized(value: Any) -> bytes:
+    chunks, size = [], 0
+    for text in json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).iterencode(value):
+        raw = text.encode()
+        size += len(raw)
+        if size > MAX_BYTES:
+            refuse("LIMIT")
+        chunks.append(raw)
+    return b"".join(chunks)
+
+
+def _inspection_detached(value: Any) -> Any:
+    """Keep each retained document's bounds independent of its fixed wrappers."""
+    if type(value) is not dict or value.get("record") is None:
+        return detached(value)
+    record = value["record"]
+    if (type(record) is not dict or any(type(key) is not str for key in record)
+            or record.keys() != {"intent", "state", "receipt"}):
+        refuse("INVALID", "/record")
+    result = detached({**value, "record": None})
+    result["record"] = {
+        key: checked(schema, record[key]) if key == "intent" or record[key] is not None else None
+        for schema, key in ((INTENT, "intent"), (STATE, "state"), (RECEIPT, "receipt"))
+    }
+    # The two closed wrappers consume aggregate capacity, but never reduce the
+    # already checked child's depth budget or increase its individual limits.
+    pending, count = [result], 0
+    while pending:
+        item = pending.pop()
+        count += 1
+        if count > 65536:
+            refuse("LIMIT")
+        if type(item) is dict:
+            pending.extend(child for pair in item.items() for child in pair)
+        elif type(item) is list:
+            pending.extend(item)
+    return json.loads(_serialized(result))
 
 
 def canonical(value: Any) -> bytes:
@@ -318,7 +350,7 @@ def intent_digest(value: dict[str, Any]) -> str:
 
 
 def checked(name: str, value: Any) -> dict[str, Any]:
-    value = detached(value)
+    value = _inspection_detached(value) if name == INSPECTION else detached(value)
     if type(value) is dict and "schema_version" in value and value["schema_version"] != name:
         refuse("VERSION_UNSUPPORTED", "/schema_version")
     _shape(value, schema_document(name))
@@ -385,7 +417,31 @@ def make_intent(request: Any, workspace_binding: dict[str, Any]) -> dict[str, An
 
 
 def encode_document(name: str, value: Any) -> bytes:
-    return canonical(checked(name, value))
+    value = checked(name, value)
+    return _serialized(value) if name == INSPECTION else canonical(value)
+
+
+def _document_nesting(name: str, text: str) -> None:
+    if name != INSPECTION:
+        _bounded_nesting(text)
+        return
+    depth, quoted, escaped = 0, False, False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > 18:
+                refuse("LIMIT")
+        elif character in "]}":
+            depth -= 1
 
 
 def decode_document(name: str, raw: bytes) -> dict[str, Any]:
@@ -402,7 +458,7 @@ def decode_document(name: str, raw: bytes) -> dict[str, Any]:
 
     try:
         text = raw.decode()
-        _bounded_nesting(text)
+        _document_nesting(name, text)
         value = json.loads(text, object_pairs_hook=unique, parse_constant=lambda _: refuse("INVALID"))
     except MutationError:
         raise

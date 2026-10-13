@@ -214,10 +214,12 @@ def _pins(pins, expected, plan):
     return pins
 
 
-def decide(plan, expected_plan_sha256, evidence_pins, expected_evidence_sha256, readers, now=None, *, closing_check=None):
+def decide(plan, expected_plan_sha256, evidence_pins, expected_evidence_sha256, readers, now=None, *, closing_check=None,
+           prepare_pass=None):
     """Preserve every frozen obligation while replaying exact current originals."""
     plan = validate_plan(plan, expected_plan_sha256)
     _require(closing_check is None or callable(closing_check), "integration_closing_check")
+    _require(prepare_pass is None or callable(prepare_pass), "integration_prepare_pass")
     pins = _pins(evidence_pins, expected_evidence_sha256, plan)
     _require(type(readers) in {list, tuple} and len(readers) <= 9, "integration_readers")
     registry, slots = {}, {slot["slot_id"]: slot for slot in plan["slots"]}
@@ -232,8 +234,16 @@ def decide(plan, expected_plan_sha256, evidence_pins, expected_evidence_sha256, 
     if not (_time(plan["frozen_at"]) <= opening < _time(plan["expires_at"])):
         problems["plan"] = "plan_not_current"
     for closing_pass in (False, True):
+        unavailable = frozenset()
+        if prepare_pass is not None:
+            prepared = prepare_pass()
+            _require(prepared is None or (type(prepared) is frozenset and prepared <= slots.keys()),
+                     "integration_prepare_pass")
+            unavailable = frozenset() if prepared is None else prepared
         for slot_id in sorted(slots):
             slot = slots[slot_id]
+            if slot_id in unavailable:
+                problems[slot_id] = "owner_unavailable"
             if slot_id not in pins or slot_id not in registry:
                 problems[slot_id] = "owner_missing"
                 continue
@@ -426,13 +436,14 @@ def _rank(plan, rows):
     return ranked, excluded
 
 
-def replay_decision(report, expected_plan_sha256, expected_evidence_sha256, readers, now=None, *, closing_check=None):
+def replay_decision(report, expected_plan_sha256, expected_evidence_sha256, readers, now=None, *, closing_check=None,
+                    prepare_pass=None):
     """Check the external pins and recompute over current original owner reads."""
     report = bounded_json(report)
     _require(report.get("report_sha256") == digest({key: value for key, value in report.items() if key != "report_sha256"})
              and report.get("plan_sha256") == expected_plan_sha256 and report.get("evidence_sha256") == expected_evidence_sha256,
              "integration_report_pin")
     replayed = decide(report["plan"], expected_plan_sha256, report["evidence_pins"], expected_evidence_sha256, readers, now,
-                      closing_check=closing_check)
+                      closing_check=closing_check, prepare_pass=prepare_pass)
     _require(canonical(replayed) == canonical(report), "integration_replay_changed")
     return replayed

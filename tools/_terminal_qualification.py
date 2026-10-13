@@ -884,6 +884,7 @@ def stdio_transport_command(argv, row, console):
 def native_journal_records(snapshot, workspace):
     """Validate the complete source chain authenticated by the fixed producer."""
     from evidence_wiki.mutation_contracts import digest as native_digest
+    from evidence_wiki.research_journal_contracts import digest_record
     directory = Path(workspace)/'runs'/snapshot['run_id']
     require(snapshot['source_path'] == str(directory/'events.jsonl')
         and snapshot['state_path'] == str(directory/'run-state.json')
@@ -904,7 +905,7 @@ def native_journal_records(snapshot, workspace):
         require(record['schema_version'] == 'research-execution-journal/v1' and record['sequence'] == len(records)
             and record['request_id'] == event['data']['request_id']
             and record['binding_id'] == native_digest(snapshot['state']['research_session'])
-            and record['previous_record_ref'] == (native_digest(records[-1]) if records else None),
+            and record['previous_record_ref'] == (digest_record(records[-1]) if records else None),
             "qualification_native_journal_chain")
         _sha(record['authentication'])
         records.append(record)

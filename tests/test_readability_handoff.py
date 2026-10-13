@@ -54,7 +54,10 @@ def custody(issued, profile, monkeypatch, tmp_path):
     monkeypatch.setattr(handoff.native, "deadline", lambda *_: datetime.fromisoformat(NOW) + timedelta(seconds=60))
     row = {"attempt": stored_attempt(current, selected), "purpose": "readability", "readability_parent": {
         "basis_id": job["basis_id"], "substance_sha256": binding["substance_sha256"], "binding": binding, "order_seed": (b"b" * 32).hex(), "sources": []}}
-    monkeypatch.setattr(handoff.native, "retained", lambda *_: [{"kind": "execution_attempt", "data": row}])
+    journal = object.__new__(ResearchExecution)
+    journal._observer_key = b"o" * 32
+    retained = journal.seal_record(session, "execution_attempt", "guarded.intent", row, records=[])
+    monkeypatch.setattr(handoff.native, "retained", lambda *_: [retained])
     monkeypatch.setattr(handoff.native, "_document", lambda *_: {"state": {"current": "answering"}})
     native_owner = handoff.native.owner
     native_usage = native_owner("_evidence_usage")
@@ -80,8 +83,6 @@ def custody(issued, profile, monkeypatch, tmp_path):
     domain = observe_domain(brief)
     registry = CalibratedEvaluators([record], authority)
     session.execution.qualifications = registry
-    journal = object.__new__(ResearchExecution)
-    journal._observer_key = b"o" * 32
     session.execution.seal_record = lambda current_session, kind, identity, data: journal.seal_record(current_session, kind, identity, data,
         records=handoff.native.retained(current_session))
     executor.qualification_configuration = lambda request: {"request": request, "configuration": configuration}

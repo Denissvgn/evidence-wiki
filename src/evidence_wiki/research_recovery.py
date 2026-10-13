@@ -3,6 +3,7 @@
 from . import execution_session as native
 from .mutation_contracts import digest, validate_request_id
 from .recovery_contracts import checked
+from .research_journal_contracts import digest_records
 from .research_observation import ResearchObservation
 from .research_session_contracts import refuse
 
@@ -39,7 +40,7 @@ def status(session, *, after_sequence=0, max_effects=32):
         refuse("BASIS_CHANGED")
     return checked({"schema_version": "research-recovery-status/v1", "run_id": session.run_id,
         "binding_id": digest(session.binding), "current_basis_id": current["basis_id"],
-        "journal_sha256": digest(records), "terminal": terminal,
+        "journal_sha256": digest_records(records), "terminal": terminal,
         "status": "terminal" if terminal else "ownership_blocked" if any(row["claimed_by"] and not row["owned_by_session"] and row["status"] == "in_progress" for row in holders) else "not_started" if not records else "reconcilable",
         "original_deadline_utc": native.deadline(session).isoformat() if records else None,
         "steps_used": current["execution"]["steps_used"], "pending": current["execution"]["pending"],

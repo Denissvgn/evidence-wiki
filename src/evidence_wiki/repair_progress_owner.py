@@ -7,6 +7,7 @@ from evidence_wiki.execution_continuations import authenticated_gates, claim_sou
 from evidence_wiki.execution_disagreement import _final_matches, project_claim
 from evidence_wiki.mutation_contracts import digest
 from evidence_wiki.pack_discovery import owner
+from evidence_wiki.research_journal_contracts import digest_records
 from evidence_wiki.research_session import ResearchSession
 
 from .repair_history_permissions import permitted
@@ -121,7 +122,7 @@ def _current_owned(session, *, original_id, after_sequence, max_records, live):
             "diff": diff, "current_review": current_review, "fresh_independent_reviews": fresh,
             "historical_effect_recorded": effect is not None, "execution_correlation": "known" if correlated else "unknown"})
     after_view = optional_current(lambda: native.current(session))
-    if digest(records) != digest(native.retained(session)) or (view is not None and
+    if digest_records(records) != digest_records(native.retained(session)) or (view is not None and
             (after_view is None or after_view["basis_id"] != view["basis_id"])):
         fail("current_basis_changed")
     # Material equality does not cover qualification expiry or review age.
@@ -143,7 +144,7 @@ def _current_owned(session, *, original_id, after_sequence, max_records, live):
             projected["current_review"], projected["fresh_independent_reviews"] = review_selection(session,
                 claim_id=projected["claim_id"], prepared=prepared, packets=packets[0], view=after_view, records=records)
     final_view = optional_current(lambda: native.current(session))
-    if digest(records) != digest(native.retained(session)) or (after_view is not None and
+    if digest_records(records) != digest_records(native.retained(session)) or (after_view is not None and
             (final_view is None or final_view["basis_id"] != after_view["basis_id"])):
         fail("current_basis_changed")
     if after_view is not None and final_view["qualification"] != after_view["qualification"]:

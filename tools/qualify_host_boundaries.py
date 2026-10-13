@@ -48,6 +48,7 @@ def qualify(output, installed, checkout, native):
     from evidence_wiki.agent_resources import resource_document
     from evidence_wiki.mutation_contracts import digest
     from evidence_wiki.onboarding_mcp import OnboardingMcpServer
+    from evidence_wiki.research_journal_contracts import digest_record
 
     package = Path(evidence_wiki.__file__).resolve()
     require(native == checkout and package == native / "src/evidence_wiki/__init__.py",
@@ -190,7 +191,7 @@ def qualify(output, installed, checkout, native):
                     session._check("current")
                     require(session.current()["basis_id"] == report["basis_id"], "Retained original host observation no longer matches current native basis")
                     current_records = runtime.execution.records(session)
-                    require((digest(current_records[-1]) if current_records else None) == report["journal_head_ref"],
+                    require((digest_record(current_records[-1]) if current_records else None) == report["journal_head_ref"],
                         "Retained original host observation journal changed before boundary controls")
                     require(report["capability_matrix"][0]["state"] == "observed", "Current native bound review evidence was not observed")
                     require(len(report["control"]["authenticated_review_controller_refs"]) == 2, "Two native review controllers were not observed")
@@ -425,6 +426,7 @@ def missing_controls(output, installed, checkout, native, original_path, expecte
     from evidence_wiki.mutation_store import capture_owner_generation
     from evidence_wiki.pack_discovery import owner
     from evidence_wiki.research_execution import JOURNAL
+    from evidence_wiki.research_journal_contracts import digest_record
     from evidence_wiki.run_policy import RunPolicy
 
     require(native == checkout and Path(evidence_wiki.__file__).resolve() == native / "src/evidence_wiki/__init__.py",
@@ -485,7 +487,7 @@ def missing_controls(output, installed, checkout, native, original_path, expecte
             require(binding["target"] == str(root) and digest(binding) == report["binding_id"], "Original native run binding differs from its pinned observation")
             policy = RunPolicy(binding["policy"])
             records = native_records(root, run_id)
-            require(records == original["native"][index] and digest(records[-1]) == report["journal_head_ref"], "Current journal differs from original owner custody")
+            require(records == original["native"][index] and digest_record(records[-1]) == report["journal_head_ref"], "Current journal differs from original owner custody")
             profile = next(item["data"]["profile"] for item in records if item["kind"] == "execution_begin")
             require(digest(profile) == binding["execution_profile_id"], "Original declared execution profile differs from its binding")
             base = root.parent

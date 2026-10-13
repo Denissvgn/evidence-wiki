@@ -99,6 +99,58 @@ def _load_example():
     return provision, attest, identity, now, sha
 
 
+def _load_current_refresh():
+    from finite_host import refresh_current
+    return refresh_current
+
+
+def _host_action_failure(error):
+    classes = {"EvidenceWikiError", "ValueError", "TimeoutError", "_HostDeadline"}
+    codes = {"RESEARCH_BUDGET_EXHAUSTED", "RESEARCH_RESOLUTION_REFUSED", "OPERATION_DEADLINE_EXCEEDED",
+             "OPERATION_CANCELLED", "OPERATION_CONTROL_INVALID", "HOST_CONTEXT_REFUSED"}
+    reasons = {"qualification_unknown", "qualification_invalid_or_expired", "current_mandatory_qualification_unknown",
+               "resolution_current_inputs_changed", "host_operation_not_granted", "host_path_outside_scope"}
+    code = getattr(error, "error_code", None)
+    details = getattr(error, "details", None)
+    reason = details.get("reason") if type(details) is dict else None
+    return {"kind": type(error).__name__ if type(error).__name__ in classes else "unknown",
+            "error_code": code if type(code) is str and code in codes else None,
+            "reason": reason if type(reason) is str and reason in reasons else None}
+
+
+def _refresh_for_brief(runtime, root, row, observations, cycle, control):
+    """Retain explicit current host work under the original slot allowance."""
+    control.checkpoint("reference_host_current_before")
+    reserved = control.remaining_seconds("reference_host_current_reservation")
+    if reserved <= 0:
+        raise TimeoutError("integration_slot_budget")
+    actions = row.setdefault("host_actions", [])
+    started = time.monotonic()
+    action = {"schema_version": "finite-host-current-action/v1", "caller_type": "trusted_reference_host",
+              "operation": "refresh_current", "run_id": row["run_id"], "state": "started", "result": None,
+              "failure": None, "allowance": {"deadline_utc": control.deadline_utc,
+                  "reserved_seconds": reserved, "remaining_seconds": None}, "elapsed_seconds": None}
+    try:
+        performed = _load_current_refresh()(runtime, root, row["run_id"])
+        if type(performed) is not bool:
+            raise ValueError("integration_current_refresh_result")
+        # A returned true means host work ran; the following brief owns eligibility.
+        action.update(state="returned", result=performed)
+    except BaseException as error:
+        action.update(state="refused" if isinstance(error, EvidenceWikiError) else "failed",
+                      failure=_host_action_failure(error))
+        raise ValueError("integration_current_refresh_failed") from None
+    finally:
+        elapsed = max(0.0, time.monotonic() - started)
+        action["elapsed_seconds"] = elapsed
+        action["allowance"]["remaining_seconds"] = max(0.0, reserved - elapsed)
+        actions.append(_retain(observations / (cycle + "-host-current-" + str(len(actions) + 1) + ".json"),
+                               canonical(action)))
+    control.checkpoint("reference_host_current_after")
+    if performed is not True:
+        raise ValueError("integration_current_refresh_unavailable")
+
+
 def _closure(root):
     rows = [json.loads(line) for line in (root / "sources/manifest.jsonl").read_text().splitlines()]
     if len(rows) != 1:
@@ -238,6 +290,13 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
     """Observe baseline plus two real permitted evidence-identity revisions."""
     host = next(row for row in plan["hosts"] if row["host_id"] == host_id)
     route = host["route"]
+    run_seconds = plan["scope"].get("native_run_seconds", 1800)
+    if type(run_seconds) is not int or not 1 <= run_seconds <= 25200:
+        raise ValueError("integration_run_duration_invalid")
+    if "native_run_seconds" in plan["scope"]:
+        window = (datetime.fromisoformat(plan["expires_at"]) - datetime.fromisoformat(plan["frozen_at"])).total_seconds()
+        if run_seconds > window:
+            raise ValueError("integration_run_duration_exceeds_study")
     if digest(candidate_manifest(ROOT)) != plan["candidate_sha256"] or digest(host_identity(route)) != host["host_sha256"]:
         raise ValueError("integration_candidate_or_host_changed")
     if digest(scenario(route)) != host["scenario_sha256"]:
@@ -268,7 +327,8 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
     try:
         with _deadline(min(remaining_seconds, sum(float(slot["elapsed_cap_seconds"]) for slot in selected.values()))):
             provision, _, _, _, _ = _load_example()
-            root, runtime, _ = provision(directory / "fixture")
+            options = {} if "native_run_seconds" not in plan["scope"] else {"run_seconds": run_seconds}
+            root, runtime, _ = provision(directory / "fixture", **options)
             report.update(workspace=str(root), factory=str(root.parent / "fixture-private/services.py"))
             descriptor, files = _closure(root)
             report["reference_sha256"] = hashlib.sha256(canonical(REFERENCE)).hexdigest()
@@ -297,6 +357,7 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
                     originals = row["originals"] = {}
                     result = routes.call("refresh" if parent_id else "run-cycle", arguments, control)
                     originals["result"] = _retain(observations / (CYCLES[index] + "-result.json"), canonical(result))
+                    _refresh_for_brief(runtime, root, row, observations, CYCLES[index], control)
                     try:
                         brief = routes.call("brief", {"run_id": row["run_id"]}, control)
                     except EvidenceWikiError as error:
@@ -307,6 +368,7 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
                         control.checkpoint("reference_brief_retry")
                         if control.remaining_seconds("reference_brief_retry") <= 0:
                             raise TimeoutError("integration_slot_budget") from None
+                        _refresh_for_brief(runtime, root, row, observations, CYCLES[index], control)
                         try:
                             brief = routes.call("brief", {"run_id": row["run_id"]}, control)
                         except EvidenceWikiError as retry_error:

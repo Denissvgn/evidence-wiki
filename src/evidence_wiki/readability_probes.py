@@ -12,6 +12,7 @@ from .calibration_probes import configuration_document
 from .mutation_contracts import canonical, detached, digest
 from .readability_reference import observe_domain
 from .research_execution import bounded_host_call
+from .research_journal_contracts import detached_records
 from .resolution_operations import _held_current
 
 
@@ -80,7 +81,7 @@ class _ProbeObservation:
     def __init__(self, session, request_id, basis, domain, probe, records):
         self._session, self._request_id = session, request_id
         self._basis, self._domain_bytes, self._probe_bytes = basis, canonical(domain), canonical(probe)
-        self._records = detached(records)
+        self._records = detached_records(records)
         self._profile, self._registry = session.execution.profile.sha256, session.execution.qualifications.sha256
         self._thread, self._consumed = threading.get_ident(), False
 

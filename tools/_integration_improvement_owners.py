@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+import time
 from pathlib import Path
 
 from evidence_wiki import HostRuntime, Workspace
@@ -24,7 +26,13 @@ from tools._repeated_integration_host import (
     supported_proposals,
 )
 from tools.measure_integration_costs import read_command_receipt
-from tools.replay_qualification_native import replay as native_replay
+from tools.replay_qualification_native import (
+    _host_files,
+    verify_journal_closing,
+)
+from tools.replay_qualification_native import (
+    replay as native_replay,
+)
 from tools.run_comparative_trials import read_private
 from tools.verify_acceptance_paths import candidate_manifest
 
@@ -47,6 +55,74 @@ def _response_document(directory, filename, original):
         return document
     except (OSError, ValueError, KeyError) as error:
         raise ValueError("integration_original_response_changed") from error
+
+
+def _host_action_document(document, run_id):
+    """Read a closed host-work grammar without treating it as native proof."""
+    try:
+        if (set(document) != {"schema_version", "caller_type", "operation", "run_id", "state", "result",
+                             "failure", "allowance", "elapsed_seconds"}
+                or document["schema_version"] != "finite-host-current-action/v1"
+                or document["caller_type"] != "trusted_reference_host"
+                or document["operation"] != "refresh_current" or document["run_id"] != run_id
+                or document["state"] not in {"returned", "refused", "failed"}):
+            raise ValueError
+        if document["state"] == "returned":
+            if type(document["result"]) is not bool or document["failure"] is not None:
+                raise ValueError
+        else:
+            failure = document["failure"]
+            if (document["result"] is not None or type(failure) is not dict
+                    or set(failure) != {"kind", "error_code", "reason"}
+                    or failure["kind"] not in {"EvidenceWikiError", "ValueError", "TimeoutError", "_HostDeadline", "unknown"}
+                    or failure["error_code"] not in {None, "RESEARCH_BUDGET_EXHAUSTED", "RESEARCH_RESOLUTION_REFUSED",
+                        "OPERATION_DEADLINE_EXCEEDED", "OPERATION_CANCELLED", "OPERATION_CONTROL_INVALID", "HOST_CONTEXT_REFUSED"}
+                    or failure["reason"] not in {None, "qualification_unknown", "qualification_invalid_or_expired",
+                        "current_mandatory_qualification_unknown", "resolution_current_inputs_changed",
+                        "host_operation_not_granted", "host_path_outside_scope"}):
+                raise ValueError
+        allowance = document["allowance"]
+        if type(allowance) is not dict or set(allowance) != {"deadline_utc", "reserved_seconds", "remaining_seconds"}:
+            raise ValueError
+        _time(allowance["deadline_utc"])
+        reserved, remaining, elapsed = allowance["reserved_seconds"], allowance["remaining_seconds"], document["elapsed_seconds"]
+        if (any(type(value) not in {int, float} or not math.isfinite(value) for value in (reserved, remaining, elapsed))
+                or reserved <= 0 or elapsed < 0 or remaining != max(0, reserved - elapsed)):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, OverflowError) as error:
+        raise ValueError("integration_original_response_changed") from error
+
+
+def _host_actions(report, directory):
+    """Authenticate optional host actions separately from route envelopes."""
+    for index, row in enumerate(report["cycles"]):
+        if "host_actions" not in row:
+            continue
+        originals = row["host_actions"]
+        if type(originals) is not list or not 1 <= len(originals) <= 2:
+            raise ValueError("integration_original_response_changed")
+        actions = []
+        for number, original in enumerate(originals, 1):
+            document = _response_document(directory, CYCLES[index] + "-host-current-" + str(number) + ".json", original)
+            _host_action_document(document, row["run_id"])
+            actions.append(document)
+        briefs = [call for call in report["calls"] if call.get("operation") == "brief"
+                  and call.get("arguments", {}).get("run_id") == row["run_id"]]
+        performed = [action["state"] == "returned" and action["result"] is True for action in actions]
+        if (len(briefs) > len(actions) or any(not performed[number] for number in range(len(briefs)))
+                or (not all(performed) and (row["projection"].get("accepted") is True
+                                           or row["projection"].get("integration_success") is True))):
+            raise ValueError("integration_original_response_changed")
+        if len(actions) == 2:
+            if (not briefs or briefs[0].get("state") != "refused"
+                    or briefs[0].get("error_code") != "RESEARCH_RESOLUTION_REFUSED"
+                    or briefs[0].get("reason") != "resolution_current_inputs_changed"
+                    or actions[1]["allowance"]["deadline_utc"] != actions[0]["allowance"]["deadline_utc"]
+                    or actions[1]["allowance"]["reserved_seconds"] > actions[0]["allowance"]["remaining_seconds"]):
+                raise ValueError("integration_original_response_changed")
+        if report["failure"] is None and (not all(performed) or len(briefs) != len(actions)
+                                         or briefs[-1].get("state") != "returned"):
+            raise ValueError("integration_original_response_changed")
 
 
 def _responses(report, directory, route):
@@ -101,10 +177,11 @@ def _responses(report, directory, route):
                 raise ValueError("integration_original_response_changed")
         else:
             raise ValueError("integration_original_response_changed")
+    _host_actions(report, directory)
     return captured
 
 
-def host_readers(plan, originals):
+def host_readers(plan, originals, *, expected_control_root=None):
     """Use host-selected native readers, never an authentication flag in JSON.
 
     Original locations and heads are external host input. Native producers own
@@ -112,6 +189,8 @@ def host_readers(plan, originals):
     synthetic; local integration execution and host elapsed time are observed.
     """
     if type(originals) is not dict or set(originals) - {h["host_id"] for h in plan["hosts"]}:
+        raise ValueError("integration_original_selection")
+    if expected_control_root is not None and len(originals) != 1:
         raise ValueError("integration_original_selection")
     result = []
     for host in plan["hosts"]:
@@ -168,6 +247,12 @@ def host_readers(plan, originals):
                 observed_at = verified["receipt"]["finished_at"]
                 expires_at = plan["expires_at"]
                 captured_responses = _responses(report, path.parent, host["route"])
+                for selected_slot in slots:
+                    matches = [row for row in report["cycles"] if row["slot_id"] == selected_slot["slot_id"]]
+                    if len(matches) != 1:
+                        raise ValueError("integration_original_slot_inventory")
+                    if matches[0]["input_sha256"] != input_identity(host["route"], selected_slot["cycle"]):
+                        raise ValueError("integration_original_input_changed")
                 if report["failure"] is not None:
                     if any(row["projection"]["accepted"] is True or row["projection"]["integration_success"] is True for row in report["cycles"]):
                         raise ValueError("integration_failed_producer_positive_projection")
@@ -175,16 +260,15 @@ def host_readers(plan, originals):
                     workspace, factory = Path(report["workspace"]), Path(report["factory"])
                     if workspace != path.parent / "fixture/workspace" or factory != path.parent / "fixture/fixture-private/services.py":
                         raise ValueError("integration_original_native_paths")
-                    # Existing owner performs protected references, current
-                    # configuration probes, full original journal/native proof.
-                    proof = native_replay(workspace, factory, report["cycles"][-1]["run_id"])
-                    probes = [event["data"]["record"]["data"]["probe"] for event in proof["journal"]["events"]
-                              if event.get("data", {}).get("record", {}).get("kind") == "execution_qualification_probe"]
-                    if not probes:
-                        raise ValueError("integration_original_current_probe_missing")
-                    observed_at, expires_at = proof["read_finished_utc"], min(
-                        plan["expires_at"], probes[-1]["expires_utc"], key=_time)
                     runtime = HostRuntime.from_factory(factory, workspace)
+                    if expected_control_root is not None:
+                        expected = Path(expected_control_root)
+                        if (expected != path.parent / "fixture/fixture-control" or expected.resolve(strict=True) != expected
+                                or runtime.context.mutation_control_directory != expected):
+                            raise ValueError("integration_current_binding_changed")
+                    live_paths = {str(workspace / "runs" / report["cycles"][-1]["run_id"] / name)
+                                  for name in ("events.jsonl", "run-state.json")}
+                    host_inputs = _host_files(workspace, factory.parent, runtime.context.mutation_control_directory, live_paths)
                     with runtime.context.activate(), Workspace.open(workspace) as opened:
                         for index, row in enumerate(report["cycles"]):
                             with opened.research.session(runtime.policy, run_id=row["run_id"], execution=runtime.execution) as session:
@@ -213,8 +297,36 @@ def host_readers(plan, originals):
                                 current_history = _manifest(workspace / "runs" / row["parent_run_id"])
                                 if row["parent_history_before"] != row["parent_history_after"] or current_history != row["parent_history_after"]:
                                     raise ValueError("integration_original_parent_changed")
+                    # Authenticate retained history before the short current
+                    # witness; only closing byte checks follow the native proof.
+                    if expected_control_root is None:
+                        proof = native_replay(workspace, factory, report["cycles"][-1]["run_id"])
+                    else:
+                        proof = native_replay(workspace, factory, report["cycles"][-1]["run_id"],
+                                              expected_control_root=expected_control_root)
+                    probes = [event["data"]["record"]["data"]["probe"] for event in proof["journal"]["events"]
+                              if event.get("data", {}).get("record", {}).get("kind") == "execution_qualification_probe"]
+                    if not probes:
+                        raise ValueError("integration_original_current_probe_missing")
+                    observed_at, expires_at = proof["read_finished_utc"], min(
+                        plan["expires_at"], probes[-1]["expires_utc"], key=_time)
                     if proof["current"]["accounting"]["accepted_count"] != 1 or not proof["current"]["canonical_release"]["research_complete"]:
                         raise ValueError("integration_current_native_unavailable")
+                    if (host_inputs != proof["host_inputs"]
+                            or _host_files(workspace, factory.parent, runtime.context.mutation_control_directory, live_paths)
+                            != proof["host_inputs"]):
+                        raise ValueError("integration_current_binding_changed")
+                    try:
+                        verify_journal_closing([proof["journal"]])
+                    except ValueError as error:
+                        raise ValueError("integration_original_history_changed") from error
+                    for row in report["cycles"]:
+                        if row["parent_run_id"] and _manifest(workspace / "runs" / row["parent_run_id"]) != row["parent_history_after"]:
+                            raise ValueError("integration_original_parent_changed")
+                    if (digest(host_identity(host["route"])) != host["host_sha256"]
+                            or digest(candidate_manifest(ROOT)) != plan["candidate_sha256"]):
+                        raise ValueError("integration_current_binding_changed")
+                    _responses(report, path.parent, host["route"])
                 if read_private(path, 1_048_576) != raw:
                     raise ValueError("integration_original_changed_during_read")
                 cache.update(raw=raw, report=report, observed_at=observed_at, expires_at=expires_at)
@@ -238,7 +350,56 @@ def host_readers(plan, originals):
     return tuple(result)
 
 
+def diagnose_reader(reader, *, timeout_seconds=120):
+    """Observe one bounded owner call without exporting evidence or secrets."""
+    from tools.decide_release import _deadline, _HostDeadline
+
+    if type(reader) is not OwnerReader or type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 120:
+        raise ValueError("integration_diagnostic_selection")
+    started = time.monotonic()
+    try:
+        with _deadline(timeout_seconds):
+            reader.read()
+    except (Exception, _HostDeadline) as error:
+        def token(value):
+            return value if type(value) is str and re.fullmatch(r"[A-Za-z0-9_]{1,128}", value) else None
+
+        details = getattr(error, "details", None)
+        frames, traceback = [], error.__traceback__
+        for _ in range(128):
+            if traceback is None:
+                break
+            basename = Path(traceback.tb_frame.f_code.co_filename).name
+            frames.append({"module_file": basename if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", basename) else None,
+                           "line": traceback.tb_lineno, "function": token(traceback.tb_frame.f_code.co_name)})
+            traceback = traceback.tb_next
+        classes = frozenset({"EvidenceWikiError", "WorkflowContractError", "ConfigError", "UsageError",
+                             "ValueError", "OSError", "PermissionError", "FileNotFoundError", "TimeoutError",
+                             "KeyError", "TypeError", "AttributeError", "RuntimeError", "_HostDeadline"})
+        codes = frozenset({"RESEARCH_BUDGET_EXHAUSTED", "RESEARCH_RESOLUTION_REFUSED",
+                           "RESEARCH_CURRENT_OWNER_EPOCH_CHANGED", "RESEARCH_CURRENT_OWNER_EPOCH_NESTED",
+                           "RESEARCH_CURRENT_OWNER_EPOCH_INVALID", "OPERATION_DEADLINE_EXCEEDED",
+                           "OPERATION_CANCELLED", "OPERATION_CONTROL_INVALID"})
+        reasons = frozenset({"resolution_current_inputs_changed", "qualification_unknown",
+                             "qualification_invalid_or_expired", "current_mandatory_qualification_unknown"})
+        code = getattr(error, "error_code", None)
+        reason = details.get("reason") if type(details) is dict else None
+        result = {"status": "exception", "exception_class": type(error).__name__ if type(error).__name__ in classes else "unknown",
+                  "error_code": code if type(code) is str and code in codes else None,
+                  "reason": reason if type(reason) is str and reason in reasons else None, "frames": frames[-12:]}
+    else:
+        result = {"status": "read_returned"}
+    return result | {"elapsed_seconds": time.monotonic() - started}
+
+
 def evidence_pins(plan, originals):
     """Project explicit externally retained source pins; this is not a verifier."""
     return {s["slot_id"]: {key: originals[s["host_id"]][key] for key in ("raw_sha256", "source_head_sha256")}
             for s in plan["slots"] if s["host_id"] in originals}
+
+
+def owner_pass(plan, originals, *, remaining_seconds):
+    """Build a trusted process scheduler; serialized scope selects only its bound."""
+    from tools._integration_owner_pass import NativeOwnerPass
+
+    return NativeOwnerPass(plan, originals, remaining_seconds=remaining_seconds)

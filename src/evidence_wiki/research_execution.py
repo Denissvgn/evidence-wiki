@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from . import execution_accounting as accounting
 from .agent_execution import ExecutionAttempt, ExecutionProfile
 from .mutation_contracts import canonical, detached, digest, validate_request_id
+from .research_journal_contracts import JOURNAL, canonical_record, detached_record, digest_record
 from .research_session_contracts import refuse
 
-JOURNAL = "research-execution-journal/v1"
 SCOPE = "session-work-execution"
 _HOST_CALL_CAPACITY = threading.BoundedSemaphore(16)
 
@@ -136,10 +136,11 @@ class ResearchExecution:
 
     def _signature(self, value):
         unsigned = {**value, "authentication": None}
-        return hmac.new(self._observer_key, canonical(unsigned), hashlib.sha256).hexdigest()
+        raw = canonical_record(unsigned) if unsigned.get("schema_version") == JOURNAL else canonical(unsigned)
+        return hmac.new(self._observer_key, raw, hashlib.sha256).hexdigest()
 
     def sign(self, value):
-        value = detached(value)
+        value = detached_record(value) if type(value) is dict and value.get("schema_version") == JOURNAL else detached(value)
         value["authentication"] = self._signature(value)
         return value
 
@@ -153,7 +154,7 @@ class ResearchExecution:
         previous = {key: value for key, value in records[-1].items() if key != "event_ref"} if records else None
         return self.sign({"schema_version": JOURNAL, "kind": kind,
             "binding_id": digest(session.binding), "request_id": validate_request_id(request_id),
-            "sequence": len(records), "previous_record_ref": digest(previous) if previous is not None else None,
+            "sequence": len(records), "previous_record_ref": digest_record(previous) if previous is not None else None,
             "data": detached(data), "authentication": None})
 
     def records(self, session):
@@ -177,7 +178,7 @@ class ResearchExecution:
             if (set(record) != {"schema_version", "kind", "binding_id", "request_id", "sequence", "previous_record_ref", "data", "authentication"}
                     or record["binding_id"] != binding_id
                     or record["request_id"] != data.get("request_id") or record["sequence"] != len(result)
-                    or record["previous_record_ref"] != (digest(previous) if previous is not None else None)):
+                    or record["previous_record_ref"] != (digest_record(previous) if previous is not None else None)):
                 refuse("EXECUTION_JOURNAL_INVALID")
             self._verify(record)
             result.append({**record, "event_ref": event["event_id"]})

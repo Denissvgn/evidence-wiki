@@ -12,6 +12,7 @@ from pathlib import Path
 from .agent_execution import BoundedSubprocessExecutor, ExecutionError, _utc
 from .errors import ConfigError, EvidenceWikiError
 from .mutation_contracts import canonical, digest
+from .research_journal_contracts import digest_record
 from .research_session import ResearchSession
 
 SCHEMA = "research-host-qualification/v1"
@@ -192,7 +193,7 @@ def host_qualification(session):
     result = {"schema_version": SCHEMA, "observed_utc": datetime.now(timezone.utc).isoformat(),
         "run_id": session.run_id, "binding_id": digest(session.binding), "basis_id": after["basis_id"],
         "policy_id": session.policy.policy_id, "execution_profile_sha256": session.execution.profile.sha256,
-        "registry_sha256": session.execution.qualifications.sha256, "journal_head_ref": digest(records[-1]) if records else None,
+        "registry_sha256": session.execution.qualifications.sha256, "journal_head_ref": digest_record(records[-1]) if records else None,
         "runtime": {"os": sys.platform, "os_release": platform.release(), "machine": platform.machine(),
             "python_implementation": platform.python_implementation(), "python_version": platform.python_version(),
             "package_source_sha256": generation["package_sha256"], "native_script_sha256": generation["script_sha256"],

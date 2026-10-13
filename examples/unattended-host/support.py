@@ -66,7 +66,9 @@ GRANTS = {
 }
 
 
-def policy(root, objective):
+def policy(root, objective, *, run_seconds=1800):
+    if type(run_seconds) is not int or not 1 <= run_seconds <= 25200:
+        raise ValueError('Fixture run duration must be a bounded positive integer.')
     effects = list(EFFECTS)
     return RunPolicy({'schema_version':'research-run-policy/v2','policy_id':None,'objective':objective,
         'scope':{'question_ids':['q'],'source_scope':[str(root/'raw')],'source_scope_kind':'native_extent'},
@@ -77,7 +79,7 @@ def policy(root, objective):
         'source_rules':{'require_current':True,'require_present':True,'require_complete_context':True,'allow_partial':False},
         'thresholds':{'critical_false_acceptances_max':0,'min_reference_cases':100,'min_families':10,
             'positive_acceptance_min':'0.90','meaning_preserving_flip_max':'0.05'},
-        'budgets':{'seconds':1800,'model_calls':100,'tool_calls':200,'tokens':1000000,'cost_limit':'0',
+        'budgets':{'seconds':run_seconds,'model_calls':100,'tool_calls':200,'tokens':1000000,'cost_limit':'0',
             'questions':1,'claims':10,'sources':10},
         'continuation_limits':{'repair_cycles':2,'adjudication_cycles':1,'retry_attempts':1,'acquisition_attempts':0},
         'terminal_outcomes':list(TERMINAL_OUTCOMES),
