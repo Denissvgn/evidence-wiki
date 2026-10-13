@@ -54,9 +54,23 @@ def harness(tmp_path, monkeypatch):
         root = base / "workspace"
         root.mkdir(parents=True)
         clock = datetime.now(timezone.utc)
-        originals.append(("runtime-allocation", dict(kwargs,
+        allocation = dict(kwargs,
             authority_start=clock.isoformat(),
-            authority_end=(clock + timedelta(seconds=state.get("authority_seconds", 7200))).isoformat())))
+            authority_end=(clock + timedelta(seconds=state.get("authority_seconds", 7200))).isoformat())
+        if kwargs.get("execution_policy") is not None:
+            from tools._execution_budget import credential_expiries
+            end = kwargs["allocation_binding"]["authority_expires_at"]
+            allocation.update(schema_version="review-workload-runtime-allocation/v2", authority_end=end,
+                execution_policy_sha256=digest(kwargs["execution_policy"]), credential_expiries=credential_expiries(end),
+                run_policy={"budgets": {"seconds": kwargs["run_seconds"]}}, issued_before_worker_outputs=clock.isoformat())
+            if state.get("allocation_change"):
+                field, value = state["allocation_change"]
+                allocation[field] = value
+        originals.append(("runtime-allocation", allocation))
+        if kwargs.get("execution_policy") is not None:
+            originals.append(("qualifications", [{"expires_utc": end}] * 2))
+            originals.append(("source-usage", [{"command": {"authentication": {"expires_at": end},
+                "payload": {"action": "initialize", "body": {}}}}]))
         return root, runtime, {}, {}, {}
 
     def receipt(run_id):

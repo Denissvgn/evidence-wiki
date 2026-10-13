@@ -157,6 +157,7 @@ def failure_document(error):
         "FileNotFoundError", "PermissionError", "SystemExit", "TimeoutError", "ConfigError", "UsageError",
         "QualificationError", "ExecutionError", "MutationError", "WorkflowContractError", "_HostDeadline"}
     allowed_frames = {
+        "tools/_execution_budget.py": {"execution_policy", "validate_execution_policy", "validate_execution_binding", "validate_execution_window", "validate_runtime_allocation", "provisioning_window"},
         "tools/run_review_dependency_workload.py": {"run_workload", "main", "validate_plan", "reference_plan", "read_pinned_artifact", "collect_journals", "_owner_read"},
         "tools/_review_dependency_workload.py": {"provision", "drive", "call", "mutation", "retain", "reference_dependencies", "_deposit", "_example", "admit_diagnosed", "question_binding_preflight", "host_read_preflight"},
         "src/evidence_wiki/coverage_observation.py": {"observe"},
@@ -180,6 +181,8 @@ def failure_document(error):
         "RESEARCH_RESOLUTION_REFUSED", "REVIEW_PAGE_REFUSED", "CALCULATION_PROPOSAL_REFUSED", "SOURCE_CAPTURE_REFUSED", "DRAFT_ADMISSION_REFUSED",
         "MUTATION_REQUEST_QUESTION_BINDING_CHANGED"}
     reasons = {"workload_assignment_invalid", "workload_full_scope_invalid", "workload_fixture_lineage_invalid",
+        "execution_policy_invalid", "execution_policy_binding_invalid", "execution_observation_profile_invalid",
+        "execution_authority_clock_invalid", "execution_runtime_binding_invalid", "execution_allocation_invalid",
         "workload_pilot_mutation_invalid", "workload_measured_allocation_required", "workload_allocation_exceeds_authority",
         "workload_candidate_or_recipe_changed", "workload_owner_current_unavailable", "workload_cross_journal_scope_unsupported",
         "workload_original_witness_expired", "workload_changed_basis_guard_missing", "workload_cleanup_unavailable",
@@ -348,8 +351,12 @@ def _deposit(workspace, name, descriptor, files, keys, receipts):
     return revision
 
 
-def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=None):
+def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=None, execution_policy=None):
     """Use admitted native inputs and separately controlled signed services."""
+    authority_start = authority_end = None
+    if execution_policy is not None:
+        from tools._execution_budget import provisioning_window
+        authority_start, authority_end = provisioning_window(execution_policy, allocation_binding, run_seconds)
     inventory = owner("_strict_contract").claims_document(fixture["inventory"])
     if (inventory["schema_version"] != "evidence-strict-claims/v2" or len(inventory["claims"]) != 6
             or {row["id"] for row in inventory["claims"]} != CLAIM_IDS
@@ -371,7 +378,7 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
     for path in (private, control, workers):
         path.mkdir(mode=0o700)
     keys = {name: secrets.token_bytes(32) for name in ("generator", "evidence", "critic", "usage", "scrubber", "receipt", "observer", "qualifier")}
-    keys["expires_at"] = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    keys["expires_at"] = authority_end if execution_policy is not None else (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
     objective = "Assess the retained synthetic capacity, demand and service note."
     request = setup_request(base, objective)
     questions = fixture["inventory"]["questions"]
@@ -437,7 +444,7 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
     config["computation"] = _computation({name: row["normalized_path"] for name, row in captured.items()}, datetime.now(timezone.utc).replace(microsecond=0).isoformat())
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
     authority = {"schema_version": "evidence-trust-policy/v1", "policy_id": "fixture-authority", "policy_revision": "1",
-        "not_before": now(), "expires_at": keys["expires_at"], "principals": {
+        "not_before": authority_start if execution_policy is not None else now(), "expires_at": keys["expires_at"], "principals": {
             name: {"controller": name + "-controller", "roles": [role], "keys": {name + "-key": keys[name].hex()}}
             for name, role in (("generator", "generator"), ("evidence", "evaluator"), ("critic", "evaluator"),
                 ("usage", "usage"), ("scrubber", "scrubber"))}, "revoked_keys": [], "revoked_envelopes": [],
@@ -512,7 +519,7 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
     run_doc["budgets"].update(questions=2, claims=10)
     run_policy = RunPolicy(run_doc)
     commands = {role.config_ref: [sys.executable, str(EXAMPLE / "fake_workers.py"), role.config_ref, "retained"] for role in roles}
-    runtime_allocation = {"schema_version": "review-workload-runtime-allocation/v1",
+    runtime_allocation = {"schema_version": "review-workload-runtime-allocation/v2" if execution_policy is not None else "review-workload-runtime-allocation/v1",
         "allocation_binding": allocation_binding, "run_policy": run_policy.to_dict(), "profile": profile.document(),
         "authority_raw_sha256": digest_bytes(authority_path.read_bytes()),
         "authority_start": authority["not_before"], "authority_end": authority["expires_at"],
@@ -521,8 +528,16 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         "worker_command_manifest": {config: {"argv": command,
             "source_sha256": digest_bytes((EXAMPLE / "fake_workers.py").read_bytes())} for config, command in commands.items()},
         "issued_before_worker_outputs": datetime.now(timezone.utc).isoformat()}
+    if execution_policy is not None:
+        from tools._execution_budget import credential_expiries
+        runtime_allocation.update(execution_policy=execution_policy, execution_policy_sha256=digest(execution_policy),
+            credential_expiries=credential_expiries(keys["expires_at"]))
     originals.append(("runtime-allocation", runtime_allocation))
     retain(base.parent / "runtime-allocation.json", runtime_allocation)
+    if execution_policy is not None:
+        from tools._execution_budget import validate_execution_window
+        validate_execution_window(execution_policy, allocation_binding["authority_frozen_at"],
+            allocation_binding["authority_expires_at"], instant=datetime.now(timezone.utc))
     issuer = QualificationAuthority("fixture-only-issuer", keys["qualifier"], "generator-controller")
     cases = [{"case_id": "case-" + str(i), "family_id": "family-" + str(i // 10),
         "input_document": {"case_id": "case-" + str(i), "supported": i // 2 % 2 == 0, "wording": i % 2},
@@ -536,6 +551,9 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         role = profile.role(config_ref)
         for index, case in enumerate(cases):
             instant = datetime.now(timezone.utc)
+            if execution_policy is not None:
+                validate_execution_window(execution_policy, allocation_binding["authority_frozen_at"],
+                    allocation_binding["authority_expires_at"], instant=instant)
             job = {"schema_version": JOB_V3, "id": "reference-" + str(index), "operation": "evaluate", "role": "evaluator",
                 "controller_ref": role.controller_ref, "grant_ref": "fixture-model", "input_id": case["case_id"], "basis_id": "fixture-basis",
                 "policy_id": run_policy.policy_id, "policy_version": "1", "prompt_version": role.prompt_version, "revision_precondition": "fixture-basis",
@@ -565,7 +583,14 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
     originals.append(("qualifications", qualifications))
     executor = BoundedSubprocessExecutor(profile, commands=commands, cwd=workers, receipt_key=keys["receipt"], meter=Meter())
     signer = HostReviewSigner("fixture-authority", "1", SigningIdentity("generator", "generator", "generator-key", "generator-controller", "generator", keys["generator"]),
-        tuple(SigningIdentity(name, name, name + "-key", name + "-controller", "evaluator", keys[name]) for name in ("evidence", "critic")), keys["expires_at"])
+        tuple(SigningIdentity(name, name, name + "-key", name + "-controller", "evaluator", keys[name]) for name in ("evidence", "critic")), keys["expires_at"],
+        **({"not_before_utc": authority_start} if execution_policy is not None else {}))
+    if execution_policy is not None:
+        expiry = runtime_allocation["credential_expiries"]
+        if (authority["expires_at"] != expiry["trust"] or signer.expires_utc != expiry["signing"]
+                or any(record["expires_utc"] != expiry["reference_qualification"] for record in qualifications)
+                or any(receipt["command"]["authentication"]["expires_at"] != expiry["usage"] for receipt in receipts)):
+            raise ValueError("execution_runtime_binding_invalid")
     execution = ResearchExecution(executor, qualifications=QualifiedEvaluators(qualifications, issuer), review_signer=signer, observer_key=keys["observer"])
     runtime = HostRuntime.from_services(run_policy, context, execution)
     host_read_preflight(root, runtime, originals)
