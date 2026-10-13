@@ -910,3 +910,98 @@ def test_role_timing_marks_elapsed_over_cap_without_completed_measurement(tmp_pa
         timing.update(status="applied", application_event_ref="owner-event")
     assert rows[0]["status"] == "timed_out" and rows[0]["elapsed_seconds"] == 2
     monkeypatch.setattr(helper.time, "monotonic", original_clock)
+
+
+@pytest.mark.parametrize("failure_at", ["publication", "current"])
+def test_owner_reads_retain_originals_before_a_later_owner_refusal(tmp_path, monkeypatch, failure_at):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from evidence_wiki import execution_session as native
+    from tools._review_dependency_workload import OriginalResponses
+
+    strict = {"claims": [{"accepted": False}]}
+    publication = {"verdict": "hold"}
+
+    def export():
+        if failure_at == "publication":
+            raise ValueError("owner_refused")
+        return publication
+
+    def current():
+        raise ValueError("owner_refused")
+
+    workspace = SimpleNamespace(
+        strict=SimpleNamespace(check=lambda: strict, export=export),
+        research=SimpleNamespace(session=lambda *_args, **_kwargs: nullcontext(SimpleNamespace(
+            current=current, _check=lambda *_args: None))),
+    )
+    runtime = SimpleNamespace(context=SimpleNamespace(activate=nullcontext), policy=None, execution=None)
+    monkeypatch.setattr(workload.Workspace, "open", lambda _root: nullcontext(workspace))
+    monkeypatch.setattr(workload, "authenticated_journal", lambda *_args: ([], {}, {}, None))
+    monkeypatch.setattr(native, "_observe_current", lambda selected: selected.current())
+    originals = OriginalResponses(tmp_path / "originals")
+    with pytest.raises(ValueError, match="owner_refused"):
+        workload._owner_read(tmp_path, runtime, ["run"], originals)
+    expected = [("owner-strict-current", strict)]
+    if failure_at == "current":
+        expected.append(("owner-publication-current", publication))
+    assert [(pin["label"], json.loads(Path(pin["path"]).read_bytes())) for pin in originals.pins] == expected
+
+
+@pytest.mark.parametrize("failure_at", ["witness", "qualification", "closing", None])
+def test_owner_read_epoch_requires_closing_and_retains_each_actual_original(tmp_path, monkeypatch, failure_at):
+    from contextlib import contextmanager, nullcontext
+    from types import SimpleNamespace
+
+    import evidence_wiki
+    from evidence_wiki import execution_session as native
+    from tools._review_dependency_workload import OriginalResponses
+
+    qualification = {"state": "qualified", "profiles": []}
+    view = {"qualification": qualification, "canonical_release": {"publication": {"verdict": "hold"}}}
+    witness = {"observed_utc": "2026-10-01T12:00:00+00:00", "authorized": False}
+    operations = []
+    session = object()
+
+    @contextmanager
+    def facts(selected, operation):
+        assert selected is session and operation == "current"
+        operations.append("open")
+        yield
+        operations.append("close")
+        if failure_at == "closing":
+            raise ValueError("epoch_changed")
+
+    def host(selected):
+        assert selected is session
+        operations.append("witness")
+        if failure_at == "witness":
+            raise ValueError("witness_refused")
+        return witness
+
+    workspace = SimpleNamespace(strict=SimpleNamespace(check=lambda: {"claims": []}, export=lambda: {"verdict": "hold"}),
+        research=SimpleNamespace(session=lambda *_args, **_kwargs: nullcontext(session)))
+    runtime = SimpleNamespace(context=SimpleNamespace(activate=nullcontext), policy=None, execution=None)
+    monkeypatch.setattr(workload.Workspace, "open", lambda _root: nullcontext(workspace))
+    monkeypatch.setattr(workload, "authenticated_journal", lambda *_args: ([], {}, {}, None))
+    monkeypatch.setattr(native, "_current_facts", facts)
+    monkeypatch.setattr(native, "_current_view", lambda selected: copy.deepcopy(view))
+    monkeypatch.setattr(native, "current_qualifications", lambda selected: {"state": "unknown", "profiles": []}
+        if failure_at == "qualification" else copy.deepcopy(qualification))
+    monkeypatch.setattr(evidence_wiki, "host_qualification", host)
+    originals = OriginalResponses(tmp_path / "originals")
+    if failure_at is None:
+        result, _, _ = workload._owner_read(tmp_path, runtime, ["run"], originals)
+        assert result["native_current"] == [view] and result["native_host_witnesses"] == [witness]
+        assert operations == ["open", "witness", "close"]
+    else:
+        with pytest.raises(ValueError):
+            workload._owner_read(tmp_path, runtime, ["run"], originals)
+        assert operations[-1] == ("close" if failure_at == "closing" else "witness")
+    labels = [pin["label"] for pin in originals.pins]
+    assert labels[:3] == ["owner-strict-current", "owner-publication-current", "run-current"]
+    assert json.loads(Path(originals.pins[2]["path"]).read_bytes()) == view
+    if failure_at != "witness":
+        assert labels[3:] == ["run-native-host-qualification"]
+        assert json.loads(Path(originals.pins[3]["path"]).read_bytes()) == witness

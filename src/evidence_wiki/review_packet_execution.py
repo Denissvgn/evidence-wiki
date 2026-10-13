@@ -7,7 +7,7 @@ from evidence_wiki._pack_io import canonical
 from evidence_wiki.mutation_contracts import detached, digest, validate_request_id
 
 from .packet_pages import refuse
-from .review_page_operations import prepare
+from .review_page_operations import _current_packet
 
 
 def enabled(session):
@@ -45,23 +45,23 @@ def current_assembly(session, request_id, *, claim_id, task_role):
         refuse("complete_packet_requires_supported_paging_executor")
     seed = hmac.new(session.execution._observer_key, b"review-page-order/v1\0" +
         canonical({"binding": digest(session.binding), "request_id": request_id}), hashlib.sha256).digest()
-    handle = prepare(session.root, claim_id=claim_id, context_id="context-" + seed.hex()[:32],
-        task_role=task_role, page_chars=arguments["page_chars"], source_ids=arguments["source_ids"], _order_seed=seed)
-    if handle.header() != packet["header"] or handle.complete(packet["pages"]) != packet["complete"] or not packet["complete"]["complete"]:
-        refuse("decisive_context_incomplete_or_stale")
-    for descriptor in packet["header"]["pages"]:
-        identifier = native.child_id(request_id, "page." + descriptor["page_id"])
-        deliveries = [row["data"] for row in records if row["kind"] == "execution_review_page_delivery"
-            and row["request_id"] == identifier]
-        expected = {"claim_id": claim_id, "header_sha256": digest(packet["header"]), "page_id": descriptor["page_id"],
-            "page_sha256": descriptor["sha256"], "delivery_scope": "host_assembly", "worker_consumption": "not_observed"}
-        if deliveries != [expected]:
-            refuse("required_page_delivery_receipt_missing")
-    # No canonical claim name, search receipt, signing identity or alias map is
-    # added to the worker projection. The full immutable input gets its own SHA.
-    return {"schema_version": "research-complete-review-delivery/v1", "packet_sha256": value["packet_sha256"],
-        "packet": detached(packet), "delivery_scope": "bounded_host_assembled_input",
-        "worker_comprehension": "not_observed", "semantic_approval": "not_evaluated", "accepted": False}
+    with _current_packet(session.root, packet=packet, claim_id=claim_id, context_id="context-" + seed.hex()[:32],
+            task_role=task_role, page_chars=arguments["page_chars"], source_ids=arguments["source_ids"], _order_seed=seed):
+        for descriptor in packet["header"]["pages"]:
+            identifier = native.child_id(request_id, "page." + descriptor["page_id"])
+            deliveries = [row["data"] for row in records if row["kind"] == "execution_review_page_delivery"
+                and row["request_id"] == identifier]
+            expected = {"claim_id": claim_id, "header_sha256": digest(packet["header"]), "page_id": descriptor["page_id"],
+                "page_sha256": descriptor["sha256"], "delivery_scope": "host_assembly", "worker_consumption": "not_observed"}
+            if deliveries != [expected]:
+                refuse("required_page_delivery_receipt_missing")
+        # No canonical claim name, search receipt, signing identity or alias map is
+        # added to the worker projection. The full immutable input gets its own SHA.
+        result = {"schema_version": "research-complete-review-delivery/v1", "packet_sha256": value["packet_sha256"],
+            "packet": detached(packet), "delivery_scope": "bounded_host_assembled_input",
+            "worker_comprehension": "not_observed", "semantic_approval": "not_evaluated", "accepted": False}
+        session.context.require_grant("review_packet_execution.bind")
+    return result
 
 
 def bind_input(session, *, assembly_request_id, claim_id, context, input_document):

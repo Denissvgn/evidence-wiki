@@ -22,7 +22,7 @@ from .review_packet_sections import create as create_sections
 
 
 @contextmanager
-def snapshot(root, claim_id, *, source_ids=()):
+def snapshot(root, claim_id, *, source_ids=(), _closing_time=False, _closing_diagnostics=None):
     """Existing strict and retrieval owners select complete current permitted bytes."""
     context = current_context()
     if context is None or context.mutation_control_directory is None:
@@ -82,12 +82,60 @@ def snapshot(root, claim_id, *, source_ids=()):
             from evidence_wiki.coverage_observation import observe
             counter_instruction = observe(root, question_slug=prepared["snapshot"]["claim"]["question_slug"], source_ids=selected)
         yield prepared, sources, diagnosed, counter_instruction, primary
+        if _closing_time:
+            _recheck_time(root, view.config, prepared, inventory, diagnosed, policy, live)
+        if _closing_diagnostics is not None and any(row["result"] != "verified" for claim in diagnosed["claims"] for row in claim["evidence"]):
+            _closing_diagnostics(claim_diagnostics.current(root, proposal))
         view.recheck_scope()
         view.finish()
         if live is not None:
             live.revalidate(root, view.config)
         if current_context() is not context or capture_revision(root, excluded=(".locks", "raw/.locks"))["revision_id"] != before:
             refuse("current_owner_changed")
+
+
+def _recheck_time(root, config, prepared, inventory, diagnosed, policy, live):
+    """Close native clock-dependent facts using the complete observed owner scope."""
+    try:
+        draft = owner("_claim_diagnostics").sibling("_draft_admission")
+        authority = draft.sibling("_evidence_authority")
+        closing = draft.clock(draft.current_time())
+        draft.require(closing >= authority.timestamp(diagnosed["observed_at"]), "source_clock_regressed")
+        by_claim = {row["claim_id"]: row for row in diagnosed["claims"]}
+        for claim in inventory["claims"]:
+            for index, evidence in enumerate(claim["evidence"]):
+                if by_claim[claim["id"]]["evidence"][index]["result"] == "verified":
+                    age = (closing - authority.timestamp(evidence["observed_at"])).total_seconds()
+                    draft.require(0 <= age <= policy["max_source_age_seconds"], "source_age_invalid")
+        if live is not None:
+            live.revalidate(root, config)
+            selected = prepared["snapshot"]["source_revisions"]
+            ancestry = set(selected.values())
+            for revision in selected.values():
+                decision = live.check(revision, uses=["retrieval", "export"], purpose="qa-export", consumer="evidence-wiki")
+                draft.require(decision["eligible"] and decision["complete"],
+                    decision["reasons"][0] if decision["reasons"] else "assessment_use_incomplete")
+                ancestry.update(decision["ancestors"])
+            draft.require(len(ancestry) <= 128 and ancestry <= live.state.revisions.keys(), "assessment_source_ancestry_incomplete")
+            temporal_revisions = [revision for revision in ancestry if live.state.revisions[revision]["descriptor"].get("temporal")]
+            if temporal_revisions:
+                owner("_assessment_engine").current_history(live, {"selected": selected, "ancestors": sorted(ancestry)})
+                temporal = owner("_temporal_contract")
+                strict = owner("_strict_evidence")
+                for revision in ancestry:
+                    times = temporal.source_times(live.state.revisions[revision])
+                    strict.require(times["claims"]["expires_at"] is None or times["expires"] is not None, "strict_source_expiry_unknown")
+                    strict.require(times["expires"] is None or live.now < times["expires"], "strict_source_expired")
+                    if times["effective"] is not None:
+                        start, end = times["effective"]
+                        strict.require(start is not None and start <= live.now and (end is None or live.now < end), "strict_source_outside_effective_interval")
+    except Exception as error:
+        if isinstance(error, ValueError) and type(error).__name__ == "EvidenceInvalid":
+            error = owner("_strict_evidence").refusal(str(error))
+        translated = _translated(error)
+        if translated is None:
+            raise
+        raise translated from None
 
 
 @dataclass(frozen=True)
@@ -113,13 +161,16 @@ class ProtectedPages:
             refuse("host_selection_changed")
         context.require_grant("review_page_operations.page")
         with snapshot(self.root, self.claim_id, source_ids=self._source_ids) as (prepared, sources, diagnosed, counter, primary):
-            self._review_context.check(prepared["snapshot"], prepared["rubric"], [row for row in sources if row["source_id"] in primary])
-            if digest(sources) != self._source_input:
-                refuse("source_input_changed")
-            sections, _binding = create_sections(self._review_context, sources, diagnosed, counter_instruction=counter)
-            if digest(sections) != self._section_input:
-                refuse("mechanical_context_changed")
+            self._check_snapshot(prepared, sources, diagnosed, counter, primary)
             yield prepared
+
+    def _check_snapshot(self, prepared, sources, diagnosed, counter, primary):
+        self._review_context.check(prepared["snapshot"], prepared["rubric"], [row for row in sources if row["source_id"] in primary])
+        if digest(sources) != self._source_input:
+            refuse("source_input_changed")
+        sections, _binding = create_sections(self._review_context, sources, diagnosed, counter_instruction=counter)
+        if digest(sections) != self._section_input:
+            refuse("mechanical_context_changed")
 
     def header(self):
         with self.current():
@@ -139,8 +190,10 @@ class ProtectedPages:
         return value
 
 
-def prepare(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(), _order_seed=None):
-    """Pin complete actual owner inputs; stored identity grants no source access."""
+@contextmanager
+def _prepared_snapshot(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(), _order_seed=None,
+        _closing_time=False):
+    """Keep preparation and private read validation inside current custody."""
     context = current_context()
     if context is None:
         refuse("current_host_control_required")
@@ -153,7 +206,11 @@ def prepare(root, *, claim_id, context_id, task_role="evaluator", page_chars=409
     elif re.fullmatch(r"context-[a-f0-9]{32}", context_id) is None:
         refuse("private_context_identity_invalid")
     root = context.require_path(Path(root)).resolve(strict=True)
-    with snapshot(root, claim_id, source_ids=source_ids) as (prepared, sources, diagnosed, counter, primary):
+    def check_closing(diagnostics):
+        handle._check_snapshot(prepared, sources, diagnostics, counter, primary)
+    current = snapshot(root, claim_id, source_ids=source_ids, _closing_time=True,
+        _closing_diagnostics=check_closing) if _closing_time else snapshot(root, claim_id, source_ids=source_ids)
+    with current as (prepared, sources, diagnosed, counter, primary):
         review = create_review_context(context_id=context_id, task_role=task_role, basis_id=prepared["result"]["basis_id"],
             owner_snapshot=prepared["snapshot"], rubric=prepared["rubric"], sources=[row for row in sources if row["source_id"] in primary],
             order_seed=seed, max_bytes=262144)
@@ -162,4 +219,34 @@ def prepare(root, *, claim_id, context_id, task_role="evaluator", page_chars=409
         if len(canonical(pages.header())) > 65536:
             refuse("header_bound")
         handle = ProtectedPages(root, claim_id, context, review, pages, digest(sources), digest(sections), tuple(source_ids))
+        yield handle, (prepared, sources, diagnosed, counter, primary)
+
+
+def prepare(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(), _order_seed=None):
+    """Pin complete actual owner inputs; stored identity grants no source access."""
+    with _prepared_snapshot(root, claim_id=claim_id, context_id=context_id, task_role=task_role,
+            page_chars=page_chars, source_ids=source_ids, _order_seed=_order_seed) as (handle, _snapshot):
+        pass
     return handle
+
+
+@contextmanager
+def _current_packet(root, *, packet, claim_id, context_id, task_role, page_chars, source_ids, _order_seed):
+    """Compare retained header and all pages without exporting a held approval."""
+    with _prepared_snapshot(root, claim_id=claim_id, context_id=context_id, task_role=task_role,
+            page_chars=page_chars, source_ids=source_ids, _order_seed=_order_seed, _closing_time=True) as (handle, current):
+        context = current_context()
+        if context is not handle._context:
+            refuse("host_selection_changed")
+        context.require_grant("review_page_operations.page")
+        handle._check_snapshot(*current)
+        from .review_packet_contracts import validate
+        header = validate("research-paged-review/v1", handle._pages.header())
+        if (header != packet["header"] or handle._pages.completeness(packet["pages"]) != packet["complete"]
+                or not packet["complete"]["complete"]):
+            refuse("decisive_context_incomplete_or_stale")
+        yield
+        if current_context() is not context:
+            refuse("host_selection_changed")
+        context.require_grant("review_page_operations.prepare")
+        context.require_grant("review_page_operations.page")

@@ -38,9 +38,11 @@ class _CurrentFacts:
 
     def __init__(self, session, operation="resolution"):
         self.session = session
-        if operation not in {"resolution", "semantic_report"}:
+        if operation not in {"current", "resolution", "semantic_report"}:
             refuse("CURRENT_OWNER_EPOCH_INVALID")
         self.operation = operation
+        if operation == "current":
+            session._check("current")
         self.view, self.observed, self.packets, self.records = _observe_current(session)
         self.thread = threading.get_ident()
         self.invalidated = False
@@ -83,6 +85,23 @@ def _current_facts(session, operation="resolution"):
     try:
         yield facts
         facts.require(session)
+        if operation == "current":
+            from .research_observation import optional
+
+            opening = facts.observed.strict
+            closing = (optional(lambda: owner("strict_evidence").run_operation(session.root, "check"))
+                if facts.observed.policy and facts.observed.integrations_qualified else opening)
+
+            def semantic(value):
+                if value["state"] != "observed":
+                    return value
+                return value | {"result": {key: item for key, item in value["result"].items()
+                    if key != "evaluated_at"}}
+
+            if (semantic(opening) != semantic(closing)
+                    or current_qualifications(session) != facts.view["qualification"]):
+                refuse("CURRENT_OWNER_EPOCH_CHANGED")
+            facts.require(session)
     finally:
         facts.invalidated = True
         _CURRENT_FACTS.reset(token)
@@ -122,6 +141,19 @@ def _current_identity(session):
     qualification = current_qualifications(session)
     return detached({name: facts.view[name] for name in ("basis_id", "policy_id", "policy_compatible")} | {
         "qualification": qualification})
+
+
+def _current_view(session):
+    """Detach a complete actual current snapshot with live qualifications."""
+    session._check("current")
+    facts = _CURRENT_FACTS.get()
+    if facts is None:
+        return session.current()
+    if type(facts) is not _CurrentFacts or facts.operation != "current":
+        refuse("CURRENT_OWNER_EPOCH_INVALID")
+    facts.require(session)
+    qualification = current_qualifications(session)
+    return detached(facts.view | {"qualification": qualification})
 
 
 def child_id(identifier, label):

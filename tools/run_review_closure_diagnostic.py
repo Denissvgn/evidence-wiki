@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+"""Measure native journal closing with fresh custody and no review dispatch."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from evidence_wiki import Workspace
+from tools import run_review_dependency_workload as workload
+from tools._review_dependency_workload import (
+    OriginalResponses,
+    OwnedChildren,
+    authenticated_journal,
+    digest,
+    file_manifest,
+    provision,
+    retain,
+    workload_deadline,
+)
+from tools._review_dependency_workload import (
+    failure_document as workload_failure_document,
+)
+from tools.decide_release import _HostDeadline, _read
+from tools.replay_qualification_native import verify_journal_closing
+
+PLAN_SCHEMA = "review-closure-diagnostic-plan/v1"
+RESULT_SCHEMA = "review-closure-diagnostic-observation/v1"
+PHASE_CAPS = {"setup": 180, "owner_read": 120, "cleanup": 60, "global_close": 120}
+DIAGNOSTIC_REASONS = {"closure_journal_count_invalid", "closure_allocation_invalid",
+    "closure_plan_expired_or_clock_invalid", "closure_witness_clock_invalid",
+    "closure_unexpected_execution_records", "closure_review_attempt_observed",
+    "closure_freeze_arguments_required", "closure_run_arguments_required"}
+
+
+def failure_document(error):
+    """Retain only bounded local reasons alongside the shared native diagnostic."""
+    result = workload_failure_document(error)
+    if len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in DIAGNOSTIC_REASONS:
+        result["reason"] = error.args[0]
+    return result
+
+
+def allocation_seconds(caps):
+    return caps["setup"] + 2 * caps["owner_read"] + caps["cleanup"] + caps["global_close"]
+
+
+def reference_plan(bundle, *, journal_count=4, phase_caps=None):
+    """Bind the same full fixture and candidate before creating fresh services."""
+    if type(journal_count) is not int or not 4 <= journal_count <= 13:
+        raise ValueError("closure_journal_count_invalid")
+    caps = dict(PHASE_CAPS if phase_caps is None else phase_caps)
+    if (set(caps) != set(PHASE_CAPS)
+            or any(type(value) is not int or not 0 < value <= PHASE_CAPS[key] for key, value in caps.items())):
+        raise ValueError("closure_allocation_invalid")
+    native = workload.reference_plan(bundle)
+    return {"schema_version": PLAN_SCHEMA, "candidate_sha256": native["candidate_sha256"],
+        "artifacts": native["artifacts"], "host": native["host"], "hard_limits": native["hard_limits"],
+        "scope": native["scope"], "frozen_at": native["frozen_at"], "expires_at": native["expires_at"],
+        "phase_caps": caps, "elapsed_cap_seconds": allocation_seconds(caps),
+        "journal_count": journal_count, "run_ids": ["closure-journal-" + str(index) for index in range(journal_count)],
+        "journal_mode": "native_execution_begin_without_review_attempts", "reference_checks": 200,
+        "review_jobs": 0, "prior_authority_reuse": False, "qualification": False, "stdin": "closed"}
+
+
+def validate_plan(plan, expected_plan):
+    if type(plan) is not dict or plan.get("schema_version") != PLAN_SCHEMA or digest(plan) != expected_plan:
+        raise ValueError("workload_plan_binding_invalid")
+    expected = reference_plan(Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent,
+        journal_count=plan["journal_count"], phase_caps=plan["phase_caps"])
+    if set(plan) != set(expected) or any(plan[key] != expected[key] for key in expected if key not in {"frozen_at", "expires_at"}):
+        raise ValueError("workload_candidate_or_recipe_changed")
+    frozen, expires = (datetime.fromisoformat(plan[key]) for key in ("frozen_at", "expires_at"))
+    if (frozen.tzinfo is None or expires.tzinfo is None or expires - frozen != timedelta(seconds=7200)
+            or not frozen <= datetime.now(timezone.utc) < expires):
+        raise ValueError("closure_plan_expired_or_clock_invalid")
+    return plan
+
+
+def preflight(plan, expected_plan):
+    validate_plan(plan, expected_plan)
+    return {"status": "prepared_diagnostic_unqualified", "plan_sha256": expected_plan,
+        "journal_count": plan["journal_count"], "allocation_seconds": plan["elapsed_cap_seconds"],
+        "reference_checks": 200, "review_jobs": 0, "qualification": False}
+
+
+class WitnessOriginals(OriginalResponses):
+    """Record first observed witness timing while retaining unchanged originals."""
+
+    def __init__(self, directory, report, started):
+        super().__init__(directory)
+        self.report, self.started = report, started
+
+    def append(self, entry):
+        label, value = entry
+        first = None
+        if label.endswith("-native-host-qualification"):
+            instant = datetime.fromisoformat(value["observed_utc"])
+            if instant.tzinfo is None:
+                raise ValueError("closure_witness_clock_invalid")
+            bound = instant + timedelta(seconds=30)
+            prior = self.report["first_witness"]
+            if prior is None or instant < datetime.fromisoformat(prior["observed_utc"]):
+                first = {"observed_utc": instant.isoformat(),
+                    "observer_recency_not_after": bound.isoformat(), "original_pin": None,
+                    "retained_elapsed_seconds": time.monotonic() - self.started,
+                    "closing_latency_seconds": None, "closed_within_original_bound": None}
+                self.report["first_witness"] = first
+        pin = super().append(entry)
+        if first is not None:
+            first["original_pin"] = pin
+        return pin
+
+
+def create_journals(root, runtime, run_ids, originals):
+    """Create actual begin events without preparing or reserving review work."""
+    from evidence_wiki import execution_session as native
+    with runtime.context.activate(), Workspace.open(root) as workspace:
+        for run_id in run_ids:
+            with workspace.research.session(runtime.policy, run_id=run_id, execution=runtime.execution) as session:
+                with native.gate(session):
+                    native._begin(session)
+    receipts = []
+    for run_id in run_ids:
+        records, receipt, _, _ = authenticated_journal(root, runtime, run_id, originals)
+        if len(records) != 1 or records[0]["kind"] != "execution_begin":
+            raise ValueError("closure_unexpected_execution_records")
+        receipts.append(receipt)
+    if runtime.execution.executor._attempts:
+        raise ValueError("closure_review_attempt_observed")
+    return receipts
+
+
+def run_diagnostic(plan, expected_plan, directory):
+    validate_plan(plan, expected_plan)
+    directory = Path(directory).absolute()
+    if directory.resolve() != directory or directory.exists() or directory.is_relative_to(ROOT):
+        raise ValueError("workload_new_private_external_directory_required")
+    directory.mkdir(mode=0o700)
+    started = time.monotonic()
+    report = {"schema_version": RESULT_SCHEMA, "plan_sha256": expected_plan,
+        "candidate_sha256": plan["candidate_sha256"], "study": "closure_feasibility_diagnostic",
+        "terminal_outcome": "started_stop_unknown", "failure": None, "failures": [],
+        "pair_qualified": False, "pilot_completed": False, "automatic_canonical_completion": False,
+        "review_jobs": 0, "review_attempts": None, "applied_jobs": 0, "acceptance_credits": 0,
+        "reference_checks": None, "run_ids": plan["run_ids"], "journal_mode": plan["journal_mode"],
+        "phase_elapsed": [], "owner_reads": [], "owner_read_identities": [], "first_witness": None,
+        "global_closing_utc": None, "closing_status": "unobserved", "journal_receipts": [],
+        "initial_journal_receipts": [], "original_response_pins": [], "native_journal_pins": [],
+        "input_pins": [], "candidate_checks": [], "cleanup": None, "child_cleanup": None,
+        "retention": {"status": "unobserved"}, "elapsed_seconds": None}
+    originals = WitnessOriginals(directory / "observations", report, started)
+    tracker = OwnedChildren(originals, expected_plan)
+    root = runtime = None
+    opened_runs, snapshots = [], []
+
+    def phase(label, cap, operation):
+        tick = time.monotonic()
+        begin_utc = datetime.now(timezone.utc).isoformat()
+        status = "failed"
+        try:
+            with workload_deadline(cap):
+                result = operation()
+                if time.monotonic() - tick > cap:
+                    raise _HostDeadline()
+                status = "completed"
+                return result
+        finally:
+            report["phase_elapsed"].append({"phase": label, "started_utc": begin_utc,
+                "finished_utc": datetime.now(timezone.utc).isoformat(), "status": status,
+                "started_elapsed_seconds": tick - started, "elapsed_seconds": time.monotonic() - tick,
+                "cap_seconds": cap})
+
+    def fail(error):
+        failure = failure_document(error)
+        report["failures"].append(failure)
+        if report["failure"] is None:
+            report["failure"] = failure
+        report["terminal_outcome"] = "diagnostic_failed_unqualified"
+
+    def check_candidate(label):
+        validate_plan(plan, expected_plan)
+        pin = originals.append((label + "-candidate-check", {"candidate_sha256": plan["candidate_sha256"],
+            "plan_sha256": expected_plan, "observed_utc": datetime.now(timezone.utc).isoformat()}))
+        report["candidate_checks"].append(pin)
+
+    try:
+        tracker.open()
+        main_cap = plan["phase_caps"]["setup"] + 2 * plan["phase_caps"]["owner_read"]
+        remaining = (datetime.fromisoformat(plan["expires_at"]) - datetime.now(timezone.utc)).total_seconds()
+        with workload_deadline(min(main_cap, remaining)):
+            def setup():
+                nonlocal root, runtime
+                check_candidate("before")
+                artifacts = {}
+                for name, pin in plan["artifacts"].items():
+                    value, raw = workload.read_pinned_artifact(pin)
+                    artifacts[name] = value
+                    report["input_pins"].append(retain(directory / "inputs" / name, raw, raw=True))
+                root, runtime, _, _, _ = provision(directory / "fixture", artifacts["fresh-fixture-input.json"]["fixture"],
+                    originals, run_seconds=plan["elapsed_cap_seconds"], allocation_binding={
+                        "plan_sha256": expected_plan, "candidate_sha256": plan["candidate_sha256"],
+                        "study": report["study"], "phase_caps": plan["phase_caps"], "run_ids": plan["run_ids"], "review_jobs": 0})
+                report["reference_checks"] = 200
+                retain(directory / "realized-input-manifest.json", file_manifest(root))
+                opened_runs.extend(plan["run_ids"])
+                report["initial_journal_receipts"] = create_journals(root, runtime, opened_runs, originals)
+                report["review_attempts"] = len(runtime.execution.executor._attempts)
+            phase("setup", plan["phase_caps"]["setup"], setup)
+            for index in range(2):
+                observed, round_snapshots, records = phase("owner-read-" + str(index + 1),
+                    plan["phase_caps"]["owner_read"], lambda: workload._owner_read(root, runtime, opened_runs, originals))
+                report["owner_reads"].append(observed)
+                snapshots.extend(round_snapshots)
+                identity = workload.owner_read_identity(observed)
+                report["owner_read_identities"].append(identity)
+                if any(len(rows) != 1 or rows[0]["kind"] != "execution_begin" for rows in records.values()):
+                    raise ValueError("closure_unexpected_execution_records")
+                if len(report["owner_read_identities"]) == 2 and report["owner_read_identities"][0] != identity:
+                    raise ValueError("workload_owner_two_pass_changed")
+    except (Exception, SystemExit, _HostDeadline) as error:
+        fail(error)
+    finally:
+        def cleanup():
+            errors, cleaned = [], []
+            try:
+                report["child_cleanup"] = tracker.close()
+            except (Exception, SystemExit, _HostDeadline) as error:
+                report["child_cleanup"] = {"status": "unavailable", "failure": failure_document(error)}
+                errors.append(error)
+            if runtime is not None:
+                report["review_attempts"] = len(runtime.execution.executor._attempts)
+                for actual in runtime.execution.executor._attempts.values():
+                    try:
+                        attempt = actual.attempt
+                        verified = runtime.execution.executor.authenticate(runtime.execution.executor.cancel(attempt), attempt)
+                        originals.append((attempt.attempt_id + "-cleanup", verified))
+                        if verified["state"] == "running" or verified["final_accounting"] is not True:
+                            raise ValueError("workload_cleanup_unavailable")
+                        cleaned.append(attempt.attempt_id)
+                    except (Exception, SystemExit, _HostDeadline) as error:
+                        errors.append(error)
+                if report["review_attempts"]:
+                    errors.append(ValueError("closure_review_attempt_observed"))
+            if errors:
+                raise ValueError("workload_cleanup_unavailable")
+            return {"status": "confirmed", "attempt_ids": cleaned}
+        try:
+            report["cleanup"] = phase("cleanup", plan["phase_caps"]["cleanup"], cleanup)
+        except (Exception, SystemExit, _HostDeadline) as error:
+            report["cleanup"] = {"status": "unavailable", "failure": failure_document(error)}
+            fail(error)
+
+    def global_close():
+        nonlocal root
+        errors = []
+        if runtime is not None:
+            for run_id in opened_runs:
+                try:
+                    records, receipt, _, _ = authenticated_journal(root, runtime, run_id, originals)
+                    report["journal_receipts"].append(receipt)
+                    if len(records) != 1 or records[0]["kind"] != "execution_begin":
+                        raise ValueError("closure_unexpected_execution_records")
+                except (Exception, SystemExit, _HostDeadline) as error:
+                    originals.append((run_id + "-history-refusal", failure_document(error)))
+                    errors.append(error)
+        if root is None and (directory / "fixture/workspace").is_dir():
+            root = directory / "fixture/workspace"
+        if root is not None:
+            report["native_journal_pins"], report["retention"] = workload.collect_journals(root, directory)
+            if report["retention"]["status"] != "complete":
+                errors.append(ValueError("workload_journal_collection_bound"))
+        check_candidate("after")
+        if errors:
+            raise errors[0]
+        if len(report["owner_reads"]) != 2 or report["failure"] is not None:
+            return
+        verify_journal_closing(snapshots)
+        closing = datetime.now(timezone.utc)
+        report["global_closing_utc"] = closing.isoformat()
+        witness = report["first_witness"]
+        if witness is None:
+            raise ValueError("workload_owner_current_unavailable")
+        witness["closing_latency_seconds"] = (closing - datetime.fromisoformat(witness["observed_utc"])).total_seconds()
+        witness["closed_within_original_bound"] = datetime.fromisoformat(witness["observed_utc"]) <= closing < datetime.fromisoformat(witness["observer_recency_not_after"])
+        report["closing_status"] = "within_original_bound" if witness["closed_within_original_bound"] else "original_witness_expired"
+        if not witness["closed_within_original_bound"]:
+            raise ValueError("workload_original_witness_expired")
+        report["terminal_outcome"] = "diagnostic_completed_unqualified"
+
+    try:
+        phase("global-close", plan["phase_caps"]["global_close"], global_close)
+    except (Exception, SystemExit, _HostDeadline) as error:
+        fail(error)
+        if root is not None and report["retention"]["status"] == "unobserved":
+            report["native_journal_pins"], report["retention"] = workload.collect_journals(root, directory)
+    report["original_response_pins"] = originals.pins
+    report["elapsed_seconds"] = time.monotonic() - started
+    if report["elapsed_seconds"] > plan["elapsed_cap_seconds"]:
+        fail(_HostDeadline())
+    retain(directory / "report.json", report)
+    return report
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("freeze", "preflight", "run"))
+    parser.add_argument("--bundle", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--plan", type=Path)
+    parser.add_argument("--expected-plan")
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--journal-count", type=int, default=4)
+    args = parser.parse_args(argv)
+    try:
+        if args.action == "freeze":
+            if args.bundle is None or args.output is None:
+                raise ValueError("closure_freeze_arguments_required")
+            path = args.output.absolute()
+            if path.resolve() != path or path.is_relative_to(ROOT) or path.exists():
+                raise ValueError("workload_new_private_external_directory_required")
+            plan = reference_plan(args.bundle, journal_count=args.journal_count)
+            retain(path, plan)
+            result = {"plan_path": str(path), "plan_sha256": digest(plan), "runtime_qualification": "NOT RUN"}
+        else:
+            if args.plan is None or args.expected_plan is None:
+                raise ValueError("closure_run_arguments_required")
+            plan = _read(args.plan)
+            if args.action == "preflight":
+                result = preflight(plan, args.expected_plan)
+            else:
+                if args.directory is None:
+                    raise ValueError("closure_run_arguments_required")
+                report = run_diagnostic(plan, args.expected_plan, args.directory)
+                result = {"report_path": str(args.directory / "report.json"), "report_sha256": digest(report),
+                    "terminal_outcome": report["terminal_outcome"], "qualification": False}
+        print(json.dumps(result, sort_keys=True, allow_nan=False))
+        return 0 if args.action != "run" or report["terminal_outcome"] == "diagnostic_completed_unqualified" else 2
+    except (Exception, SystemExit, _HostDeadline) as error:
+        print(json.dumps({"status": "refused", "failure": failure_document(error)}, sort_keys=True))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

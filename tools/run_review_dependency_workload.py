@@ -359,22 +359,28 @@ def _owner_read(root, runtime, run_ids, originals):
         snapshots.append(snapshot)
     with runtime.context.activate(), Workspace.open(root) as workspace:
         strict = workspace.strict.check()
+        originals.append(("owner-strict-current", strict))
         publication = workspace.strict.export()
+        originals.append(("owner-publication-current", publication))
         current = []
         witness_expiries = []
         native_witnesses = []
         for run_id in run_ids:
             with workspace.research.session(runtime.policy, run_id=run_id, execution=runtime.execution) as session:
-                view = session.current()
+                from evidence_wiki import execution_session as native
                 from evidence_wiki import host_qualification
-                witness = host_qualification(session)
-                originals.append((run_id + "-native-host-qualification", witness))
+                with native._current_facts(session, operation="current"):
+                    view = native._current_view(session)
+                    originals.append((run_id + "-current", view))
+                    witness = host_qualification(session)
+                    originals.append((run_id + "-native-host-qualification", witness))
+                    qualification = native.current_qualifications(session)
+                    if (qualification["state"] != "qualified"
+                            or qualification != view["qualification"]):
+                        raise ValueError("workload_owner_current_unavailable")
                 native_witnesses.append(witness)
                 witness_expiries.append(datetime.fromisoformat(witness["observed_utc"]) + timedelta(seconds=30))
                 current.append(view)
-                if view["qualification"]["state"] != "qualified":
-                    raise ValueError("workload_owner_current_unavailable")
-                originals.append((run_id + "-current", view))
     return {"strict": strict, "publication": publication, "journal_receipts": receipts,
         "native_host_witnesses": native_witnesses, "native_current": current,
         "observer_recency_not_after": min(witness_expiries).isoformat(),
