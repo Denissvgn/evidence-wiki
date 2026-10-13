@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -47,7 +48,7 @@ def reference_plan(proposals=(), *, owner_read_workers=None):
         frozen_at=now.isoformat(), expires_at=(now + timedelta(hours=2)).isoformat(), proposals=list(proposals))
 
 
-def main(argv=None):
+def _main(argv, cleanup):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["freeze", "run", "decide", "replay"])
     parser.add_argument("--plan", type=Path)
@@ -76,6 +77,9 @@ def main(argv=None):
             plan = validate_plan(_read(args.plan), args.expected_plan)
             if digest(candidate_manifest(ROOT)) != plan["candidate_sha256"]:
                 raise ValueError("integration_current_candidate_changed")
+            if "native_child_control_directory" in plan["scope"]:
+                from tools.run_native_owner_feasibility import native_cleanup_context
+                cleanup.enter_context(native_cleanup_context(plan, args.action, args.host, args.directory))
             remaining = (datetime.fromisoformat(plan["expires_at"]) - datetime.now(timezone.utc)).total_seconds()
             if remaining <= 0:
                 raise ValueError("integration_plan_expired")
@@ -97,8 +101,13 @@ def main(argv=None):
                         controller = owner_pass(plan, originals, remaining_seconds=remaining)
                     readers = host_readers(plan, originals) if controller is None else controller.readers
                     def closing_check():
-                        if controller is not None:
-                            controller.closing_check()
+                        try:
+                            if controller is not None:
+                                controller.closing_check()
+                        finally:
+                            # Include registry closure before the decision's
+                            # final clock, including failed controller closure.
+                            cleanup.close()
                         if digest(candidate_manifest(ROOT)) != plan["candidate_sha256"] or any(
                                 digest(host_identity(h["route"])) != h["host_sha256"] for h in plan["hosts"]):
                             raise ValueError("integration_closing_candidate_or_host_changed")
@@ -117,11 +126,27 @@ def main(argv=None):
                                         **checks)
                     if args.action == "decide":
                         _publish(args.output, result)
+        cleanup.close()
         print(json.dumps(result, sort_keys=True))
         return 0 if result.get("outcome", "continue") == "continue" and result.get("completed", True) else 2
     except (ValueError, OSError, TypeError, KeyError, RuntimeError, _HostDeadline) as error:
+        cleanup.close()
+        reason = type(error).__name__
+        if "native_child_control_directory" in locals().get("plan", {}).get("scope", {}):
+            from tools.run_native_owner_feasibility import exception_token
+            reason = exception_token(error)
         print(json.dumps({"outcome": "stop" if isinstance(error, ValueError) and str(error) in INTEGRITY_ERRORS
-                          else "revise", "reason": type(error).__name__, "release_published": False}))
+                          else "revise", "reason": reason, "release_published": False}))
+        return 2
+
+
+def main(argv=None):
+    try:
+        with contextlib.ExitStack() as cleanup:
+            return _main(argv, cleanup)
+    except (ValueError, OSError, TypeError, KeyError, RuntimeError, _HostDeadline) as error:
+        from tools.run_native_owner_feasibility import exception_token
+        print(json.dumps({"outcome": "revise", "reason": exception_token(error), "release_published": False}))
         return 2
 
 
