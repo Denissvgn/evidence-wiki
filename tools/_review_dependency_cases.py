@@ -218,11 +218,11 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
                     lease = self.runtime.execution.profile.review_application_lease
                     window = review_application_window(session) if lease is not None else nullcontext()
                     with window, workload_deadline(lease.seconds) if lease is not None else nullcontext():
-                        identifier = "review-" + config_ref
+                        identifier = run_id + "-" + config_ref
                         role = self.runtime.execution.profile.role_scopes.scope(config_ref).task_role
                         assembly = None
                         for ordinal in range(1024):
-                            candidate = identifier + "-packet-" + str(ordinal)
+                            candidate = "review-" + config_ref + "-packet-" + str(ordinal)
                             if context_parameters(session, candidate)["context_id"].startswith(prefix):
                                 assembly = candidate
                                 break
