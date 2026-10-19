@@ -7,6 +7,7 @@ from types import FunctionType
 
 import pytest
 
+from tests._native_application_profile_fixture import native_application_profile
 from tools import run_review_dependency_workload as workload
 from tools._review_dependency_workload import (
     CLAIM_IDS,
@@ -847,6 +848,48 @@ def test_failed_provision_preserves_partial_originals_and_null_counts(plan, tmp_
     assert json.loads((tmp_path / "failed/report.json").read_bytes()) == report
 
 
+def test_workload_preserves_first_failure_and_retains_cleanup_and_closing_failures(plan, tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "Popen", subprocess.Popen)
+    cleanup_calls = []
+    real_close = workload.OwnedChildren.close
+    real_validate = workload.validate_plan
+    validations = []
+
+    def failed_provision(*_args, **_kwargs):
+        raise ValueError("workload_native_review_application_missing")
+
+    def failed_cleanup(tracker):
+        cleanup_calls.append(real_close(tracker))
+        raise RuntimeError("private_cleanup_secret")
+
+    def failed_closing(*args, **kwargs):
+        validations.append(True)
+        if len(validations) > 1:
+            raise ValueError("workload_owner_current_unavailable")
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(workload, "provision", failed_provision)
+    monkeypatch.setattr(workload.OwnedChildren, "close", failed_cleanup)
+    monkeypatch.setattr(workload, "validate_plan", failed_closing)
+    directory = tmp_path / "failed-with-secondary"
+    report = workload.run_workload(plan, digest(plan), "direct", "independent-claim-text", "legacy", directory)
+
+    assert report["failure"]["reason"] == "workload_native_review_application_missing"
+    assert report["terminal_outcome"] == "failed" and report["pair_qualified"] is False
+    assert len(cleanup_calls) == 1 and cleanup_calls[0]["status"] == "confirmed"
+    assert report["cleanup"]["status"] == "unavailable"
+    assert [row["phase"] for row in report["phase_elapsed"]] == ["setup", "cleanup", "global-close"]
+    secondary = [pin for pin in report["original_response_pins"] if pin["label"] == "secondary-failure"]
+    failures = [json.loads(Path(pin["path"]).read_bytes()) for pin in secondary]
+    assert [failure["reason"] for failure in failures] == ["workload_cleanup_unavailable", "workload_owner_current_unavailable"]
+    assert all(set(failure) == {"kind", "error_code", "reason", "frames"} and len(failure["frames"]) <= 8 for failure in failures)
+    assert "private_cleanup_secret" not in json.dumps(report)
+    assert all("private_cleanup_secret" not in Path(pin["path"]).read_text() for pin in report["original_response_pins"])
+    assert json.loads((directory / "report.json").read_bytes()) == report
+
+
 def test_owned_children_close_actual_process_groups_and_block_late_launch(tmp_path, monkeypatch):
     import subprocess
 
@@ -1018,3 +1061,169 @@ def test_owner_read_epoch_requires_closing_and_retains_each_actual_original(tmp_
     if failure_at != "witness":
         assert labels[3:] == ["run-native-host-qualification"]
         assert json.loads(Path(originals.pins[3]["path"]).read_bytes()) == witness
+
+
+def test_observational_pilot_has_closed_service_cap_and_unchanged_authority(plan):
+    from tools import _review_dependency_pilot as pilot
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    observed = pilot.reference_plan(bundle, execution_profile="six-hour", service_profile="observational")
+    native = observed["native_plan"]
+    assert observed["schema_version"] == pilot.OBSERVATIONAL_PLAN
+    assert native["schema_version"] == workload.PLAN_SCHEMA_OBSERVATIONAL
+    assert native["phase_caps"]["job"] == 1800
+    assert native["elapsed_cap_seconds"] == 15960
+    assert native["hard_limits"]["job_and_MCP_seconds"] == 600
+    assert native["source_protocol_limits"] == workload.HARD_LIMITS
+    assert native["execution_policy"]["authority_seconds"] == 21600
+    assert native["execution_policy"]["renewal"] == "forbidden"
+    assert native["observation_policy"]["max_age_seconds"] == 3600
+    pilot.validate_plan(observed, digest(observed))
+    with pytest.raises(ValueError, match="workload_observational_pilot_only"):
+        workload.run_workload(native, digest(native), "direct", "independent-claim-text", "legacy", bundle / "blocked")
+    default = pilot.reference_plan(bundle, execution_profile="six-hour")
+    assert default["schema_version"] == pilot.PLAN
+    assert "service_policy" not in default["native_plan"]
+    assert default["native_plan"]["phase_caps"]["job"] == 600
+
+
+@pytest.mark.parametrize("change", [
+    {"study": "full"}, {"host": "scoped_mcp"}, {"case_id": "unchanged-baseline"},
+    {"observation_profile": None}, {"execution_profile": "four-hour"}, {"service_profile": 1800},
+])
+def test_observational_pilot_rejects_scope_and_profile_overrides(plan, change):
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    options = dict(observation_profile="batch", execution_profile="six-hour", service_profile="observational")
+    options.update(change)
+    with pytest.raises(ValueError):
+        workload.reference_plan(bundle, **options)
+
+
+@pytest.mark.parametrize("field,value", [("service_seconds", 1801), ("native_worker_seconds", 1800), ("service_seconds", True)])
+def test_observational_pilot_rejects_changed_bound_policy(plan, field, value):
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    observed = workload.reference_plan(bundle, observation_profile="batch", execution_profile="six-hour", service_profile="observational")
+    observed["service_policy"][field] = value
+    with pytest.raises(ValueError):
+        workload.validate_plan(observed, digest(observed))
+
+
+@pytest.mark.parametrize("options", [{"execution_policy": None, "review_mode": "selective_reuse"},
+    {"review_mode": None}, {"review_mode": "legacy_full"}, {"review_mode": "selective_reuse", "mcp": True}])
+def test_observational_provision_refuses_missing_authority_and_wrong_actual_route(tmp_path, options):
+    from tools._review_dependency_workload import provision
+    selected = dict(execution_policy={"profile": "six-hour"}, review_mode="selective_reuse")
+    selected.update(options)
+    with pytest.raises(ValueError, match="workload_observational_pilot_only"):
+        provision(tmp_path, {}, None, allocation_binding={"service_policy": workload.service_policy("observational")}, **selected)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("change", [None, "service", "mode", "worker", "allocation", "expiry", "lease", "profile_binding", "workload_hash", "profile_schema", "profile_tamper"])
+def test_observational_runtime_and_provisioning_bind_exact_policy(plan, change):
+    from tests.test_review_execution_budget import allocation_document
+    from tools._execution_budget import provisioning_window, validate_runtime_allocation
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    observed = workload.reference_plan(bundle, observation_profile="batch", execution_profile="six-hour", service_profile="observational")
+    allocation = allocation_document(observed)
+    profile_owner = native_application_profile({**observed["service_policy"]["application_lease"], "not_after_utc": observed["expires_at"]})
+    allocation["profile"] = profile_owner.document()
+    allocation["review_application_binding"] = {"profile_sha256": profile_owner.sha256,
+        "lease": allocation["profile"]["review_application_lease"]}
+    binding = allocation["allocation_binding"]
+    binding.update(service_policy=copy.deepcopy(observed["service_policy"]),
+        service_selection={"study": "pilot", "host": "direct", "case_id": "independent-claim-text", "mode": "selective"})
+    seconds = observed["elapsed_cap_seconds"]
+    if change == "service":
+        binding["service_policy"]["service_seconds"] += 1
+    elif change == "mode":
+        binding["service_selection"]["mode"] = "legacy"
+    elif change == "worker":
+        binding["source_protocol_limits"] = {**binding["source_protocol_limits"], "job_and_MCP_seconds": 1800}
+    elif change == "allocation":
+        seconds += 1
+        allocation["run_policy"]["budgets"]["seconds"] = seconds
+    elif change == "lease":
+        allocation["profile"]["review_application_lease"]["seconds"] = 600
+    elif change == "workload_hash":
+        allocation["review_application_binding"]["profile_sha256"] = digest(allocation["profile"])
+    elif change == "profile_schema":
+        allocation["profile"]["schema_version"] = "research-execution-profile/v18"
+    elif change == "profile_tamper":
+        allocation["profile"]["profile_ref"] += "-changed"
+    elif change == "profile_binding":
+        allocation["review_application_binding"]["profile_sha256"] = "0" * 64
+    elif change == "expiry":
+        binding["authority_expires_at"] = "2099-01-01T00:00:00+00:00"
+    if change is None:
+        assert validate_runtime_allocation(allocation, observed) == allocation
+        _, expires = provisioning_window(observed["execution_policy"], binding, seconds)
+        assert expires == observed["expires_at"]
+    else:
+        with pytest.raises(ValueError):
+            validate_runtime_allocation(allocation, observed)
+        if change in {"lease", "profile_binding", "workload_hash", "profile_schema", "profile_tamper"}:
+            # Provisioning receives the unchanged authority binding, not the realized profile.
+            assert provisioning_window(observed["execution_policy"], binding, seconds)[1] == observed["expires_at"]
+        else:
+            with pytest.raises(ValueError):
+                provisioning_window(observed["execution_policy"], binding, seconds)
+
+
+def test_observational_plan_cannot_retag_formal_bytes(plan):
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    formal = workload.reference_plan(bundle, observation_profile="batch", execution_profile="six-hour")
+    formal["schema_version"] = workload.PLAN_SCHEMA_OBSERVATIONAL
+    with pytest.raises(ValueError, match="workload_plan_binding_invalid"):
+        workload.validate_plan(formal, digest(formal))
+
+
+@pytest.mark.parametrize("allocation_state", ["invalid", "missing", "duplicate"])
+def test_setup_refuses_allocation_before_dependencies_or_worker_dispatch(plan, tmp_path, monkeypatch, allocation_state):
+    from contextlib import nullcontext
+
+    from tests.test_review_execution_budget import allocation_document
+
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    selected = workload.reference_plan(bundle, observation_profile="batch", execution_profile="six-hour")
+    events = []
+
+    class NoChildren:
+        def __init__(self, *_args):
+            pass
+
+        def open(self):
+            pass
+
+        def close(self):
+            return {"status": "confirmed"}
+
+    def provision_without_workers(_base, _fixture, originals, **_kwargs):
+        events.append("provision")
+        allocation = allocation_document(selected)
+        if allocation_state == "invalid":
+            allocation["allocation_binding"]["candidate_sha256"] = "0" * 64
+        for _ in range({"missing": 0, "invalid": 1, "duplicate": 2}[allocation_state]):
+            originals.append(("runtime-allocation", allocation))
+        return None, None, {}, {}, {}
+
+    def forbidden_dependencies(*_args, **_kwargs):
+        events.append("dependencies")
+        raise AssertionError("dependencies_reached_before_allocation_refusal")
+
+    def forbidden_dispatch(*_args, **_kwargs):
+        events.append("dispatch")
+        raise AssertionError("worker_dispatch_reached_before_allocation_refusal")
+
+    monkeypatch.setattr(workload, "OwnedChildren", NoChildren)
+    monkeypatch.setattr(workload, "workload_deadline", lambda *_args: nullcontext())
+    monkeypatch.setattr(workload, "provision", provision_without_workers)
+    monkeypatch.setattr(workload, "reference_dependencies", forbidden_dependencies)
+    monkeypatch.setattr(workload, "completed_native_cycle", forbidden_dispatch)
+    report = workload.run_workload(selected, digest(selected), "direct", "independent-claim-text", "legacy",
+        tmp_path / ("allocation-" + allocation_state))
+
+    expected = "execution_runtime_binding_invalid" if allocation_state == "invalid" else "workload_artifact_binding_invalid"
+    assert report["failure"]["reason"] == expected
+    assert events == ["provision"]
+    assert all(row["status"] == "unstarted" for row in report["job_elapsed"])
+    assert report["cleanup"]["status"] == "confirmed"

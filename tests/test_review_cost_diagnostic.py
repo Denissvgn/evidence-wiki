@@ -63,12 +63,16 @@ def harness(plan, monkeypatch):
         def open(self):
             calls.append("children-open")
 
+        def confirm_completed(self):
+            calls.append("children-confirm")
+
         def close(self):
             calls.append("children-close")
             return {"status": "confirmed", "children": []}
 
     def provision(directory, fixture, originals, **kwargs):
         calls.append("provision")
+        assert isinstance(kwargs["children"], Children)
         assert len(fixture["inventory"]["claims"]) == 6 and len(fixture["inventory"]["questions"]) == 2
         assert kwargs["run_seconds"] == 1560
         root = directory / "workspace"
@@ -77,6 +81,7 @@ def harness(plan, monkeypatch):
 
     def drive(root, runtime, route, run_id, originals, **kwargs):
         calls.append("drive")
+        assert isinstance(kwargs["children"], Children)
         assert route == "direct" and kwargs["case_id"] == "independent-claim-text"
         assert kwargs["claim_ids"] == {"observed-capacity"} and kwargs["job_cap_seconds"] == 600
         for index, row in enumerate(kwargs["job_elapsed"]):

@@ -9,6 +9,8 @@ import hashlib
 import json
 from typing import Any
 
+from ._review_dependency_json import detached as detached_native
+from ._review_dependency_wire import WIRE, _pack_validated_bytes, unpack
 from .mutation_contracts import _serialized, detached, refuse
 
 JOURNAL = "research-execution-journal/v1"
@@ -37,28 +39,85 @@ def detached_record(value: Any) -> dict[str, Any]:
             or value.get("schema_version") != JOURNAL):
         refuse("INVALID")
     result = detached({**value, "data": None})
-    result["data"] = detached(value["data"])
+    data = value["data"]
+    if type(data) is dict and data.get("schema_version") == WIRE:
+        try:
+            data = unpack(data, "journal_data")
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            refuse("INVALID")
+    else:
+        data = detached_native(data)
+    result["data"] = data
     return _aggregate(result)
 
 
+def _owned_record_transport(result: dict[str, Any], *, physical: bool) -> dict[str, Any]:
+    from ._review_dependency_json import encoded
+
+    result = {**result}
+    raw = _serialized(result)
+    if len(raw) > 262144:
+        try:
+            selected = encoded(result["data"])
+            if selected is not None:
+                result["data"] = _pack_validated_bytes(selected, "journal_data")
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            refuse("INVALID")
+    if physical and len(_serialized(result)) > 262144:
+        refuse("LIMIT")
+    return result
+
+
+def _record_transport(value: Any, *, physical: bool) -> dict[str, Any]:
+    return _owned_record_transport(detached_record(value), physical=physical)
+
+
+def _canonical_owned_record(value: Any) -> tuple[bytes, dict[str, Any]]:
+    """Return physical bytes and a separately owned logical record for one read."""
+    logical = detached_record(value)
+    return _serialized(_owned_record_transport(logical, physical=False)), logical
+
+
+def storage_record(value: Any) -> dict[str, Any]:
+    """Select bounded physical storage without changing legacy codec capacity."""
+    return _record_transport(value, physical=True)
+
+
 def canonical_record(value: Any) -> bytes:
-    """Encode the complete record with the existing canonical JSON spelling."""
-    return _serialized(detached_record(value))
+    """Encode the physical record, retaining legacy bytes below transport bounds."""
+    return _serialized(_record_transport(value, physical=False))
 
 
 def digest_record(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_record(value)).hexdigest()
 
 
+def expanded_size(value: Any) -> int:
+    """Measure logical canonical expansion under the raw journal capacity."""
+    size = 0
+    encoder = json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    for text in encoder.iterencode(value):
+        size += len(text.encode("utf-8"))
+        if size > 16777216:
+            refuse("LIMIT")
+    return size
+
+
 def detached_records(value: Any) -> list[dict[str, Any]]:
     """Detach a native collection without charging list/header depth to data."""
     if type(value) is not list or len(value) > 4096:
         refuse("LIMIT")
-    return _aggregate([detached_record(record) for record in value])
+    result = [detached_record(record) for record in value]
+    expanded_size(result)
+    _aggregate([_record_transport(record, physical=False) for record in result])
+    return result
 
 
 def canonical_records(value: Any) -> bytes:
-    return _serialized(detached_records(value))
+    raw = _serialized([_record_transport(record, physical=False) for record in detached_records(value)])
+    if len(raw) > 1048576:
+        refuse("LIMIT")
+    return raw
 
 
 def digest_records(value: Any) -> str:

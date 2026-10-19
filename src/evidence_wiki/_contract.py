@@ -32,7 +32,7 @@ from .resources import STARTER_DIR, required_asset_manifest
 
 CONTRACT_SCHEMA_VERSION = "1.0"
 
-LIBRARY_API_VERSION = "63"
+LIBRARY_API_VERSION = "64"
 
 DOMAIN_PACK_STATE_SCHEMA_VERSION = "1.0"
 DOMAIN_PACK_REFRESH_SCHEMA_VERSION = "1.0"
@@ -509,15 +509,18 @@ def contract() -> dict:
             "resource_index_command": "evidence-wiki agent resources --format json",
             "resource_command": "evidence-wiki agent resource ID --format json",
             "resource_accessor": "evidence_wiki.agent_resources.resource_document",
-            "bootstrap_schema": "onboarding/bootstrap/v2", "resource_schema": "onboarding/resource/v2",
-            "summary_schema": "onboarding/capabilities/v1", "guide": "guide/bootstrap/v1",
+            "bootstrap_schema": "onboarding/bootstrap/v3", "resource_schema": "onboarding/resource/v2",
+            "summary_schema": "onboarding/capabilities/v2", "guide": "guide/bootstrap/v1",
+            "resource_pages": "up to 128 entries; explicit total, returned and truncation bounds; offset/limit on resource index",
             "maximum_summary_bytes": 32768, "workspace_required": False,
             "framework_matrix": "framework/compatibility/v1", "portable_bundle": "framework/bundle/v1",
-            "tool_schemas": ["evidence-framework-call/v1", "evidence-framework-result/v1"],
+            "tool_schemas": ["evidence-framework-call/v1", "evidence-framework-call/v2", "evidence-framework-result/v1"],
             "pi_bridge": {"api": "evidence_wiki.pi_bridge.PiRpcBridge", "managed_runner": False,
                           "host_enforced": False, "automatic_replay": False},
         },
         "host_qualification": {"method": "host_qualification", "schema": "research-host-qualification/v1",
+            "selective_schema": "research-host-qualification/v2",
+            "schema_selection": "v2 when retained authenticated applications include a selective review; otherwise v1",
             "schema_documents": host_qualification_schemas(),
             "scope": "current configured native credentials and retained authenticated attempts, contexts and review attestations",
             "host_enforced": "semantic boundary unsupported; separate measured SBPL draft-only observation",
@@ -538,12 +541,13 @@ def contract() -> dict:
             "first_passes": "logical slot plus actual current qualified controller/configuration and native review",
             "limits": "existing run journal and frozen repair/role budgets; unchanged or exhausted repairs remain unresolved"},
         "research_resolution": {"schema": "research-question-resolution/v1",
+            "dependency_schema": "research-question-resolution/v2",
             "method": "research.session.resolution", "schemas": "strict.resolution_schemas",
             "grants": ["research_session.resolution", "resolution_operations.current"],
             "selection": "every frozen original and its native derived questions; no caller approval dictionaries",
-            "eligibility": "current native publication, complete owned mandatory actual-target reviews and exact frozen policy",
+            "eligibility": "current native publication, complete mandatory actual-target reviews in the authenticated session and exact frozen policy",
             "partial": "per-original derived subset only under frozen allow_partial; original accepted counts unchanged",
-            "basis": "permitted-content domain commitment or null; native global material and review commitments remain private",
+            "basis": "permitted-content domain commitment or null; v2 retains public native claim provenance; raw material and review attestations remain private",
             "effects": "read-only; lifecycle and external-action authority are separate",
             "limits": {"originals": 100, "questions": 300, "bytes": 1048576}},
         "research_brief": {"schemas": ["research-current-brief/v1", "research-brief-markdown/v1"],
@@ -652,6 +656,8 @@ def contract() -> dict:
             "host_backend": {"id": "darwin-sbpl", "availability": "requires successful live probe"},
             "review_authority": "existing external host trust policy and evidence event store; POSIX storage",
             "review_status": "latest matching current basis; later fail supersedes prior pass",
+            "review_basis_modes": {"evidence-strict-policy/v1": "whole_workspace",
+                "evidence-strict-policy/v2": "claim_dependencies_v1 with protected dependency delivery and original custody"},
             "machine_preflight": "current strict and coverage owner before new machine work; incompatible finite stop",
             "revocation_routes": {"source_revision": "strict.revoke_source via signed usage transaction",
                 "keys_envelopes": "external host authority policy owner; no SDK policy writer",
@@ -741,7 +747,7 @@ def contract() -> dict:
             "scheduling": "optional frozen role/controller aggregate caps, configured worker failover and bounded authenticated retry/backoff",
             "offline_executor": "DeterministicOfflineExecutor; measured local work, zero provider use, fixtures cannot qualify semantic review",
             "role_isolation": "optional frozen role scopes and exact configured controllers; fresh blinded parent-bound review contexts; independent control/context/model dimensions remain separate",
-            "review_context": "research-review-context/v1 and v2; v2 retains deterministic calculation inputs and references; missing or truncated decisive evidence is incomplete",
+            "review_context": "research-review-context/v1, v2 and explicitly selected v3 or v4; v2 retains calculation inputs; v3 binds complete closure separately from the legacy strict snapshot; v4 carries dependency material with original private custody; missing or truncated decisive evidence is incomplete",
             "execution_observation": "research-execution-observation/v1",
             "execution_report": "research-execution-report/v2",
             "execution_report_schema_accessor": "evidence_wiki.execution_reporting.schema_document",
@@ -782,12 +788,20 @@ def contract() -> dict:
         },
         "machine_review_delivery": {
             "schema_accessor": "evidence_wiki.review_packet_contracts.schema_document",
-            "profile": "research-execution-profile/v7 only with explicit immutable ReviewDelivery; older documents unchanged",
+            "profile": "research-execution-profile/v7 with legacy ReviewDelivery, v14 with complete context, or v15 with dependency context, or v16/v17 with an explicit bounded review application lease; older documents unchanged",
             "packet": "complete blinded sources, native computations when configured, mechanical diagnostics and current bounded counter context",
             "scope": "protected native owner revalidation per page, before dispatch, signing and application",
             "delivery": "bounded host-assembled input and authenticated attempt digest; header alone is a planned descriptor",
             "unknown": "missing, truncated, stale, withdrawn or oversized decisive context cannot authorize review application",
             "semantics": "delivery proves provided bytes only; worker comprehension and genuine model quality remain unobserved",
+        },
+        "review_application_lease": {
+            "profile": "research-execution-profile/v16 with lease/v1 or v17 with explicit lease/v2 ReviewApplicationLease",
+            "job_schema": "research-host-job/v5 for lease/v1 or v6 for lease/v2",
+            "window": "review_application_window(session) freezes one original host service start and absolute end before assembly",
+            "bounds": "lease/v1 at most 1800 seconds; explicit lease/v2 at most 3600 seconds, within original run and host-selected authority expiry; native worker timeout and deadline remain at most 600 seconds",
+            "eligibility": "ordinary scoped contextual evaluate only; timely successful worker receipt and all current authority, source, qualification and basis checks remain required",
+            "recovery": "stored attempt lease only; no renewal or expired legacy attempt promotion",
         },
         "claim_diagnostics": {
             "schema": "evidence-claim-diagnostics/v1",

@@ -55,6 +55,7 @@ if str(SRC_ROOT) not in sys.path:
 from evidence_wiki import resources  # noqa: E402 - the checkout's manifest names what the archives must carry.
 from tools._installation_contract import (  # noqa: E402
     admitted_archive,
+    check_review_producer_inventory,
     check_source_archives,
     dependency_rules,
     source_file,
@@ -1273,6 +1274,7 @@ AGENT_PROBE = textwrap.dedent(r'''
     import pathlib
     import subprocess
     import sys
+    from evidence_wiki._agent_catalog import resource_paths
     from evidence_wiki.agent_resources import resource_document, resource_index
     from evidence_wiki.onboarding_contract import decode_document
     from evidence_wiki.onboarding_schemas import schema_document, schema_ids
@@ -1283,14 +1285,14 @@ AGENT_PROBE = textwrap.dedent(r'''
     before = sorted(str(path) for path in pathlib.Path.cwd().rglob('*'))
     result = subprocess.run([cli, 'agent', '--format', 'json'], capture_output=True, text=True)
     assert result.returncode == 0 and not result.stderr, result.stderr + result.stdout
-    bootstrap = decode_document('onboarding/bootstrap/v2', result.stdout.encode())['payload']
+    bootstrap = decode_document('onboarding/bootstrap/v3', result.stdout.encode())['payload']
     assert bootstrap['workspace'] == 'absent'
     assert bootstrap['strict_selection']['effective_assurance'] is None
     assert before == sorted(str(path) for path in pathlib.Path.cwd().rglob('*'))
     summary = subprocess.run([cli, 'agent', 'summary', '--format', 'json', '--require', 'strict-evidence/v1',
                               '--require', 'declarative-computation/v1'], capture_output=True, text=True)
     assert summary.returncode == 0, summary.stderr + summary.stdout
-    value = decode_document('onboarding/capabilities/v1', summary.stdout.encode())['payload']
+    value = decode_document('onboarding/capabilities/v2', summary.stdout.encode())['payload']
     assert len(summary.stdout.encode()) < value['limits']['summary_bytes']
     assert all('host_enforced' not in mode for mode in value['frameworks']['qualified'])
     assert value['strict']['host_probe'] == 'not_run'
@@ -1308,9 +1310,23 @@ AGENT_PROBE = textwrap.dedent(r'''
     native = invoke(json.dumps(call).encode(), target=pathlib.Path.cwd())
     assert native['status'] == 'completed' and native['evidence_acceptance'] == 'not_evaluated'
     assert json.loads(native['result_json'])['payload']['id'] == 'evidence-framework-call/v1'
-    for entry in resource_index()['resources']:
-        document = resource_document(entry['id'])
-        assert hashlib.sha256(document['content'].encode()).hexdigest() == entry['sha256']
+    identifiers, offset = set(), 0
+    while True:
+        page = resource_index(offset=offset)
+        returned, total = page['bounds']['returned'], page['bounds']['total']
+        assert returned == len(page['resources']) <= 128
+        assert page['bounds']['truncated'] is (returned < total)
+        for entry in page['resources']:
+            assert entry['id'] not in identifiers
+            identifiers.add(entry['id'])
+            document = resource_document(entry['id'])
+            assert hashlib.sha256(document['content'].encode()).hexdigest() == entry['sha256']
+        offset += returned
+        if offset >= total:
+            break
+        assert returned > 0
+    assert len(identifiers) == total
+    assert identifiers == set(resource_paths())
     for key in schema_ids():
         assert json.loads(resource_document(key)['content']) == schema_document(key)
     for stem, method in (('_strict_contract', 'schema_documents'), ('_computation_contract', 'schemas')):
@@ -2082,6 +2098,7 @@ def validate_distributions(args, summary, scratch):
     wheel, sdist = find_artifacts(args.dist_dir.resolve())
     checks: dict[str, object] = {}
     layout, source_files = source_layout(REPO_ROOT)
+    check_review_producer_inventory(REPO_ROOT, layout)
     source = source_identity(source_files)
     expectations = qualification_expectations(layout)
     _OPTIONS.public_expectations = expectations

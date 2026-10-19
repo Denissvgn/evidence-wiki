@@ -58,15 +58,22 @@ def orchestration_schema():
             "description": "Null retains starter/pack inheritance. A declaration grants no execution or source access."}
 
 
+def question_criteria_schema():
+    """Publish question criteria without loading unrelated execution defaults."""
+    opaque = {"type": "object", "maxProperties": 128, "additionalProperties": True}
+    ident = {**string(128), "pattern": r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$(?![\s\S])"}
+    quant = obj(fields=array(obj(source_id=ident, pointer=string(512), unit=string(128)), 32, 1),
+                references=array(opaque, 32, 1), invariants=array(ident, 64, 1))
+    return obj(facet_id=string(128), source_classes=array(string(128), 16, 1),
+                   required_scope=array(ident, 16), time=string(), units=string(), counterevidence=string(),
+                   stopping=string(), inference=string(), quantitative=_nullable(quant))
+
+
 def schemas():
     opaque = {"type": "object", "maxProperties": 128, "additionalProperties": True}
     ident = {**string(128), "pattern": r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$(?![\s\S])"}
     nullable = _nullable
-    quant = obj(fields=array(obj(source_id=ident, pointer=string(512), unit=string(128)), 32, 1),
-                references=array(opaque, 32, 1), invariants=array(ident, 64, 1))
-    criteria = obj(facet_id=string(128), source_classes=array(string(128), 16, 1),
-                   required_scope=array(ident, 16), time=string(), units=string(), counterevidence=string(),
-                   stopping=string(), inference=string(), quantitative=nullable(quant))
+    criteria = question_criteria_schema()
     question = obj(question_id=ident, template=nullable(string(128)), facets=array(opaque, 32), criteria=array(criteria, 32))
     requirement = obj(source_id=ident, output_format={"enum": ["markdown", "plain_text", "html", "pdf", "docx", "csv", "json"]},
                       needs_complete={"type": "boolean"}, scope={"type": "object", "maxProperties": 16, "additionalProperties": string()})

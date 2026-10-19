@@ -23,6 +23,7 @@ FIELDS = frozenset({"schema_version", "capture_id", "tool_id", "tool_version", "
                     "capture_method", "content_format", "content_kind", "completeness", "completeness_note", "rights",
                     "scope", "request_id", "content_sha256", "content_bytes"})
 _SCRIPT_DIR = Path(__file__).resolve().parent
+_VALIDATION_MODULES = {}
 
 
 def schema():
@@ -220,7 +221,7 @@ def inspect_record(root: Path, record, *, read_input=None):
 
 def normalized_issues(root, record, frontmatter, body):
     if type(record.get("provenance")) is dict and record["provenance"].get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
-        return load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization").issues(root, record, frontmatter, body)
+        return load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization", cache=_VALIDATION_MODULES).issues(root, record, frontmatter, body)
     try:
         require(root is not None, "capture_original_root_missing")
         inspected = inspect_record(root, record)
@@ -234,8 +235,8 @@ def normalized_issues(root, record, frontmatter, body):
             content = inspected["content"].replace("\r\n", "\n").replace("\r", "\n")
             require("## Extracted Text\n\n" + content + "\n\n## Figures and Tables" in body,
                     "capture_normalized_text_mismatch")
-        normalizer = load_workspace_module(_SCRIPT_DIR, "normalize_sources")
-        contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
+        normalizer = load_workspace_module(_SCRIPT_DIR, "normalize_sources", cache=_VALIDATION_MODULES)
+        contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract", cache=_VALIDATION_MODULES)
         source = normalizer.normalize_host_capture_record(root, copy.deepcopy(record))
         _, expected_body, error = contract.split_record(normalizer.render_markdown(source, frontmatter))
         require(error is None and body.strip() == expected_body.strip(), "capture_normalized_rendering_mismatch")

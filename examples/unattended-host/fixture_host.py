@@ -36,13 +36,30 @@ from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
 class FixtureMeter:
     """Synthetic model accounting for protocol mechanics; never real provider usage."""
 
+    def __init__(self, child_tracker=None):
+        self.child_tracker = child_tracker
+
     def finalize(self, _attempt, summary):
+        if self.child_tracker is not None:
+            self.child_tracker.confirm_completed()
         return {'seconds':summary['seconds'],'model_calls':1,'tool_calls':1,'tokens':0,'cost':'0'}
 
 
-def provision(base, objective, *, scenario='repair', observation_sink=None, finite=False, run_seconds=1800):
+def provision(base, objective, *, scenario='repair', observation_sink=None, finite=False, run_seconds=1800,
+        execution_policy=None, study_frozen_at=None, study_expires_at=None, child_tracker=None):
     if type(run_seconds) is not int or not 1 <= run_seconds <= 25200:
         raise ValueError('Fixture run duration must be frozen before provisioning.')
+    if execution_policy is None:
+        if study_frozen_at is not None or study_expires_at is not None:
+            raise ValueError('Fixture study window requires a frozen execution policy.')
+        until = None
+        execution_authority = None
+    else:
+        from evidence_wiki._native_owner_execution import fixture_authority
+        execution_authority = fixture_authority(execution_policy, study_frozen_at, study_expires_at)
+        until, run_seconds = execution_authority['expires_at'], execution_authority['run_seconds']
+    if child_tracker is not None:
+        child_tracker.confirm_completed()
     base = base.resolve()
     if base.exists():
         raise ValueError('Fixture output must be a new directory; use live mode to reopen a provisioned runtime.')
@@ -51,7 +68,7 @@ def provision(base, objective, *, scenario='repair', observation_sink=None, fini
     control = base/'fixture-control'; control.mkdir(mode=0o700)
     workers = base/'workers'; workers.mkdir(mode=0o700)
     keys = {principal:secrets.token_bytes(32) for principal in ('generator','evidence','scope','critic','adjudicator','usage','scrubber','receipt','observer','qualifier')}
-    until = expiry()
+    until = expiry() if until is None else until
     keys['expires_at'] = until
     with Onboarding.open(allowed_roots=[base],allow=['apply']) as onboarding:
         prepared = onboarding.plan(setup_request(base,objective))
@@ -138,7 +155,7 @@ def provision(base, objective, *, scenario='repair', observation_sink=None, fini
     if finite:
         from finite_host import provision_services
         runtime = provision_services(root, private, control, workers, keys, run_policy, policy_doc['rubric'], until,
-            observation_sink=observation_sink)
+            observation_sink=observation_sink, child_tracker=child_tracker, execution_authority=execution_authority)
         return root, runtime, {'setup_ready': True, 'source_admitted': captured.get('state', captured.get('status')),
             'scenario': 'finite-structured-observation', 'observation_class': 'fixture_mechanics',
             'services': str(private/'services.py'), 'profile_version': runtime.execution.profile.document()['schema_version']}
@@ -150,7 +167,7 @@ def provision(base, objective, *, scenario='repair', observation_sink=None, fini
     suite = reference_suite(cases,suite_ref='fixture-only',split_ref='fixture-held-out',domain_ref='synthetic-local',rubric=policy_doc['rubric'])
     qualifications = []
     for config_ref in ('evidence','critic'):
-        calibration = BoundedSubprocessExecutor(profile,commands=commands,cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter())
+        calibration = BoundedSubprocessExecutor(profile,commands=commands,cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter(child_tracker))
         observations = []
         role = profile.role(config_ref)
         for index,case in enumerate(cases):
@@ -171,11 +188,14 @@ def provision(base, objective, *, scenario='repair', observation_sink=None, fini
                 observation_sink(attempt.document(),calibration.authenticate(observed,attempt))
             while observed['state']=='running':
                 time.sleep(0.005);observed=calibration.poll(attempt)
+            terminal = calibration.authenticate(observed,attempt) if child_tracker is not None else None
             if observation_sink is not None:
-                observation_sink(attempt.document(),calibration.authenticate(observed,attempt))
+                observation_sink(attempt.document(),terminal if terminal is not None else calibration.authenticate(observed,attempt))
+            if child_tracker is not None:
+                child_tracker.confirm_completed()
             observations.append((attempt,observed))
         qualifications.append(issuer.issue(run_policy,profile,config_ref,suite,cases,observations,calibration,expires_utc=until))
-    executor = BoundedSubprocessExecutor(profile,commands=commands,cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter())
+    executor = BoundedSubprocessExecutor(profile,commands=commands,cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter(child_tracker))
     signer = HostReviewSigner('fixture-authority','1',SigningIdentity('generator','generator','generator-key','generator-controller','generator',keys['generator']),
         tuple(SigningIdentity(name,name,name+'-key',profile.role(name).controller_ref,'evaluator',keys[name]) for name in ('evidence','critic')),until)
     runtime = HostRuntime.from_services(run_policy,context,ResearchExecution(executor,qualifications=QualifiedEvaluators(qualifications,issuer),

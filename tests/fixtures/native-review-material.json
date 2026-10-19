@@ -1,0 +1,355 @@
+{
+  "claim_id": "claim",
+  "claim_schema_version": "evidence-strict-claims/v2",
+  "claims": [
+    {
+      "calculations": [],
+      "derivation": null,
+      "evidence": [],
+      "id": "claim",
+      "limitations": [],
+      "premises": [],
+      "qualification": "supported",
+      "question_slug": "question",
+      "scope": "Sample",
+      "text": "Sample",
+      "time": "Sample",
+      "units": "Sample"
+    }
+  ],
+  "dependency_basis_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "global_material": {
+    "dependency_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "material": {
+      "global_dependencies": [
+        {
+          "coordinate": "authority",
+          "kind": "authority",
+          "value": {
+            "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        {
+          "coordinate": "claims",
+          "kind": "claims_inventory",
+          "value": {
+            "ids": [
+              "Sample"
+            ],
+            "schema_version": "evidence-strict-claims/v2"
+          }
+        },
+        {
+          "coordinate": "computation",
+          "kind": "computation",
+          "value": {
+            "definition": {
+              "t": "mapping",
+              "v": []
+            },
+            "inputs": [
+              {
+                "path": "sample.md",
+                "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            ],
+            "result": {
+              "t": "mapping",
+              "v": []
+            }
+          }
+        },
+        {
+          "coordinate": "coverage",
+          "kind": "effective_coverage",
+          "value": {
+            "t": "mapping",
+            "v": []
+          }
+        },
+        {
+          "coordinate": "policy",
+          "kind": "effective_policy",
+          "value": {
+            "t": "mapping",
+            "v": []
+          }
+        },
+        {
+          "coordinate": "requirements",
+          "kind": "effective_requirements",
+          "value": {
+            "t": "mapping",
+            "v": []
+          }
+        },
+        {
+          "coordinate": "sample.md",
+          "kind": "instruction_bytes",
+          "value": {
+            "path": "sample.md",
+            "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        {
+          "coordinate": "producer",
+          "kind": "producer",
+          "value": {
+            "manifest_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "schema_version": "evidence-review-producer/v1"
+          }
+        },
+        {
+          "coordinate": "qualification",
+          "kind": "qualification",
+          "value": {
+            "execution_profile_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "public_profile": {
+              "execution_profile": {
+                "t": "mapping",
+                "v": []
+              },
+              "run_policy": {
+                "t": "mapping",
+                "v": []
+              }
+            },
+            "run_policy_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        {
+          "coordinate": "questions",
+          "kind": "questions_inventory",
+          "value": {
+            "ids": [
+              "Sample"
+            ]
+          }
+        },
+        {
+          "coordinate": "sample.md",
+          "kind": "source_bytes",
+          "value": {
+            "path": "sample.md",
+            "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        {
+          "coordinate": "sources",
+          "kind": "source_inventory",
+          "value": {
+            "sources": [
+              {
+                "ancestor_revision_ids": [],
+                "normalized_path": "Sample",
+                "provenance_paths": [
+                  "Sample"
+                ],
+                "raw_paths": [
+                  "Sample"
+                ],
+                "source_id": "source",
+                "source_revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            ]
+          }
+        },
+        {
+          "coordinate": "sample.md",
+          "kind": "source_record",
+          "value": {
+            "ancestry": [],
+            "grant": {
+              "t": "mapping",
+              "v": []
+            },
+            "manifest_record": {
+              "t": "mapping",
+              "v": []
+            },
+            "normalized_metadata": {
+              "t": "mapping",
+              "v": []
+            },
+            "revision_descriptor": {
+              "t": "mapping",
+              "v": []
+            },
+            "scrub": {
+              "t": "mapping",
+              "v": []
+            },
+            "source_id": "source",
+            "source_revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        {
+          "coordinate": "sample.md",
+          "kind": "workspace_material",
+          "value": {
+            "path": "sample.md",
+            "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      ],
+      "worker_semantics": {
+        "completeness": {
+          "complete": true,
+          "limitations": [],
+          "missing": [],
+          "omitted": [],
+          "scope_qualifiers": {
+            "computation_configured": true,
+            "global_dependency_coordinates": [
+              {
+                "coordinate": "authority",
+                "kind": "authority"
+              }
+            ],
+            "role_names": [
+              "critic"
+            ]
+          },
+          "truncated": false
+        },
+        "computation": null,
+        "coverage": {
+          "t": "mapping",
+          "v": []
+        },
+        "instructions": [
+          {
+            "path": "sample.md",
+            "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "text": "Sample"
+          }
+        ],
+        "policy": {
+          "t": "mapping",
+          "v": []
+        },
+        "producer": {
+          "identity": {
+            "manifest_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "schema_version": "evidence-review-producer/v1"
+          },
+          "manifest": {
+            "members": [
+              {
+                "path": "sample.txt",
+                "size_bytes": 6,
+                "sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+              }
+            ],
+            "schema_version": "evidence-review-producer-manifest/v1"
+          }
+        },
+        "requirements": {
+          "t": "mapping",
+          "v": []
+        },
+        "roles": [
+          {
+            "config_refs": [
+              "Sample"
+            ],
+            "instructions": "Sample",
+            "output_contract": {
+              "t": "mapping",
+              "v": []
+            },
+            "task_role": "critic"
+          }
+        ],
+        "rubric": {
+          "t": "mapping",
+          "v": []
+        }
+      }
+    },
+    "schema_version": "research-global-dependency-material/v1"
+  },
+  "local_context": {
+    "completeness": {
+      "complete": true,
+      "limitations": [
+        "Sample"
+      ],
+      "missing": [],
+      "omitted": [],
+      "scope_qualifiers": {
+        "claim_ids": [
+          "Sample"
+        ],
+        "counter_question_slugs": [
+          "Sample"
+        ],
+        "question_slugs": [
+          "Sample"
+        ],
+        "source_ids": [
+          "Sample"
+        ]
+      },
+      "truncated": false
+    },
+    "counterevidence": {
+      "limitations": [],
+      "questions": [],
+      "receipt_semantics": [],
+      "search_completeness": "not_established",
+      "slices": [],
+      "state": "current_native_instruction"
+    },
+    "mechanical": [
+      {
+        "accepted": false,
+        "claim_id": "claim",
+        "evidence": [],
+        "mechanical_result": "verified",
+        "original_id": "question",
+        "premises": [],
+        "qualification": "supported",
+        "question_slug": "question",
+        "scope": "Sample",
+        "semantic_approval": "not_evaluated",
+        "time": "Sample",
+        "units": "Sample"
+      }
+    ],
+    "mechanical_reasons": [
+      {
+        "claim_id": "claim",
+        "reasons": []
+      }
+    ],
+    "sources": []
+  },
+  "producer_id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "questions": [
+    {
+      "body": "Sample",
+      "canonical_mirrors": {
+        "answer_page": "sample.md",
+        "coverage_manifest": "sample.md",
+        "coverage_required": true,
+        "grounding": [],
+        "grounding_required": true,
+        "human_review_policies": [],
+        "human_review_required": false,
+        "source_ids": []
+      },
+      "manifest_question": {
+        "original_id": "question",
+        "question": "Sample",
+        "slug": "question"
+      },
+      "path": "sample.md",
+      "semantic_frontmatter": {
+        "t": "mapping",
+        "v": []
+      }
+    }
+  ],
+  "schema_version": "research-dependency-review-material/v1"
+}

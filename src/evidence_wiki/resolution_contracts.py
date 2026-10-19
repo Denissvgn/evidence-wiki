@@ -8,6 +8,7 @@ from evidence_wiki.mutation_contracts import detached
 from evidence_wiki.onboarding_contract import _matches
 
 RESOLUTION = "research-question-resolution/v1"
+DEPENDENCY_RESOLUTION = "research-question-resolution/v2"
 MAX_BYTES = 1_048_576
 
 
@@ -16,14 +17,16 @@ def refuse(reason):
         details={"reason": reason}, recoverable=False)
 
 
-def _eligible_shape(native=None):
+def _eligible_shape(native=None, *, version=RESOLUTION):
     if native is None:
         from .pack_discovery import owner
         native = owner("_strict_contract").schema_documents()
-    question = deepcopy(native["evidence-strict-publication/v1"]["properties"]["questions"]["items"])
+    versions = (("evidence-strict-publication/v3",) if version == DEPENDENCY_RESOLUTION else
+        ("evidence-strict-publication/v1", "evidence-strict-publication/v2"))
+    question = deepcopy(native[versions[0]]["properties"]["questions"]["items"])
     claims = []
-    for version in ("evidence-strict-publication/v1", "evidence-strict-publication/v2"):
-        claim = deepcopy(native[version]["properties"]["questions"]["items"]["properties"]["claims"]["items"])
+    for publication_version in versions:
+        claim = deepcopy(native[publication_version]["properties"]["questions"]["items"]["properties"]["claims"]["items"])
         claim["properties"].pop("verification")
         claim["required"].remove("verification")
         claims.append(claim)
@@ -31,7 +34,7 @@ def _eligible_shape(native=None):
     return question
 
 
-def _schema_document(native=None):
+def _schema_document(native=None, *, version=RESOLUTION):
     def obj(**fields):
         return {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
     def text(size=256):
@@ -49,10 +52,10 @@ def _schema_document(native=None):
             actual_target_qualification={"const": "current"},
             producer_and_context={"const": "current_owned_proof"})))
     original = obj(original_id=text(), original_text=nullable(text(65536)), outcome=verdict,
-        questions=array(question), eligible_questions=array(_eligible_shape(native)),
+        questions=array(question), eligible_questions=array(_eligible_shape(native, version=version)),
         missing_question_ids=array(text()), reasons=array(text(4096), 512))
     return {"$schema": "https://json-schema.org/draft/2020-12/schema", **obj(
-        schema_version={"const": RESOLUTION}, run_id=text(), binding_id=hashed,
+        schema_version={"const": version}, run_id=text(), binding_id=hashed,
         current_basis_id=nullable(hashed), publication_basis_id={"type": "null"}, policy_id=hashed,
         verdict=verdict, original_outcomes={**array(original, 100), "minItems": 1},
         global_blockers=array(text(4096), 512), accounting_complete={"type": "boolean"},
@@ -63,14 +66,17 @@ def _schema_document(native=None):
         limitations=array(text(4096), 32))}
 
 
-def schema_document():
-    return _schema_document()
+def schema_document(version=RESOLUTION):
+    if version not in {RESOLUTION, DEPENDENCY_RESOLUTION}:
+        refuse("resolution_schema_unsupported")
+    return _schema_document(version=version)
 
 
 def checked(value):
     try:
         bounded(value)
-        _matches(value, schema_document())
+        version = value.get("schema_version") if type(value) is dict else None
+        _matches(value, schema_document(version))
         if len(canonical(value)) > MAX_BYTES:
             refuse("resolution_document_bound")
         originals = value["original_outcomes"]
@@ -92,7 +98,7 @@ def checked(value):
             if len({q.get("slug") for q in native_questions}) != len(native_questions):
                 refuse("resolution_native_question_duplicate")
             for q in native_questions:
-                contract.validate_shape(q, _eligible_shape())
+                contract.validate_shape(q, _eligible_shape(version=version))
                 if q["accepted"] is not True or q["original_id"] != row["original_id"]:
                     refuse("resolution_native_question_invalid")
                 claims[q["slug"]] = {claim["id"] for claim in q["claims"]}
@@ -121,4 +127,4 @@ def checked(value):
 
 
 def schemas():
-    return {RESOLUTION: deepcopy(schema_document())}
+    return {version: deepcopy(schema_document(version)) for version in (RESOLUTION, DEPENDENCY_RESOLUTION)}

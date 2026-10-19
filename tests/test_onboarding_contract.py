@@ -130,7 +130,7 @@ def test_every_public_artifact_is_retrievable_and_independently_matches_its_sche
     with pytest.raises(UsageError) as caught:
         decode_document("onboarding/research_request/v1", b"{}")
     examples["error"] = error_envelope(caught.value)
-    assert set(schema_ids()) == {f"onboarding/{name}/v1" for name in examples} | {"onboarding/research_request/v2", "onboarding/bootstrap/v2", "onboarding/resource/v2", "onboarding/capabilities/v1", "onboarding/resources/v1"}
+    assert set(schema_ids()) == {f"onboarding/{name}/v1" for name in examples} | {"onboarding/research_request/v2", "onboarding/bootstrap/v2", "onboarding/resource/v2", "onboarding/capabilities/v1", "onboarding/resources/v1", "onboarding/capabilities/v2", "onboarding/bootstrap/v3"}
     for kind, value in examples.items():
         resource_id = f"onboarding/{kind}/v1"
         assert_matches_schema(value, schema_document(resource_id))
@@ -148,7 +148,7 @@ def test_schemas_and_negotiation_are_caller_owned_and_have_no_workflow_claims():
     contract = evidence_wiki.contract()
     assert contract["onboarding_contract"] == contract_index()
     assert contract["schema_version"] == "1.0"
-    assert contract["library_api"]["version"] == "60"
+    assert contract["library_api"]["version"] == "64"
     assert "agent" not in contract["library_api"]["surface"]
 
 

@@ -40,6 +40,9 @@ def harness(tmp_path, monkeypatch):
         def open(self):
             events.append("child-open")
 
+        def confirm_completed(self):
+            events.append("child-confirm")
+
         def close(self):
             events.append("child-close")
             self.originals.append(("actual-child-cleanup", {"status": "confirmed"}))
@@ -47,6 +50,7 @@ def harness(tmp_path, monkeypatch):
 
     def provision(base, fixture_input, originals, **kwargs):
         events.append("provision")
+        assert isinstance(kwargs.pop("children"), Children)
         assert fixture_input == {"sentinel": "fresh-input"}
         assert kwargs["run_seconds"] == state.get("allocation_seconds", 600)
         assert kwargs["allocation_binding"]["review_jobs"] == 0

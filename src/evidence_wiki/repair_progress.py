@@ -39,7 +39,7 @@ def inventory_diff(before, after, *, target_claim_id):
         "authorized": False, "evidence_accepted": False}
 
 
-def schemas():
+def schemas(native=None):
     def obj(**properties):
         return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
     text = {"type": "string", "minLength": 1, "maxLength": 256}
@@ -52,7 +52,9 @@ def schemas():
         claim_bytes_changed={"type": "boolean"}, semantic_progress={"const": "not_established"},
         current_approval={"const": "not_established"}, peer_claims_preserved={"const": True},
         original_scope_preserved={"const": True}, **flags)
-    native_review = owner("_strict_contract").schema_documents()["evidence-strict-review-status/v1"]["properties"]["claims"]["items"]["properties"]["review"]
+    if native is None:
+        native = owner("_strict_contract").schema_documents()
+    native_review = native["evidence-strict-review-status/v1"]["properties"]["claims"]["items"]["properties"]["review"]
     progress = obj(schema_version={"const": PROGRESS}, run_id=text, current_basis_id=nullable_hash,
         original_id={"anyOf": [text, {"type": "null"}]}, after_sequence={"type": "integer", "minimum": 0},
         next_sequence={"type": "integer", "minimum": 0}, truncated={"type": "boolean"},
@@ -72,7 +74,8 @@ def schemas():
     return {DIFF: diff, PROGRESS: progress}
 
 
-def schema_document(identifier):
-    if identifier not in schemas():
+def schema_document(identifier, native=None):
+    documents = schemas(native)
+    if identifier not in documents:
         fail("schema_unknown")
-    return detached(schemas()[identifier])
+    return detached(documents[identifier])

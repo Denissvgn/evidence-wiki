@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 
-from .mutation_contracts import _shape, canonical, detached
+from ._review_dependency_json import canonical, detached
+from .mutation_contracts import _shape
 from .workflow_contracts import WorkflowContractError
 
 CURRENT = "research-session-current/v1"

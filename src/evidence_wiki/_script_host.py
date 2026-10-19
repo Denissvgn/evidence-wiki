@@ -195,11 +195,15 @@ def _loader_content_hash(path: Path) -> str:
 
 
 def _load_workspace_loader(script_dir: Path) -> ModuleType:
+    from . import _review_producer
+
     root = script_dir.expanduser().resolve()
+    _review_producer.note_assets_root(root.parent.parent)
     path = root / "_workspace_module_loader.py"
     if not path.is_file():
         raise SystemExit(f"Missing packaged script loader: {path}")
     content_hash = _loader_content_hash(path)
+    _review_producer.register_native(root, None, host_context, loader_hash=content_hash)
     key = f"{root}\0{content_hash}"
     if key in _LOADER_MODULE_CACHE:
         return _LOADER_MODULE_CACHE[key]
@@ -274,7 +278,11 @@ def owner_generation() -> tuple[Path, str]:
     root = shared_assets_root() / resources.STARTER_DIR / "scripts"
     with _LOAD_LOCK:
         _load_workspace_loader(root)
-        return root.resolve(), script_tree_hash(root)
+        selected = root.resolve(), script_tree_hash(root)
+        from . import _review_producer
+
+        _review_producer.register_native(*selected, host_context)
+        return selected
 
 
 def load_packaged_script(assets_root: Path, stem: str) -> ModuleType:

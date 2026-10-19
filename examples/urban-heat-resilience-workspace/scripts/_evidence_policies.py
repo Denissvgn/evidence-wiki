@@ -29,6 +29,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 from _workspace_module_loader import load_workspace_module
 from _yaml_safe import safe_load_current as safe_load
 
+_QUALIFIED_PACKET_CACHE = {}
+
 _source_failure_taxonomy = load_workspace_module(_SCRIPT_DIR, "source_failure_taxonomy")
 delivery_unusable_evidence_reasons = _source_failure_taxonomy.unusable_evidence_reasons
 _html_usability_profile = load_workspace_module(_SCRIPT_DIR, "_html_usability_profile")
@@ -674,7 +676,7 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
         reasons.append(profile.reason)
     usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
     reasons.extend(usage.normalized_issues(inputs.project_root, inputs.config, record, normalized))
-    packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet")
+    packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet", cache=_QUALIFIED_PACKET_CACHE)
     reasons.extend(packet.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
     reasons.extend(execution.normalized_issues(inputs.project_root, inputs.config, record, normalized))

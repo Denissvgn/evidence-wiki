@@ -3,17 +3,19 @@
 from copy import deepcopy
 
 from ._pack_io import bounded, canonical
+from ._review_dependency_json import detached
 from .errors import EvidenceWikiError
-from .mutation_contracts import detached
 from .onboarding_contract import _matches
 from .packet_pages import refuse
 
 SCHEMAS = ("research-review-delivery/v1", "research-review-page/v1", "research-paged-review/v1",
     "research-review-packet/v1", "research-host-assembled-review/v1", "research-complete-review-delivery/v1",
     "research-review-sections/v1", "research-blinded-review-input/v1")
+COMPLETE_SCHEMAS = tuple(name.replace("/v1", "/v2") for name in SCHEMAS if name != "research-review-page/v1")
+DEPENDENCY_SCHEMAS = tuple(name.replace("/v1", "/v3") for name in SCHEMAS if name != "research-review-page/v1")
 
 
-def schemas():
+def schemas(native_computation=None, native_diagnostics=None, native_dependency=None):
     from .calculation_contracts import schema_document as calculation_schema
     from .pack_discovery import owner
 
@@ -25,6 +27,8 @@ def schemas():
         return {"type": "string", "maxLength": maximum}
     def nullable(shape):
         return {"anyOf": [shape, {"type": "null"}]}
+    def questions(item):
+        return {**arr(item, 32), "minItems": 1}
     hashed = {"type": "string", "pattern": r"^sha256:[a-f0-9]{64}$(?![\s\S])"}
     counter = {"type": "integer", "minimum": 0, "maximum": 4194304}
     identity = text(256)
@@ -38,7 +42,7 @@ def schemas():
     claim_fields = dict(id=identity, question_slug=identity, kind={"enum": ["assertion", "inference"]},
         text=text(65536), scope=text(65536), time=text(65536), units=text(65536), derivation=nullable(text(65536)), limitations=arr(text(65536), 16),
         premises=arr(identity, 32), evidence=arr(evidence, 16))
-    reference = calculation_schema("evidence-calculation-selection/v1")["properties"]["reference"]
+    reference = calculation_schema("evidence-calculation-selection/v1", native_computation)["properties"]["reference"]
     claim = {"anyOf": [obj(**claim_fields), obj(**claim_fields, calculations=arr(reference, 16))]}
     rubric = obj(id=identity, revision=identity, criteria=obj(**{key: text(65536) for key in
         ("support", "source_suitability", "scope", "time", "units", "counterevidence")}))
@@ -72,7 +76,9 @@ def schemas():
         max_input_bytes={"type": "integer", "minimum": 4096, "maximum": 524288},
         required_sections={"const": ["sources", "computation_if_configured", "mechanical", "counter_context"]},
         worker_comprehension={"const": "not_observed"}, semantic_approval=unknown)
-    diagnostic = owner("_claim_diagnostics").schema_document()["properties"]["claims"]["items"]["properties"]
+    if native_diagnostics is None:
+        native_diagnostics = owner("_claim_diagnostics").schema_document()
+    diagnostic = native_diagnostics["properties"]["claims"]["items"]["properties"]
     mechanical_evidence = deepcopy(diagnostic["evidence"]["items"])
     for key in ("location_hint", "anchor_pointer"):
         mechanical_evidence["properties"].pop(key)
@@ -84,9 +90,8 @@ def schemas():
     # The native question-plan owner validates arbitrary scientific scope values;
     # the supplement is also bounded and exactly rebound before every use.
     scope = {"type": "object", "maxProperties": 32}
-    from .planning_contracts import REQUEST
-    from .planning_contracts import schemas as planning_schemas
-    criteria = deepcopy(planning_schemas()[REQUEST]["properties"]["decisions"]["properties"]["question_plans"]["items"]["properties"]["criteria"]["items"])
+    from .planning_contracts import question_criteria_schema
+    criteria = question_criteria_schema()
     alternative = obj(source_id=identity, record_sha256=hashed, metadata=metadata, content=text(49152))
     sections = obj(schema_version={"const": "research-review-sections/v1"}, context_sha256=hashed,
         mechanical=arr(mechanical_claim, 33), counter_material=arr(counter_quote, 32),
@@ -101,7 +106,7 @@ def schemas():
     context_fields = dict(context_id=identity, task_role={"enum": ["evaluator", "critic", "adjudicator"]}, basis_id=hashed,
         rubric=rubric, claim=claim, question=question, premises=arr(claim, 32), sources=arr(context_source, 64), manifest=manifest)
     context = obj(**context_fields, schema_version={"enum": ["research-review-context/v1", "research-review-context/v2"]},
-        computation=nullable(calculation_schema("research-calculation-context/v1")))
+        computation=nullable(calculation_schema("research-calculation-context/v1", native_computation)))
     output_contract = obj(verdicts=obj(**{key: {"const": "pass|fail|unknown"} for key in
         ("support", "source_suitability", "scope", "time", "units", "counterevidence")}), rationale=text())
     standard_input = obj(packet=context, instructions=text(65536), output_contract=output_contract, complete_review_delivery=delivery)
@@ -113,23 +118,174 @@ def schemas():
     standard_input["allOf"] = [{"if": {"required": ["purpose"]}, "then": {"required": ["examination"]},
         "else": {"not": {"required": ["examination"]}}}]
     values = (plan, page, header, packet, host, delivery, sections, standard_input)
-    return {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape} for name, shape in zip(SCHEMAS, values, strict=True)}
+    result = {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape} for name, shape in zip(SCHEMAS, values, strict=True)}
+    question_complete = obj(**question["properties"], metadata=nullable({"type": "object"}), body=text(65536))
+    complete_claim_fields = {**claim_fields, "qualification": {"enum": ["attributed", "supported", "inference", "contested", "insufficient_evidence"]}}
+    claim_complete = {"anyOf": [obj(**complete_claim_fields), obj(**complete_claim_fields, calculations=arr(reference, 16))]}
+    complete_context_fields = {**context_fields, "claim": claim_complete, "premises": arr(claim_complete, 32)}
+    context_complete = obj(**complete_context_fields, schema_version={"const": "research-review-context/v3"},
+        questions=questions(question_complete), computation=nullable(calculation_schema("research-calculation-context/v1", native_computation)))
+    header_complete = deepcopy(header)
+    header_complete["properties"].update(schema_version={"const": "research-paged-review/v2"}, questions=questions(question_complete),
+        claim=claim_complete, premises=arr(claim_complete, 32))
+    header_complete["required"].append("questions")
+    packet_complete = obj(**packet["properties"])
+    packet_complete["properties"].update(schema_version={"const": "research-review-packet/v2"}, header=header_complete)
+    host_complete = deepcopy(host)
+    host_complete["properties"].update(schema_version={"const": "research-host-assembled-review/v2"}, packet=packet_complete)
+    delivery_complete = deepcopy(delivery)
+    delivery_complete["properties"].update(schema_version={"const": "research-complete-review-delivery/v2"}, packet=packet_complete)
+    plan_complete = deepcopy(plan)
+    plan_complete["properties"].update(schema_version={"const": "research-review-delivery/v2"},
+        context_version={"const": "research-review-context/v3"})
+    plan_complete["required"].append("context_version")
+    sections_complete = deepcopy(sections)
+    sections_complete["properties"].update(schema_version={"const": "research-review-sections/v2"},
+        counter_context=obj(status={"const": "current_native_instruction"}, questions=questions(obj(question_slug=identity,
+            claim_ids=arr(identity, 32), criteria=arr(criteria, 32), scope=scope, alternative_sources=arr(alternative, 32)))))
+    input_complete = deepcopy(standard_input)
+    input_complete["properties"].update(packet=context_complete, complete_review_delivery=delivery_complete)
+    complete_values = (plan_complete, header_complete, packet_complete, host_complete, delivery_complete, sections_complete, input_complete)
+    result.update({name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
+        for name, shape in zip(COMPLETE_SCHEMAS, complete_values, strict=True)})
+    if native_dependency is None:
+        native_dependency = owner("_review_dependency_contract").schema_documents()
+    from ._review_dependency_wire import schema as wire_schema
+    wire_material = wire_schema()
+    wire_material["properties"]["kind"] = {"const": "blinded_material"}
+    material_schema = {"oneOf": [native_dependency["research-dependency-review-material/v1"], wire_material]}
+    dependency_context = deepcopy(context_complete)
+    dependency_question = deepcopy(question_complete)
+    dependency_question["properties"]["metadata"] = {"$ref": "#/$defs/node"}
+    dependency_context["properties"].update(schema_version={"const": "research-review-context/v4"},
+        questions=questions(dependency_question),
+        dependency_material={"$ref": "#/$defs/dependency_material"})
+    dependency_context["required"].append("dependency_material")
+    computation_definitions = {}
+    dependency_context["properties"]["computation"] = _shared_computation(
+        dependency_context["properties"]["computation"], computation_definitions)
+    dependency_header = deepcopy(header_complete)
+    dependency_header["properties"]["schema_version"] = {"const": "research-paged-review/v3"}
+    dependency_header["properties"]["questions"] = questions(dependency_question)
+    for shape in (dependency_context, dependency_header):
+        shape["properties"].update(claim={"$ref": "#/$defs/claim"},
+            premises=arr({"$ref": "#/$defs/claim"}, 32), rubric={"$ref": "#/$defs/rubric"},
+            question={"$ref": "#/$defs/question_record"}, questions=questions({"$ref": "#/$defs/question_context"}))
+    dependency_packet = deepcopy(packet_complete)
+    dependency_packet["properties"].update(schema_version={"const": "research-review-packet/v3"}, header=dependency_header)
+    dependency_host = deepcopy(host_complete)
+    dependency_host["properties"].update(schema_version={"const": "research-host-assembled-review/v3"}, packet=dependency_packet)
+    dependency_delivery = deepcopy(delivery_complete)
+    dependency_delivery["properties"].update(schema_version={"const": "research-complete-review-delivery/v3"}, packet=dependency_packet)
+    dependency_plan = deepcopy(plan_complete)
+    dependency_plan["properties"].update(schema_version={"const": "research-review-delivery/v3"},
+        context_version={"const": "research-review-context/v4"})
+    dependency_sections = deepcopy(sections_complete)
+    dependency_sections["properties"].update(schema_version={"const": "research-review-sections/v3"},
+        mechanical=arr(deepcopy(native_diagnostics["properties"]["claims"]["items"]), 32))
+    dependency_input = deepcopy(input_complete)
+    dependency_input["properties"].update(packet=dependency_context, complete_review_delivery=dependency_delivery)
+    dependency_values = (dependency_plan, dependency_header, dependency_packet, dependency_host,
+        dependency_delivery, dependency_sections, dependency_input)
+    dependency_definitions = {"dependency_material": deepcopy(material_schema),
+        "node": deepcopy(native_dependency["research-dependency-review-material/v1"]["$defs"]["node"]), "claim": claim_complete,
+        "rubric": rubric, "question_record": question, "question_context": dependency_question,
+        **computation_definitions}
+    for name, shape in zip(DEPENDENCY_SCHEMAS, dependency_values, strict=True):
+        result[name] = {"$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": _used_definitions(shape, dependency_definitions), **shape}
+    return result
 
 
-def schema_document(identifier):
-    result = schemas().get(identifier)
+def _shared_computation(shape, definitions):
+    """Intern exact repeated calculation shapes within their existing scope."""
+    maps = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"}
+    arrays = {"allOf", "anyOf", "oneOf", "prefixItems"}
+    singles = {"additionalProperties", "unevaluatedProperties", "propertyNames", "contains", "not",
+        "if", "then", "else", "additionalItems", "unevaluatedItems", "contentSchema"}
+
+    def children(value, visit):
+        result = {}
+        for name, child in value.items():
+            if name in maps and type(child) is dict:
+                result[name] = {key: visit(item) for key, item in child.items()}
+            elif (name in arrays or name == "items") and type(child) is list:
+                result[name] = [visit(item) for item in child]
+            elif name in singles or name == "items":
+                result[name] = visit(child)
+            else:
+                result[name] = deepcopy(child)
+        return result
+
+    counts, values = {}, {}
+
+    def collect(value):
+        if type(value) is not dict or "$id" in value:
+            return value
+        key = canonical(value)
+        if len(key) >= 64 and any(name in value for name in ("type", "anyOf", "oneOf", "allOf", "enum", "const")):
+            counts[key] = counts.get(key, 0) + 1
+            values[key] = value
+        children(value, collect)
+        return value
+
+    collect(shape)
+    names = {key: "calculation_" + str(index + 1) for index, key in enumerate(sorted(
+        (key for key, count in counts.items() if len(key) * (count - 1) > 40 * count + 24),
+        key=lambda key: (-len(key), key)))}
+
+    def replace(value, retained=None):
+        if type(value) is not dict or "$id" in value:
+            return deepcopy(value)
+        key = canonical(value)
+        if key in names and key != retained:
+            return {"$ref": "#/$defs/" + names[key]}
+        return children(value, replace)
+
+    definitions.update({name: replace(values[key], key) for key, name in names.items()})
+    return replace(shape)
+
+
+def _used_definitions(shape, definitions):
+    """Keep local definitions reachable without crossing a native $id scope."""
+    used, pending = set(), [shape]
+    while pending:
+        value = pending.pop()
+        if type(value) is dict:
+            if "$id" in value:
+                continue
+            reference = value.get("$ref")
+            if type(reference) is str and reference.startswith("#/$defs/"):
+                name = reference[len("#/$defs/"):].split("/", 1)[0]
+                if name not in used:
+                    used.add(name)
+                    pending.append(definitions[name])
+            pending.extend(value.values())
+        elif type(value) is list:
+            pending.extend(value)
+    return {name: deepcopy(definitions[name]) for name in sorted(used)}
+
+
+def schema_document(identifier, native_computation=None, native_diagnostics=None, native_dependency=None):
+    result = schemas(native_computation, native_diagnostics, native_dependency).get(identifier)
     if result is None:
         refuse("packet_schema_unknown")
     return deepcopy(result)
 
 
 def validate(identifier, value):
-    bounded(value)
+    if identifier not in DEPENDENCY_SCHEMAS:
+        bounded(value)
     try:
-        _matches(value, schema_document(identifier))
+        shape = schema_document(identifier)
+        if identifier in DEPENDENCY_SCHEMAS:
+            from .pack_discovery import owner
+            owner("_review_dependency_contract").validate_schema(value, shape)
+        else:
+            _matches(value, shape)
     except (EvidenceWikiError, ValueError, TypeError, KeyError):
         refuse("packet_contract_invalid")
-    if identifier == "research-blinded-review-input/v1":
+    if identifier in {"research-blinded-review-input/v1", "research-blinded-review-input/v2", "research-blinded-review-input/v3"}:
         expected = {"packet", "instructions", "output_contract", "complete_review_delivery"}
         if "purpose" in value:
             expected |= {"purpose", "examination"}

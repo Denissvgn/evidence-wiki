@@ -219,3 +219,44 @@ def test_phase_order_and_duplicate_events_are_not_bag_of_passes(change):
 
 def test_native_artifact_requirement_cannot_be_replaced_by_owner_return():
     assert grade_evidence(manifest("native_artifact"), observations(), process_complete=True)["status"] == "ABSTAIN"
+
+
+@pytest.mark.parametrize("changed", ["src/evidence_wiki/product.py", "src/evidence_wiki/asset.json", "src/evidence_wiki/retained.ORIG"])
+def test_capsule_inventory_excludes_editor_backups_and_binds_product_inputs(tmp_path, monkeypatch, changed):
+    from pathlib import Path
+
+    from tools.verify_acceptance_paths import _copy_capsule, candidate_manifest
+
+    source, capsule = tmp_path / "source", tmp_path / "capsule"
+    product = source / "src/evidence_wiki"
+    product.mkdir(parents=True)
+    (source / "pyproject.toml").write_text("[project]\nname = 'fixture'\n")
+    (product / "product.py").write_text("VALUE = 1\n")
+    (product / "asset.json").write_text('{"value": 1}\n')
+    (product / "retained.ORIG").write_text("case-sensitive asset\n")
+    backups = (product / "product.py.orig", product / ".orig")
+    backup_text = "synthetic editor backup\n"
+    for backup in backups:
+        backup.write_text(backup_text)
+    read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path):
+        assert path not in backups, "editor backup payload must not be read"
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    admitted = candidate_manifest(source)
+    assert set(admitted) == {
+        "pyproject.toml", "src/evidence_wiki/product.py", "src/evidence_wiki/asset.json",
+        "src/evidence_wiki/retained.ORIG",
+    }
+    _copy_capsule(source, capsule, admitted)
+    assert candidate_manifest(capsule) == admitted
+    for backup in backups:
+        assert not (capsule / backup.relative_to(source)).exists()
+        assert backup.read_text() == backup_text
+        backup.write_text("changed synthetic editor backup\n")
+    assert candidate_manifest(source) == admitted
+    (source / changed).write_text("changed product input\n")
+    assert candidate_manifest(source) != admitted
+    assert candidate_manifest(capsule) == admitted

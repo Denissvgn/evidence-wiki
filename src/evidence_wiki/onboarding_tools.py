@@ -26,7 +26,9 @@ def specifications():
 
     add("bootstrap", "bootstrap", optional(obj(target=text, requirements=array(text, 32),
         assurance={"enum": ["artifact_checked", "host_enforced"]}, request_id=string(128)), {"target", "requirements", "assurance", "request_id"}))
-    for name in ("resources", "recipes", "contracts"):
+    add("resources", "resources", optional(obj(offset={"type": "integer", "minimum": 0},
+        limit={"type": "integer", "minimum": 1, "maximum": 128}), {"offset", "limit"}))
+    for name in ("recipes", "contracts"):
         add(name, name, obj())
     add("resource", "resource", obj(resource_id=string(256)))
     add("pack_list", "pack_list", optional(obj(target=text, catalog=text), {"target", "catalog"}))

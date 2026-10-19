@@ -56,6 +56,29 @@ RECIPE = {"native_run_seconds": NATIVE_RUN_SECONDS, "slot_seconds": 900,
           "denominator": 9, "retry_limit": 0}
 
 
+def _policy_recipe(selected):
+    if selected is None:
+        return dict(RECIPE)
+    return dict(RECIPE, **{name: selected[name] for name in (
+        "native_run_seconds", "slot_seconds", "route_observer_seconds", "decision_seconds",
+        "authority_seconds", "witness_seconds", "owner_pass_seconds", "cleanup_seconds")},
+        study_seconds=selected["study_seconds"], replay_seconds=selected["replay_seconds"])
+
+
+def _scope_options(plan, stage):
+    if plan["scope"].get("native_cleanup_recipe") == "owned-popen-groups/v2":
+        return {"native_child_scope": {"plan_sha256": digest(plan), "stage": stage}}
+    return {}
+
+
+def _cleanup_options(verified, pid, plan, stage):
+    if _scope_options(plan, stage):
+        from tools.measure_integration_costs import producer_cleanup_proof
+        return {"producer_cleanup": producer_cleanup_proof(verified, worker_pid=pid,
+            plan_sha256=digest(plan), stage=stage)}
+    return {}
+
+
 def require(value, reason):
     if not value:
         raise ValueError(reason)
@@ -121,7 +144,8 @@ def _cleanup_binding(plan, action, host, directory):
     require(scope["native_child_adapter_raw_sha256"] == _adapter_pin()
             and scope["owner_read_controller_sha256"] == digest(source_manifest())
             and plan["candidate_sha256"] == digest(candidate_manifest(ROOT)), "native_cleanup_source_binding")
-    require(scope["native_cleanup_recipe"] == "owned-popen-groups/v1", "native_cleanup_recipe")
+    require(scope["native_cleanup_recipe"] in {"owned-popen-groups/v1", "owned-popen-groups/v2"},
+            "native_cleanup_recipe")
     if action == "run":
         selected = Path(directory)
         roles = [role for role in ("primary", "audit")
@@ -141,9 +165,13 @@ def _cleanup_binding(plan, action, host, directory):
         expected = [str(ROOT / ".venv/bin/python"), str(ROOT / "tools/run_repeated_integrations.py"), action,
                     "--plan", str(root / "control/study-plan.json"), "--expected-plan", digest(plan),
                     "--originals", str(root / "control/originals.json"),
-                    "--expected-evidence", digest(evidence_pins(plan, originals)),
-                    "--output" if action == "decide" else "--report", str(root / "decisions/decision.json")]
-        require([str(Path(sys.executable).absolute()), *sys.argv] == expected,
+                    "--expected-evidence", digest(evidence_pins(plan, originals))]
+        actual = [str(Path(sys.executable).absolute()), *sys.argv]
+        if action == "decide":
+            matches = actual in (expected, expected + ["--output", str(root / "decisions/decision.json")])
+        else:
+            matches = actual == expected + ["--report", str(root / "decisions/decision.json")]
+        require(matches,
                 "native_cleanup_actual_owner_argv")
     checked_directory(root / "children")
     return root, stage
@@ -192,6 +220,25 @@ def native_cleanup_context(plan, action, host=None, directory=None):
     root, stage = _cleanup_binding(plan, action, host, directory)
     path = root / "children" / (stage + ".jsonl")
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    if plan["scope"].get("native_cleanup_recipe") == "owned-popen-groups/v2":
+        from tools._native_child_registry import ChildTracker
+        binding = {"schema_version": "native-owned-child/v2", "plan_sha256": digest(plan),
+                   "control_directory": str(root), "stage": stage, "worker_pid": os.getpid(),
+                   "adapter_raw_sha256": _adapter_pin(), "controller_sha256": digest(source_manifest()),
+                   "candidate_sha256": plan["candidate_sha256"]}
+        try:
+            tracker = ChildTracker(descriptor, binding)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        subprocess.Popen = tracker.popen
+        try:
+            with interruptible():
+                yield tracker
+        finally:
+            # Keep the closed wrapper installed through producer termination.
+            tracker.close(RECIPE["cleanup_seconds"])
+        return
     real_popen, owned, lock = subprocess.Popen, [], threading.RLock()
     state = {"sequence": 0, "head": "0" * 64, "bytes": 0, "closed": False, "failed": False}
     binding = {"schema_version": "native-owned-child/v1", "plan_sha256": digest(plan),
@@ -257,11 +304,34 @@ def native_cleanup_context(plan, action, host=None, directory=None):
             raise RuntimeError("native_child_cleanup_unconfirmed")
 
 
-def verify_child_registry(path, *, plan, stage, worker_pid):
+def verify_child_registry(path, *, plan, stage, worker_pid, producer_cleanup=None):
     """Verify complete source-bound custody; never signal a registry PID."""
     root = Path(plan["scope"]["native_child_control_directory"])
     require(Path(path) == root / "children" / (stage + ".jsonl"), "native_child_registry_location")
+    require(plan["scope"].get("native_cleanup_recipe") in {None, "owned-popen-groups/v1", "owned-popen-groups/v2"},
+            "native_cleanup_recipe")
     raw = read_private(path, REGISTRY_LIMIT)
+    if plan["scope"].get("native_cleanup_recipe") == "owned-popen-groups/v2":
+        from tools._native_child_registry import verify_registry
+        require(type(worker_pid) is int and worker_pid > 1, "native_child_worker_identity")
+        # The observer authenticates this separate, exact-Popen producer proof.
+        # A child-owned registry cannot make claims about its own parent custody.
+        require(type(producer_cleanup) is dict and set(producer_cleanup) == {
+            "worker_pid", "plan_sha256", "stage", "group_absent", "returncode", "command_receipt_sha256"}
+            and type(producer_cleanup["worker_pid"]) is int
+            and producer_cleanup["worker_pid"] == worker_pid
+            and producer_cleanup["plan_sha256"] == digest(plan) and producer_cleanup["stage"] == stage
+            and producer_cleanup["group_absent"] is True and type(producer_cleanup["returncode"]) is int
+            and type(producer_cleanup["command_receipt_sha256"]) is str
+            and len(producer_cleanup["command_receipt_sha256"]) == 64
+            and all(c in "0123456789abcdef" for c in producer_cleanup["command_receipt_sha256"]),
+            "native_child_producer_completion")
+        binding = {"schema_version": "native-owned-child/v2", "plan_sha256": digest(plan),
+                   "control_directory": str(root), "stage": stage, "worker_pid": worker_pid,
+                   "adapter_raw_sha256": plan["scope"]["native_child_adapter_raw_sha256"],
+                   "controller_sha256": plan["scope"]["owner_read_controller_sha256"],
+                   "candidate_sha256": plan["candidate_sha256"]}
+        return {"path": str(path), **verify_registry(raw, binding)}
     rows = raw.splitlines(keepends=True)
     require(2 <= len(rows) <= 2 * MAX_CHILDREN + 2, "native_child_registry_rows")
     binding = {"schema_version": "native-owned-child/v1", "plan_sha256": digest(plan),
@@ -309,6 +379,7 @@ def producer_argv(root, role, host, plan_sha256):
 
 
 def freeze_study(args):
+    from tools._native_owner_execution import execution_policy
     from tools.run_repeated_integrations import reference_plan
 
     require(args.control is None, "native_freeze_new_root")
@@ -328,15 +399,20 @@ def freeze_study(args):
     root = Path(tempfile.mkdtemp(prefix="evidence-native-owner-", dir="/private/tmp")).resolve(strict=True)
     for name in ("control", "children", "invocations", "decisions"):
         (root / name).mkdir(mode=0o700)
+    selected = (execution_policy("extended") if getattr(args, "execution_profile", "legacy") == "extended" else None)
+    recipe = _policy_recipe(selected)
     plan = reference_plan(proposals, owner_read_workers=3)
     for slot in plan["slots"]:
-        slot["elapsed_cap_seconds"] = 900
-    plan["expires_at"] = (datetime.fromisoformat(plan["frozen_at"]) + timedelta(seconds=NATIVE_RUN_SECONDS)).isoformat()
+        slot["elapsed_cap_seconds"] = recipe["slot_seconds"]
+    plan["expires_at"] = (datetime.fromisoformat(plan["frozen_at"]) + timedelta(
+        seconds=NATIVE_RUN_SECONDS if selected is None else selected["study_seconds"])).isoformat()
     plan["scope"].update(native_run_seconds=NATIVE_RUN_SECONDS,
         native_child_control_directory=str(root), native_child_adapter_raw_sha256=args.expected_adapter,
-        native_cleanup_recipe="owned-popen-groups/v1", native_study_mode=args.mode,
+        native_cleanup_recipe="owned-popen-groups/v1" if selected is None else "owned-popen-groups/v2", native_study_mode=args.mode,
         reference_reporter_raw_sha256=args.expected_reporter,
         native_reporter_raw_sha256=identity["native_reporter_raw_sha256"])
+    if selected is not None:
+        plan["scope"].update(execution_policy=selected, execution_policy_sha256=digest(selected))
     validate_plan(plan, digest(plan))
     require(plan["candidate_sha256"] == args.expected_candidate
             and plan["scope"]["owner_read_controller_sha256"] == args.expected_controller,
@@ -375,11 +451,13 @@ def freeze_study(args):
                   "anchor_directory": str(base / "anchors")}
         publish_new(base / "control/runtime.json", config)
         config_pins[role] = digest(config)
-    study = {"schema_version": "native-owner-study/v1", "control_directory": str(root),
+    study = {"schema_version": "native-owner-study/v1" if selected is None else "native-owner-study/v2", "control_directory": str(root),
              "project": str(ROOT), "source_identity": identity, "plan_sha256": digest(plan),
-             "config_pins": config_pins, "recipe": RECIPE, "mode": args.mode,
+             "config_pins": config_pins, "recipe": recipe, "mode": args.mode,
              "proposal_raw_sha256": args.expected_proposals_raw, "independent_audit_route": "scoped_mcp",
              "audit_fresh_custody": True, "native_execution_started": False}
+    if selected is not None:
+        study.update(execution_policy=selected, execution_policy_sha256=digest(selected))
     require(_source_identity(args.reporter) == identity, "native_source_changed_during_freeze")
     publish_new(root / "control/study.json", study)
     return {"control": str(root), "study_sha256": digest(study), "plan_sha256": digest(plan),
@@ -390,7 +468,7 @@ def load_study(args):
     root = _external_root(args.control)
     study = document(root / "control/study.json")
     require(digest(study) == args.expected_study and study["control_directory"] == str(root)
-            and study["project"] == str(ROOT) and study["recipe"] == RECIPE
+            and study["project"] == str(ROOT)
             and study["mode"] in {"limited", "full"}, "native_study_external_pin")
     identity = _source_identity(Path(study["source_identity"]["reference_reporter_path"]))
     require(identity == study["source_identity"]
@@ -403,9 +481,25 @@ def load_study(args):
             and digest(document(root / "control/package-manifest.json")) == identity["package_sha256"],
             "native_retained_source_changed")
     plan = validate_plan(document(root / "control/study-plan.json"), args.expected_plan)
+    selected = plan["scope"].get("execution_policy")
+    recipe = _policy_recipe(selected)
+    require(study["recipe"] == recipe, "native_study_recipe")
+    if selected is None:
+        require(study["schema_version"] == "native-owner-study/v1"
+                and "execution_policy" not in study and "execution_policy_sha256" not in study,
+                "native_study_execution_policy")
+    else:
+        require(study["schema_version"] == "native-owner-study/v2" and study.get("execution_policy") == selected
+                and study.get("execution_policy_sha256") == digest(selected)
+                and plan["scope"]["native_cleanup_recipe"] == "owned-popen-groups/v2",
+                "native_study_execution_policy")
+        require(set(study) == {"schema_version", "control_directory", "project", "source_identity",
+            "plan_sha256", "config_pins", "recipe", "mode", "proposal_raw_sha256",
+            "independent_audit_route", "audit_fresh_custody", "native_execution_started",
+            "execution_policy", "execution_policy_sha256"}, "native_study_execution_policy")
     require(digest(plan) == study["plan_sha256"] and plan["candidate_sha256"] == args.expected_candidate
             and len(plan["slots"]) == 9 and plan["scope"]["native_run_seconds"] == NATIVE_RUN_SECONDS
-            and all(slot["elapsed_cap_seconds"] == 900 for slot in plan["slots"])
+            and all(slot["elapsed_cap_seconds"] == recipe["slot_seconds"] for slot in plan["slots"])
             and plan["scope"]["owner_read_workers"] == 3
             and plan["scope"]["native_study_mode"] == study["mode"]
             and plan["scope"]["native_child_control_directory"] == str(root)
@@ -441,13 +535,34 @@ def _invocation(root, name, argv, study, plan):
     return digest(value)
 
 
-def _verify_observation(config, attempt, argv, receipt_pin, work_root):
+def _verify_observation(config, attempt, argv, receipt_pin, work_root, *, native_child_scope=None):
     key = read_private(Path(config["key_path"]), 128)
+    options = {} if native_child_scope is None else {"native_child_scope": native_child_scope}
     verified = read_command_receipt(config["cost_plan"], attempt, argv, observer_key=key,
-        directory=config["receipt_directory"], work_root=work_root, expected_receipt_sha256=receipt_pin)
+        directory=config["receipt_directory"], work_root=work_root, expected_receipt_sha256=receipt_pin, **options)
     require(verified["current_command_manifest_matches"], "native_observed_command_changed")
     start = _authenticated(Path(config["receipt_directory"]) / (attempt + ".start.json"), key)
     return verified, start["pid"]
+
+
+def _authenticated_stdout(config, attempt, verified):
+    """Parse one private read only after matching the authenticated stream pin."""
+    receipt = verified["receipt"]
+    require(type(receipt["exit_code"]) is int and receipt["exit_code"] in (0, 2)
+            and receipt["status"] == ("succeeded" if receipt["exit_code"] == 0 else "failed")
+            and receipt["failure"] is None and verified["coverage_gap"] is None
+            and receipt["output_overflow"] is False
+            and receipt["output_reader_work_unresolved"] is False
+            and receipt["meter_work_unresolved"] is False and receipt["meter_id"] is None,
+            "native_decision_observation_incomplete")
+    path = Path(config["receipt_directory"]) / (attempt + ".stdout")
+    require(path.is_absolute() and not any(p.is_symlink() for p in (path, *path.parents)),
+            "native_custody_symlink")
+    raw = read_private(path, LIMIT)
+    stream = verified["receipt"]["streams"]["stdout"]
+    require(len(raw) == stream["retained_bytes"] and raw_pin(raw) == stream["sha256"],
+            "native_authenticated_stdout_changed")
+    return _original(raw)
 
 
 def full_report(value, plan, expected_evidence):
@@ -481,11 +596,13 @@ def _originals(root, plan, configs):
             require(digest(anchor) == pin["anchor_sha256"] and pin["plan_sha256"] == digest(plan)
                     and pin["runtime_control_sha256"] == digest(config), "native_anchor_external_pin")
             argv = config["jobs"][host]
-            verified, pid = _verify_observation(config, host, argv, pin["receipt_sha256"], config["work_root"])
+            stage = "run-primary-" + host
+            verified, pid = _verify_observation(config, host, argv, pin["receipt_sha256"], config["work_root"],
+                **_scope_options(plan, stage))
             require(anchor["observation"] == verified, "native_anchor_receipt_pin")
             try:
                 cleanup = verify_child_registry(root / "children" / ("run-primary-" + host + ".jsonl"),
-                    plan=plan, stage="run-primary-" + host, worker_pid=pid)
+                    plan=plan, stage=stage, worker_pid=pid, **_cleanup_options(verified, pid, plan, stage))
                 require(anchor["cleanup"] == cleanup, "native_anchor_cleanup_pin")
                 cleanup_confirmed = True
             except (ValueError, OSError, TypeError, KeyError, RuntimeError):
@@ -531,9 +648,11 @@ def verify_hidden_replay(root, study, plan, config, args):
     require(invocation["argv"] == argv and invocation["command_manifest"] == command_manifest(argv)
             and invocation["study_sha256"] == digest(study) and invocation["source_identity"] == study["source_identity"]
             and retention["invocation_sha256"] == digest(invocation), "native_audit_replay_invocation")
-    verified, pid = _verify_observation(config, "replay", argv, retention["receipt_sha256"], config["proof_work_root"])
-    cleanup = verify_child_registry(root / "children/replay.jsonl", plan=plan, stage="replay", worker_pid=pid)
-    output = document(Path(config["receipt_directory"]) / "replay.stdout")
+    verified, pid = _verify_observation(config, "replay", argv, retention["receipt_sha256"], config["proof_work_root"],
+        **_scope_options(plan, "replay"))
+    cleanup = verify_child_registry(root / "children/replay.jsonl", plan=plan, stage="replay", worker_pid=pid,
+        **_cleanup_options(verified, pid, plan, "replay"))
+    output = _authenticated_stdout(config, "replay", verified)
     require(retention["verified"] is True and retention["output_hidden"] is True
             and retention["decision_raw_sha256"] == args.expected_decision_raw
             and retention["originals_sha256"] == args.expected_originals
@@ -565,11 +684,14 @@ def execute(args):
         invocation = _invocation(root, "observe-" + args.role + "-" + args.host, argv, study, plan)
         observed = observe_command(config["cost_plan"], args.host, argv,
             observer_key=read_private(Path(config["key_path"]), 128), directory=config["receipt_directory"],
-            work_root=config["work_root"], timeout_seconds=ROUTE_SECONDS, input_bytes=b"", meter=None)
+            work_root=config["work_root"], timeout_seconds=study["recipe"]["route_observer_seconds"],
+            input_bytes=b"", meter=None, **_scope_options(plan, stage))
         cleanup, cleanup_error = None, None
         try:
-            _, pid = _verify_observation(config, args.host, argv, observed["receipt_sha256"], config["work_root"])
-            cleanup = verify_child_registry(root / "children" / (stage + ".jsonl"), plan=plan, stage=stage, worker_pid=pid)
+            verified, pid = _verify_observation(config, args.host, argv, observed["receipt_sha256"], config["work_root"],
+                **_scope_options(plan, stage))
+            cleanup = verify_child_registry(root / "children" / (stage + ".jsonl"), plan=plan, stage=stage, worker_pid=pid,
+                **_cleanup_options(verified, pid, plan, stage))
         except (ValueError, OSError, TypeError, KeyError, RuntimeError) as error:
             cleanup_error = exception_token(error)
         path = Path(argv[-1]) / "report.json"
@@ -601,7 +723,6 @@ def execute(args):
     decision_path = root / "decisions/decision.json"
     if args.action == "decide":
         require(not decision_path.exists(), "native_new_decision_required")
-        argv += ["--output", str(decision_path)]
     else:
         require(raw_pin(read_private(decision_path, LIMIT)) == args.expected_decision_raw,
                 "native_external_decision_pin")
@@ -609,24 +730,41 @@ def execute(args):
     invocation = _invocation(root, args.action, argv, study, plan)
     observed = observe_command(config["cost_plan"], args.action, argv,
         observer_key=read_private(Path(config["key_path"]), 128), directory=config["receipt_directory"],
-        work_root=config["proof_work_root"], timeout_seconds=DECISION_SECONDS, input_bytes=b"", meter=None)
+        work_root=config["proof_work_root"],
+        timeout_seconds=study["recipe"].get("replay_seconds", DECISION_SECONDS) if args.action == "replay" else study["recipe"]["decision_seconds"],
+        input_bytes=b"", meter=None, **_scope_options(plan, args.action))
     failures, cleanup, output, decision = [], None, None, None
+    verified_observation, decision_raw_pin = None, None
     try:
-        _, pid = _verify_observation(config, args.action, argv, observed["receipt_sha256"], config["proof_work_root"])
+        verified_observation, pid = _verify_observation(config, args.action, argv, observed["receipt_sha256"], config["proof_work_root"],
+            **_scope_options(plan, args.action))
         cleanup = verify_child_registry(root / "children" / (args.action + ".jsonl"),
-            plan=plan, stage=args.action, worker_pid=pid)
-        output = document(Path(config["receipt_directory"]) / (args.action + ".stdout"))
-        decision = document(decision_path)
+            plan=plan, stage=args.action, worker_pid=pid, **_cleanup_options(verified_observation, pid, plan, args.action))
+        if args.action == "decide":
+            output = _authenticated_stdout(config, args.action, verified_observation)
+            require(full_report(output, plan, args.expected_evidence), "native_full_decision_required")
+            publish_new(decision_path, output)
+            decision_raw = read_private(decision_path, LIMIT)
+            decision = _original(decision_raw)
+            require(full_report(decision, plan, args.expected_evidence) and canonical(output) == canonical(decision)
+                    and decision_raw == canonical(output), "native_decision_publication_changed")
+            decision_raw_pin = raw_pin(decision_raw)
+        else:
+            output = _authenticated_stdout(config, args.action, verified_observation)
+            decision = document(decision_path)
     except (ValueError, OSError, KeyError, TypeError, RuntimeError) as error:
         failures.append(exception_token(error))
     exact = (cleanup is not None and full_report(output, plan, args.expected_evidence)
              and full_report(decision, plan, args.expected_evidence) and canonical(output) == canonical(decision))
-    decision_raw_pin = raw_pin(read_private(decision_path, LIMIT)) if decision_path.exists() else None
+    if args.action == "replay":
+        decision_raw_pin = raw_pin(read_private(decision_path, LIMIT)) if decision_path.exists() else None
     require(args.action != "replay" or decision_raw_pin == args.expected_decision_raw, "native_decision_changed_during_replay")
-    verified = exact and not failures and observed["receipt"]["exit_code"] in (0, 2)
+    verified = exact and not failures and verified_observation["receipt"]["exit_code"] in (0, 2)
+    # Producer proof has consumed authenticated provenance; retain only its JSON fields.
     retention = {"plan_sha256": digest(plan), "originals_sha256": args.expected_originals,
         "evidence_sha256": args.expected_evidence, "invocation_sha256": invocation,
-        "receipt_sha256": observed["receipt_sha256"], "observation": observed, "cleanup": cleanup,
+        "receipt_sha256": observed["receipt_sha256"],
+        "observation": dict(observed if verified_observation is None else verified_observation), "cleanup": cleanup,
         "failure_classes": failures, "decision_raw_sha256": decision_raw_pin,
         "decision_report_sha256": decision["report_sha256"] if exact else None,
         "output_hidden": args.action == "replay", "verified": bool(verified),
@@ -640,6 +778,7 @@ def main(argv=None):
     parser.add_argument("action", choices=("freeze", "observe", "originals", "decide", "replay"))
     parser.add_argument("--control", type=Path)
     parser.add_argument("--mode", choices=("limited", "full"), default="limited")
+    parser.add_argument("--execution-profile", choices=("legacy", "extended"), default="legacy")
     parser.add_argument("--reporter", type=Path)
     parser.add_argument("--proposals", type=Path)
     for name in ("candidate", "controller", "adapter", "reporter"):

@@ -21,6 +21,7 @@ from typing import Any
 from .errors import ConfigError
 
 _ACTIVE: ContextVar[HostContext | None] = ContextVar("evidence_wiki_host_context", default=None)
+_REVIEW_PRODUCER: ContextVar[object | None] = ContextVar("evidence_wiki_review_producer", default=None)
 _GENERATION: ContextVar[tuple[Path, str] | None] = ContextVar("evidence_wiki_host_generation", default=None)
 _MUTATION_GATE: ContextVar[_MutationWorkspaceGate | None] = ContextVar("evidence_wiki_mutation_workspace_gate", default=None)
 _HISTORICAL_READ: ContextVar[bool] = ContextVar("evidence_wiki_historical_read_scope", default=False)
@@ -407,11 +408,73 @@ def controller_allowed(role: str, controller: str) -> bool:
 
 def check_generation(root: Path, tree_hash: str) -> None:
     """Called by the trusted loader before cached or new owners are returned."""
+    producer = _REVIEW_PRODUCER.get()
+    if producer is not None and producer.script_generation != (root, tree_hash):
+        _refuse("host_review_producer_generation_changed")
     if current_context() is None:
         return
     pinned = _GENERATION.get()
     if pinned is not None and pinned != (root, tree_hash):
         _refuse("host_owner_generation_changed")
+
+
+def trusted_review_bridge(bridge: object) -> bool:
+    """Authenticate the actual centralized loader's bridge module object."""
+    import sys
+
+    from . import _script_host
+
+    return bridge is sys.modules[__name__] and bridge is _script_host.host_context
+
+
+def register_review_native_generation(root: Path, tree_hash: str, bridge: object) -> None:
+    """Bind every direct and indirect native load to its actual package bridge."""
+    if not trusted_review_bridge(bridge):
+        _refuse("host_review_producer_bridge_invalid")
+    from . import _review_producer
+
+    _review_producer.register_native(root, tree_hash, bridge)
+    check_generation(root, tree_hash)
+
+
+@contextmanager
+def review_producer_binding():
+    """Pin opaque package-owned provenance across one selective operation."""
+    from . import _review_producer
+
+    generation = _REVIEW_PRODUCER.get()
+    if generation is not None:
+        check_generation(*generation.script_generation)
+        yield generation
+        return
+    generation = _review_producer.capture()
+    check_generation(*generation.script_generation)
+    token = _REVIEW_PRODUCER.set(generation)
+    try:
+        yield generation
+        _review_producer.assert_current(generation)
+    finally:
+        _REVIEW_PRODUCER.reset(token)
+
+
+def current_review_producer():
+    """Return actual operation custody, never caller-created identity data."""
+    generation = _REVIEW_PRODUCER.get()
+    if generation is None:
+        _refuse("host_review_producer_binding_required")
+    return generation
+
+
+def review_dependency_inputs():
+    from . import _review_dependency_inputs
+
+    return _review_dependency_inputs.current_inputs()
+
+
+def review_custody(review, *, purpose):
+    from . import _review_dependency_custody
+
+    return _review_dependency_custody.resolve_original(review, purpose=purpose)
 
 
 def loading_lock():

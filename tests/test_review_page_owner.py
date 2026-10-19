@@ -64,6 +64,30 @@ def test_actual_current_protected_source_page_has_no_effect(protected):
     assert (authority.host / "evidence-state.json").read_bytes() == private_before
 
 
+@pytest.mark.parametrize("closing_change", ["source", "refusal"])
+def test_private_packet_collection_discards_all_pages_when_closing_owner_changes(protected, monkeypatch, closing_change):
+    root, normalized, claim, context, _authority, _body, operations = protected
+    closing = operations._recheck_time
+    observed = []
+
+    def check(*args, **kwargs):
+        closing(*args, **kwargs)
+        observed.append("closing")
+        if closing_change == "source":
+            normalized.write_bytes(normalized.read_bytes() + b"\nChanged retained source at closing.\n")
+        else:
+            operations.refuse("current_owner_changed")
+
+    monkeypatch.setattr(operations, "_recheck_time", check)
+    packets = []
+    with context.activate():
+        with pytest.raises(EvidenceWikiError):
+            packets.append(operations._collect_packet(root, claim_id=claim["id"], context_id="closing-packet",
+                source_ids=[item["source_id"] for item in claim["evidence"]]))
+    assert observed == ["closing"]
+    assert packets == []
+
+
 @pytest.mark.parametrize("change", ["withdrawal", "material", "rubric"])
 def test_actual_current_owner_change_stops_old_page_before_text(protected, change):
     root, normalized, claim, context, authority, body, operations = protected

@@ -15,6 +15,8 @@ def packet(instruction, context):
     if type(context) is not ReviewContext or context.document()["task_role"] != "critic":
         fail("critic_context_required")
     document = context.document()
+    if document["schema_version"] in {"research-review-context/v3", "research-review-context/v4"}:
+        fail("critic_context_version_unsupported")
     if not document["manifest"]["context_complete"]:
         fail("critic_context_incomplete")
     aliases = context.binding()["aliases"]

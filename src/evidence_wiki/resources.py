@@ -198,9 +198,13 @@ def _copy_traversable_tree(source: Traversable, target: Path) -> None:
 @contextmanager
 def assets_root() -> Iterator[Path]:
     """Yield a filesystem path containing the starter and domain packs."""
+    from . import _review_producer
+
+    _review_producer.initialize_assets()
     packaged_assets = resources.files(__package__).joinpath(ASSETS_DIR)
     packaged_path = Path(str(packaged_assets))
     if _is_assets_root(packaged_path):
+        _review_producer.note_assets_root(packaged_path)
         yield packaged_path
         return
 
@@ -210,11 +214,13 @@ def assets_root() -> Iterator[Path]:
             _copy_traversable_tree(packaged_assets, extracted_root)
             if not _is_assets_root(extracted_root):
                 raise RuntimeError("Packaged EvidenceWiki assets are incomplete")
+            _review_producer.note_assets_root(extracted_root)
             yield extracted_root
             return
 
     source_root = _source_checkout_assets_root()
     if source_root is not None:
+        _review_producer.note_assets_root(source_root)
         yield source_root
         return
 

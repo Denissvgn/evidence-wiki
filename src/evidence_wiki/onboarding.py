@@ -111,20 +111,20 @@ class Onboarding:
         if target is None:
             payload = agent.capabilities()
             agent._negotiate(payload, list(requirements), assurance)
-            kind, version = "capabilities", "1"
+            kind, version = "capabilities", "2"
         else:
             root = self._scope.path(target)
             payload = agent.bootstrap(str(root), requirements=list(requirements), assurance=assurance)
-            kind, version = "bootstrap", "2"
+            kind, version = "bootstrap", "3"
         result = {"schema_version": version + ".0", "kind": kind, "request_id": request_id, "payload": payload}
         return self._finish(json.loads(encode_document("onboarding/" + kind + "/v" + version, result)))
 
     @scoped_operation
-    def resources(self):
+    def resources(self, *, offset=0, limit=128):
         from .agent_resources import resource_index
 
         self._check("resources")
-        return self._finish(resource_index())
+        return self._finish(resource_index(offset=offset, limit=limit))
 
     @scoped_operation
     def resource(self, resource_id):

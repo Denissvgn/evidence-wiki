@@ -80,7 +80,7 @@ def candidate_files(root):
                     raise ValueError("acceptance_capsule_symlink")
             for name in sorted(files):
                 path = Path(directory) / name
-                if path.suffix in {".pyc", ".pyo"} or name in {".DS_Store"}:
+                if path.suffix in {".pyc", ".pyo"} or name.endswith(".orig") or name in {".DS_Store"}:
                     continue
                 if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
                     raise ValueError("acceptance_capsule_nonregular")

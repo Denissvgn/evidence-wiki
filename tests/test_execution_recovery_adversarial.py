@@ -14,8 +14,9 @@ def test_completed_job_overrun_stops_before_result_application(monkeypatch):
     frozen = {"human_review": False, "required_evaluators": [], "budgets": {
         "seconds": 100, "model_calls": 1, "tool_calls": 1, "tokens": 10, "cost_limit": "1", "claims": 1, "sources": 1}}
     session = SimpleNamespace(policy=SimpleNamespace(to_dict=lambda: frozen),
-        execution=SimpleNamespace(profile=SimpleNamespace(total_steps=10), ledger=lambda *_args: {}))
-    view = {"policy_compatible": True, "authority": {"terminal_grants_available": True}, "usage": {"claims": 0, "sources": 0},
+        execution=SimpleNamespace(profile=SimpleNamespace(total_steps=10, readability=None, artifact_delivery=None,
+            role_scopes=None, review_services=None), ledger=lambda *_args: {}))
+    view = {"policy_compatible": True, "qualification": {"reason": "qualified_scoped_profiles"}, "authority": {"terminal_grants_available": True}, "usage": {"claims": 0, "sources": 0},
         "execution": {"steps_used": 1, "pending": {"attempt_id": "job", "applied": False,
             "state": "succeeded", "reservation_occupied": False}}}
     monkeypatch.setattr(driver, "deadline", lambda *_args: datetime.now(timezone.utc) + timedelta(seconds=100))
@@ -23,7 +24,8 @@ def test_completed_job_overrun_stops_before_result_application(monkeypatch):
         "usage_unknown": False, "overrun": ["cost"]})
     monkeypatch.setattr(driver, "_terminal_action", lambda _session, _view, outcome, reason: {
         "operation": "terminal", "outcome": outcome, "reason": reason})
-    action = driver._action(session, view, [{"kind": "retained"}])
+    action = driver._action(session, view, [{"kind": "execution_attempt",
+        "data": {"attempt": {"attempt_id": "job"}}}])
     assert action["operation"] == "terminal"
     assert action["outcome"] == "stop_budget"
     assert action["reason"] == "budget_exhausted"
@@ -60,9 +62,10 @@ def test_retained_application_revalidates_before_native_effect(monkeypatch):
         {"kind": "execution_observation", "data": {"attempt_id": "job", "observation": {"state": "succeeded", "sequence": 1}}},
         {"kind": "execution_application", "data": {"attempt_id": "job", "operation": "generate",
             "original_id": "original", "proposal": {}, "coverage_links": []}}]
-    attempt = SimpleNamespace(job={"basis_id": "old", "deadline_utc":
+    attempt = SimpleNamespace(attempt_id="job", job={"basis_id": "old", "deadline_utc":
         (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()})
-    execution = SimpleNamespace(attempt=lambda _document: attempt, authenticate=lambda value, _attempt: value)
+    execution = SimpleNamespace(attempt=lambda _document: attempt, authenticate=lambda value, _attempt: value,
+        profile=SimpleNamespace(review_services=None, calibration=None))
     mutated = []
     monkeypatch.setattr(driver, "retained", lambda _session: records)
     monkeypatch.setattr(driver, "gate", lambda *_args: nullcontext())

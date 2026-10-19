@@ -15,6 +15,7 @@ from tools._execution_budget import (
     execution_policy,
     provisioning_window,
     validate_execution_policy,
+    validate_execution_window,
     validate_runtime_allocation,
 )
 from tools._review_dependency_workload import digest, provision
@@ -23,8 +24,10 @@ harness = _harness_fixture
 plan = _plan_fixture
 
 
-@pytest.mark.parametrize("profile,seconds", [("two-hour", 7200), ("four-hour", 14400)])
-def test_explicit_plan_binds_separate_execution_and_observation_limits(plan, profile, seconds):
+@pytest.mark.parametrize("profile,seconds,owner_cap,global_cap,total", [
+    ("two-hour", 7200, 600, 600, 6660), ("four-hour", 14400, 600, 900, 6960),
+    ("six-hour", 21600, 1200, 1500, 8760)])
+def test_explicit_plan_binds_separate_execution_and_observation_limits(plan, profile, seconds, owner_cap, global_cap, total):
     bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
     selected = workload.reference_plan(bundle, observation_profile="batch", execution_profile=profile)
     assert selected["schema_version"] == "review-dependency-workload-plan/v4"
@@ -34,21 +37,28 @@ def test_explicit_plan_binds_separate_execution_and_observation_limits(plan, pro
     assert selected["source_protocol_limits"]["protected_authority_seconds"] == 7200
     assert selected["hard_limits"]["observer_recency_seconds"] == 3600
     assert selected["hard_limits"]["native_calibration_probe_lifetime_seconds"] == 30
-    close = 900 if profile == "four-hour" else 600
-    assert selected["phase_caps"]["global_close"] == selected["hard_limits"]["global_close_seconds"] == close
-    assert selected["elapsed_cap_seconds"] == (6960 if profile == "four-hour" else 6660)
+    assert selected["phase_caps"] == {"setup": 600, "job": 600, "mutation": 600,
+        "owner_read": owner_cap, "global_close": global_cap, "cleanup": 60}
+    assert selected["hard_limits"]["each_owner_pass_read_seconds"] == owner_cap
+    assert selected["hard_limits"]["global_close_seconds"] == global_cap
+    assert selected["hard_limits"]["job_and_MCP_seconds"] == 600
+    assert selected["elapsed_cap_seconds"] == total
     assert datetime.fromisoformat(selected["expires_at"]) - datetime.fromisoformat(selected["frozen_at"]) == timedelta(seconds=seconds)
     assert workload.validate_plan(selected, digest(selected)) == selected
     assert workload.reference_plan(bundle)["schema_version"] == "review-dependency-workload-plan/v2"
     assert workload.reference_plan(bundle, observation_profile="batch")["schema_version"] == "review-dependency-workload-plan/v3"
 
 
-@pytest.mark.parametrize("profile,global_cap,total", [(None, 600, 2040), ("two-hour", 600, 2460), ("four-hour", 900, 2760)])
-def test_diagnostic_closing_ceiling_changes_only_for_explicit_four_hour(harness, profile, global_cap, total):
+@pytest.mark.parametrize("profile,owner_cap,global_cap,total", [
+    (None, 600, 600, 2040), ("two-hour", 600, 600, 2460),
+    ("four-hour", 600, 900, 2760), ("six-hour", 1200, 1500, 4560)])
+def test_diagnostic_ceilings_follow_selected_execution_profile(harness, profile, owner_cap, global_cap, total):
     selected = diagnostic.reference_plan(harness.bundle, observation_profile="batch", execution_profile=profile)
     assert selected["phase_caps"]["global_close"] == selected["hard_limits"]["global_close_seconds"] == global_cap
     assert selected["elapsed_cap_seconds"] == total
-    assert selected["phase_caps"]["owner_read"] == selected["hard_limits"]["each_owner_pass_read_seconds"] == 600
+    assert selected["phase_caps"]["owner_read"] == selected["hard_limits"]["each_owner_pass_read_seconds"] == owner_cap
+    assert selected["phase_caps"]["setup"] == (180 if profile is None else 600)
+    assert selected["phase_caps"]["cleanup"] == 60
     assert selected["hard_limits"]["observer_recency_seconds"] == 3600
     assert selected["hard_limits"]["native_calibration_probe_lifetime_seconds"] == 30
     assert selected["source_protocol_limits"] == workload.HARD_LIMITS
@@ -62,13 +72,75 @@ def test_diagnostic_four_hour_closing_ceiling_remains_bounded_and_typed(harness,
     assert harness.events == []
 
 
+@pytest.mark.parametrize("field,cap", [("owner_read", 1201), ("owner_read", 1200.0),
+    ("owner_read", True), ("global_close", 1501), ("global_close", 1500.0), ("global_close", True)])
+def test_diagnostic_six_hour_caps_remain_bounded_and_typed(harness, field, cap):
+    caps = dict(diagnostic.EXECUTION_PHASE_CAPS, owner_read=1200, global_close=1500)
+    caps[field] = cap
+    with pytest.raises(ValueError, match="closure_allocation_invalid"):
+        diagnostic.reference_plan(harness.bundle, observation_profile="batch", execution_profile="six-hour", phase_caps=caps)
+    assert harness.events == []
+
+
+@pytest.mark.parametrize("profile", [None, True, 21600, 21600.0, "21600", "twelve-hour", ["six-hour"]])
+def test_execution_profile_requires_a_closed_string(profile):
+    with pytest.raises(ValueError, match="execution_policy_invalid"):
+        execution_policy(profile)
+
+
+def test_six_hour_policy_has_one_fixed_nonrenewable_window():
+    policy = execution_policy("six-hour")
+    assert policy == {"schema_version": "review-execution-budget-policy/v1", "profile": "six-hour",
+        "authority_seconds": 21600, "credential_lifetime_seconds": 21600,
+        "deadline_basis": "frozen_plan_expiry", "renewal": "forbidden"}
+    frozen = datetime(2026, 10, 15, tzinfo=timezone.utc)
+    expires = frozen + timedelta(seconds=21600)
+    assert validate_execution_window(policy, frozen.isoformat(), expires.isoformat(), instant=frozen) == (frozen, expires)
+    for invalid_end in (expires - timedelta(seconds=1), expires + timedelta(seconds=1)):
+        with pytest.raises(ValueError, match="execution_authority_clock_invalid"):
+            validate_execution_window(policy, frozen.isoformat(), invalid_end.isoformat())
+    with pytest.raises(ValueError, match="execution_authority_clock_invalid"):
+        validate_execution_window(policy, frozen.isoformat(), expires.isoformat(), instant=expires)
+
+
+@pytest.mark.parametrize("field", ["authority_seconds", "credential_lifetime_seconds"])
+def test_six_hour_policy_refuses_integer_subclasses(field):
+    class GrantedSeconds(int):
+        pass
+
+    policy = execution_policy("six-hour")
+    policy[field] = GrantedSeconds(21600)
+    with pytest.raises(ValueError, match="execution_policy_invalid"):
+        validate_execution_policy(policy)
+
+
+@pytest.mark.parametrize("module", [workload, diagnostic])
+def test_both_freeze_commands_accept_explicit_six_hour_profile(tmp_path, monkeypatch, module, capsys):
+    selected = []
+
+    def freeze(bundle, **kwargs):
+        selected.append((bundle, kwargs))
+        return {"execution_policy": execution_policy(kwargs["execution_profile"])}
+
+    monkeypatch.setattr(module, "reference_plan", freeze)
+    output = tmp_path / "frozen-plan.json"
+    assert module.main(["freeze", "--bundle", str(tmp_path), "--output", str(output),
+        "--execution-profile", "six-hour"]) == 0
+    assert selected[0][0] == tmp_path
+    assert selected[0][1]["execution_profile"] == "six-hour"
+    assert selected[0][1]["observation_profile"] == "batch"
+    assert output.exists()
+    assert '"runtime_qualification": "NOT RUN"' in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("change", ["boolean", "float", "unknown", "duration", "renewal", "profile", "schema"])
-def test_closed_execution_policy_refuses_self_asserted_grants(change):
-    policy = execution_policy("four-hour")
+@pytest.mark.parametrize("profile", ["two-hour", "four-hour", "six-hour"])
+def test_closed_execution_policy_refuses_self_asserted_grants(change, profile):
+    policy = execution_policy(profile)
     if change == "boolean":
         policy["authority_seconds"] = True
     elif change == "float":
-        policy["credential_lifetime_seconds"] = 14400.0
+        policy["credential_lifetime_seconds"] = float(policy["credential_lifetime_seconds"])
     elif change == "unknown":
         policy["approval"] = True
     elif change == "duration":
@@ -93,10 +165,10 @@ def test_diagnostic_execution_requires_batch_before_children(harness, observer):
     assert harness.events == []
 
 
-@pytest.fixture
-def execution_plan(plan):
+@pytest.fixture(params=["two-hour", "four-hour", "six-hour"])
+def execution_plan(plan, request):
     bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
-    return workload.reference_plan(bundle, observation_profile="batch", execution_profile="four-hour")
+    return workload.reference_plan(bundle, observation_profile="batch", execution_profile=request.param)
 
 
 def allocation_document(plan):
@@ -144,6 +216,18 @@ def test_shared_expiry_is_fixed_and_exclusive(execution_plan):
         validate_runtime_allocation(allocation, execution_plan, closing=expiry)
 
 
+@pytest.mark.parametrize("credential", ["trust", "usage", "signing", "service", "reference_qualification"])
+def test_every_runtime_credential_uses_the_original_fixed_end(execution_plan, credential):
+    allocation = allocation_document(execution_plan)
+    assert allocation["credential_expiries"] == dict.fromkeys(
+        ("trust", "usage", "signing", "service", "reference_qualification"), execution_plan["expires_at"])
+    assert validate_runtime_allocation(allocation, execution_plan) == allocation
+    allocation["credential_expiries"][credential] = (
+        datetime.fromisoformat(execution_plan["expires_at"]) + timedelta(seconds=1)).isoformat()
+    with pytest.raises(ValueError, match="execution_runtime_binding_invalid"):
+        validate_runtime_allocation(allocation, execution_plan)
+
+
 @pytest.mark.parametrize("change", ["digest", "observer", "expiry", "allocation", "limits", "source"])
 def test_bad_provisioning_authority_refuses_before_filesystem_writes(execution_plan, tmp_path, change):
     binding = allocation_document(execution_plan)["allocation_binding"]
@@ -164,13 +248,15 @@ def test_bad_provisioning_authority_refuses_before_filesystem_writes(execution_p
     assert not base.exists()
 
 
-def test_diagnostic_capacity_plan_closes_thirteen_journals_without_review_credit(harness):
+@pytest.mark.parametrize("profile,owner_cap,global_cap,total", [
+    ("four-hour", 600, 900, 2760), ("six-hour", 1200, 1500, 4560)])
+def test_diagnostic_capacity_plan_closes_thirteen_journals_without_review_credit(harness, profile, owner_cap, global_cap, total):
     harness.plan = diagnostic.reference_plan(harness.bundle, journal_count=13,
-        observation_profile="batch", execution_profile="four-hour")
-    harness.state["allocation_seconds"] = 2760
+        observation_profile="batch", execution_profile=profile)
+    harness.state["allocation_seconds"] = total
     assert harness.plan["schema_version"] == "review-closure-diagnostic-plan/v3"
-    assert harness.plan["phase_caps"] == {"setup": 600, "owner_read": 600, "cleanup": 60, "global_close": 900}
-    assert harness.plan["elapsed_cap_seconds"] == 2760
+    assert harness.plan["phase_caps"] == {"setup": 600, "owner_read": owner_cap, "cleanup": 60, "global_close": global_cap}
+    assert harness.plan["elapsed_cap_seconds"] == total
     report = diagnostic.run_diagnostic(harness.plan, digest(harness.plan), harness.directory)
     assert report["terminal_outcome"] == "diagnostic_completed_unqualified"
     assert report["schema_version"] == "review-closure-diagnostic-observation/v3"
@@ -189,8 +275,9 @@ def test_relabelled_legacy_plan_cannot_gain_execution_authority(plan):
         workload.validate_plan(altered, digest(altered))
 
 
-@pytest.mark.parametrize("prior_profile", [None, "two-hour"])
-def test_full_execution_plan_refuses_other_pilot_policy(plan, tmp_path, monkeypatch, prior_profile):
+@pytest.mark.parametrize("profile,prior_profile", [("four-hour", None), ("four-hour", "two-hour"),
+    ("six-hour", None), ("six-hour", "two-hour"), ("six-hour", "four-hour")])
+def test_full_execution_plan_refuses_other_pilot_policy(plan, tmp_path, monkeypatch, profile, prior_profile):
     import json
 
     from tools._review_dependency_workload import retain
@@ -205,7 +292,7 @@ def test_full_execution_plan_refuses_other_pilot_policy(plan, tmp_path, monkeypa
     path = tmp_path / "recipe.json"
     path.write_text(json.dumps(recipe))
     with pytest.raises(ValueError, match="workload_pilot_policy_mismatch"):
-        workload.reference_plan(bundle, study="full", observation_profile="batch", execution_profile="four-hour", measured_recipe=path)
+        workload.reference_plan(bundle, study="full", observation_profile="batch", execution_profile=profile, measured_recipe=path)
 
 
 @pytest.mark.parametrize("profile,allowed", [("two-hour", False), ("four-hour", True)])
@@ -233,6 +320,37 @@ def test_full_measured_caps_are_bounded_by_explicit_authority(plan, tmp_path, mo
             workload.reference_plan(bundle, study="full", observation_profile="batch", execution_profile=profile, measured_recipe=path)
 
 
+@pytest.mark.parametrize("job_cap,allowed", [(350, True), (600, False)])
+def test_six_hour_full_allocation_includes_every_job_close_and_group(plan, tmp_path, monkeypatch, job_cap, allowed):
+    import json
+
+    from tools._review_dependency_workload import retain
+
+    bundle = Path(plan["artifacts"]["fresh-fixture-input.json"]["path"]).parent
+    prior = workload.reference_plan(bundle, observation_profile="batch", execution_profile="six-hour")
+    worst = dict.fromkeys(workload.PILOT_CAPS, 1)
+    monkeypatch.setattr(workload, "completed_pilot_measurements", lambda *_: (worst, 8))
+    caps = dict(workload.phase_ceilings(prior["observation_policy"], prior["execution_policy"]), job=job_cap)
+    recipe = {"pilot_plan_pin": retain(tmp_path / "prior-plan.json", prior), "phase_caps": caps,
+        "observed_worst_seconds": worst, "group_overhead_cap_seconds": 12, "observed_group_overhead_seconds": 8}
+    path = tmp_path / "recipe.json"
+    path.write_text(json.dumps(recipe))
+    if not allowed:
+        with pytest.raises(ValueError, match="workload_allocation_exceeds_authority"):
+            workload.reference_plan(bundle, study="full", observation_profile="batch", execution_profile="six-hour", measured_recipe=path)
+        return
+    full = workload.reference_plan(bundle, study="full", observation_profile="batch", execution_profile="six-hour", measured_recipe=path)
+    assert len(full["assignments"]) == 24
+    assert full["review_journals"] == 12 and full["control_journals"] == 1
+    assert full["phase_caps"] == caps
+    assert full["elapsed_cap_seconds"] == 600 + 24 * 350 + 600 + 2 * 1200 + 3 * 1500 + 60 + 12 * 12 == 16704
+    assert 14400 < full["elapsed_cap_seconds"] <= 21600
+    assert workload.validate_plan(full, digest(full)) == full
+    allocation = allocation_document(full)
+    assert allocation["run_policy"]["budgets"]["seconds"] == 16704
+    assert validate_runtime_allocation(allocation, full) == allocation
+
+
 @pytest.mark.parametrize("global_cap,allowed", [(600, False), (641, True), (900, True), (901, False)])
 def test_full_closing_cap_retains_measured_margin_and_profile_ceiling(plan, tmp_path, monkeypatch, global_cap, allowed):
     import json
@@ -258,13 +376,16 @@ def test_full_closing_cap_retains_measured_margin_and_profile_ceiling(plan, tmp_
             workload.reference_plan(bundle, study="full", observation_profile="batch", execution_profile="four-hour", measured_recipe=path)
 
 
-def test_third_owner_read_cannot_borrow_larger_closing_budget(harness, monkeypatch):
+@pytest.mark.parametrize("profile,owner_cap,global_cap,total", [
+    ("four-hour", 600, 900, 2760), ("six-hour", 1200, 1500, 4560)])
+@pytest.mark.parametrize("overrun", [False, True])
+def test_third_owner_read_enforces_own_cap_inside_global_close(harness, monkeypatch, profile, owner_cap, global_cap, total, overrun):
     from contextlib import contextmanager
 
     from tools.decide_release import _HostDeadline
 
-    harness.plan = diagnostic.reference_plan(harness.bundle, observation_profile="batch", execution_profile="four-hour")
-    harness.state["allocation_seconds"] = 2760
+    harness.plan = diagnostic.reference_plan(harness.bundle, observation_profile="batch", execution_profile=profile)
+    harness.state["allocation_seconds"] = total
     clock, entered = [0], []
 
     @contextmanager
@@ -280,15 +401,19 @@ def test_third_owner_read_cannot_borrow_larger_closing_budget(harness, monkeypat
     def expensive_closing_read(*args, **kwargs):
         result = original(*args, **kwargs)
         if harness.state["read_count"] == 3:
-            clock[0] += 601
+            clock[0] += owner_cap + int(overrun)
         return result
 
     monkeypatch.setattr(diagnostic, "workload_deadline", bounded)
     monkeypatch.setattr(workload, "_owner_read", expensive_closing_read)
     report = diagnostic.run_diagnostic(harness.plan, digest(harness.plan), harness.directory)
-    assert entered[-2:] == [900, 600]
-    assert report["terminal_outcome"] == "diagnostic_failed_unqualified"
-    assert report["failure"]["kind"] == "_HostDeadline"
+    assert entered[-2:] == [global_cap, owner_cap]
+    if overrun:
+        assert report["terminal_outcome"] == "diagnostic_failed_unqualified"
+        assert report["failure"]["kind"] == "_HostDeadline"
+    else:
+        assert report["terminal_outcome"] == "diagnostic_completed_unqualified"
+        assert harness.state["read_count"] == 3
     assert report["acceptance_credits"] == 0
 
 
@@ -355,19 +480,23 @@ def test_final_clock_is_sampled_after_reading_credential_originals(harness, monk
 
 
 @pytest.mark.parametrize("target", ["qualification", "usage", "grant_authentication", "grant_payload", "scrub"])
-def test_actual_signed_credential_originals_cannot_outlive_shared_end(tmp_path, target):
+def test_actual_signed_credential_originals_cannot_outlive_shared_end(tmp_path, execution_plan, target):
     from tools._review_dependency_workload import OriginalResponses
 
-    expires = "2026-10-14T01:00:00+00:00"
+    expires = execution_plan["expires_at"]
     qualifications = [{"expires_utc": expires}] * 2
     body = {"grant": {"authentication": {"expires_at": expires}, "payload": {"expires_at": expires}},
         "scrub": {"authentication": {"expires_at": expires}}}
     command = {"authentication": {"expires_at": expires}, "payload": {"action": "deposit", "body": body}}
+    originals = OriginalResponses(tmp_path / "valid-originals")
+    originals.append(("qualifications", qualifications))
+    originals.append(("source-usage", [{"command": command}]))
+    workload.validate_credential_originals(originals.pins, expires)
     selected = {"qualification": qualifications[0], "usage": command["authentication"],
         "grant_authentication": body["grant"]["authentication"], "grant_payload": body["grant"]["payload"],
         "scrub": body["scrub"]["authentication"]}[target]
     selected["expires_utc" if target == "qualification" else "expires_at"] = "9999-12-31T00:00:00+00:00"
-    originals = OriginalResponses(tmp_path / "originals")
+    originals = OriginalResponses(tmp_path / "changed-originals")
     originals.append(("qualifications", qualifications))
     originals.append(("source-usage", [{"command": command}]))
     with pytest.raises(ValueError, match="execution_runtime_binding_invalid"):

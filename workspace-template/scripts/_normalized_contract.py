@@ -45,6 +45,8 @@ from _yaml_safe import safe_load_current as safe_load
 # Contract version stamped into records and accepted when reading them. `normalizer`
 # identifies the producing tool; `normalized_format` identifies the contract shape, so
 # an external normalizer can target the format without impersonating this package.
+_CAPTURE_VALIDATION_MODULES = {}
+
 NORMALIZED_FORMAT_VERSION = 1
 ACCEPTED_NORMALIZED_FORMATS = frozenset({NORMALIZED_FORMAT_VERSION})
 LEGACY_NORMALIZED_FORMAT_VERSION = 0
@@ -1295,7 +1297,7 @@ def check_host_capture(project_root, manifest_by_id, frontmatter, body) -> list[
     record = manifest_by_id.get(source_id, {}) if isinstance(source_id, str) else {}
     if record.get("kind") != "host_capture" and frontmatter.get("extraction_method") != "host_text" and "host_capture" not in frontmatter:
         return []
-    owner = load_workspace_module(_SCRIPT_DIR, "_host_capture")
+    owner = load_workspace_module(_SCRIPT_DIR, "_host_capture", cache=_CAPTURE_VALIDATION_MODULES)
     return [Violation(HOST_CAPTURE_INVALID, reason, field="host_capture",
                       remediation="Restore the intact original capture and its qualifications, then re-normalize this source.")
             for reason in owner.normalized_issues(project_root, record, frontmatter, body)]

@@ -68,7 +68,10 @@ def create(context, sources, *, page_chars=4096, sections=None):
     if type(page_chars) is not int or not 256 <= page_chars <= 16384:
         refuse("page_size_invalid")
     packet, binding = context.document(), context.binding()
-    aliases = binding["aliases"]["sources"]
+    dependencies = packet["schema_version"] == "research-review-context/v4"
+    complete = packet["schema_version"] in {"research-review-context/v3", "research-review-context/v4"}
+    aliases = {identifier: alias for identifier, alias in binding["aliases"]["sources"].items()
+        if not dependencies or alias in binding["source_permutation"]}
     by_source = {row["source_id"]: row for row in sources}
     if len(by_source) != len(sources):
         refuse("source_duplicate")
@@ -116,7 +119,7 @@ def create(context, sources, *, page_chars=4096, sections=None):
             descriptors.append({"page_id": page_id, "section_id": "computation", "sha256": digest(page), "required": True})
     if sections is not None:
         from .review_packet_contracts import validate
-        sections = validate("research-review-sections/v1", sections)
+        sections = validate("research-review-sections/v3" if dependencies else "research-review-sections/v2" if complete else "research-review-sections/v1", sections)
         if sections["context_sha256"] != context.packet_id:
             refuse("decisive_sections_invalid")
         subjects = {row["id"] for row in [packet["claim"], *packet["premises"]]}
@@ -144,7 +147,7 @@ def create(context, sources, *, page_chars=4096, sections=None):
         limitations.append("source_context_missing")
     if len(pages) > 512 or sum(len(page) for page in pages) > 4194304:
         refuse("packet_bound")
-    header = {"schema_version": PACKET, "context_id": packet["context_id"], "context_sha256": context.packet_id,
+    header = {"schema_version": "research-paged-review/v3" if dependencies else "research-paged-review/v2" if complete else PACKET, "context_id": packet["context_id"], "context_sha256": context.packet_id,
         "task_role": packet["task_role"], "basis_id": packet["basis_id"], "rubric": packet["rubric"],
         "claim": packet["claim"], "question": packet["question"], "premises": packet["premises"],
         "mechanical_counter_context": {"status": "retained" if sections is not None else "not_provided",
@@ -154,6 +157,12 @@ def create(context, sources, *, page_chars=4096, sections=None):
             for alias in order],
         "computation": {"required": computation is not None, "section_sha256": digest(computation) if computation is not None else None}, "pages": descriptors, "missing_source_ids": missing,
         "limitations": limitations, "complete_evidence_delivered": False, "semantic_approval": "not_evaluated", "accepted": False}
-    bounded(header)
+    if complete:
+        header["questions"] = packet["questions"]
+    if dependencies:
+        from .review_packet_contracts import validate
+        validate("research-paged-review/v3", header)
+    else:
+        bounded(header)
     return PacketPages(canonical(header), tuple(pages), canonical({"context_binding": binding,
         "header_sha256": digest(header), "source_input_sha256": digest(sources)}))

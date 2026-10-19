@@ -9,13 +9,15 @@ PROPOSAL = "evidence-calculation-proposal/v1"
 SELECTION = "evidence-calculation-selection/v1"
 
 
-def schema_document(identifier=PROPOSAL):
+def schema_document(identifier=PROPOSAL, native=None):
     """Publish the closed inert interpretation proposal; execution stays native."""
     if identifier == "research-calculation-context/v1":
         from .calculation_context import schema_document as context_schema
-        return context_schema()
+        return context_schema(native)
     if identifier == SELECTION:
-        contract = owner("_computation_contract").schemas()["evidence-computation-result/v1"]["properties"]
+        if native is None:
+            native = owner("_computation_contract").schemas()
+        contract = native["evidence-computation-result/v1"]["properties"]
         def obj(**fields):
             return {"type":"object", "properties":fields, "required":list(fields), "additionalProperties":False}
         hashed = contract["result_id"]

@@ -137,7 +137,8 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
     }
     if type(operation) is not str or operation not in defaults or type(value) is not dict:
         refuse("OPERATION_UNSUPPORTED", "/operation")
-    result = {**defaults[operation], **detached(value)}
+    selected = _selective_review_arguments(value) if operation == "strict.register_review" else None
+    result = {**defaults[operation], **(detached(value) if selected is None else selected)}
     _shape(result, argument_schemas()[operation], "/arguments")
     if operation == "questions.add_batch" and result["from_file"] == "-":
         refuse("INPUT_UNBOUND", "/arguments/from_file")
@@ -157,7 +158,7 @@ def arguments(operation: str, value: Any) -> dict[str, Any]:
         except (ValueError, UsageError):
             refuse("INPUT_INVALID", "/arguments/delivery")
     if operation == "strict.register_review":
-        payload = result["envelope"].get("payload")
+        payload = review_envelope(result["envelope"]).get("payload")
         if type(payload) is not dict or payload.get("action") not in {"register-strict-review", "register-strict-human-review"}:
             refuse("INPUT_INVALID", "/arguments/envelope")
     if operation == "strict.admit":
@@ -303,6 +304,104 @@ def _serialized(value: Any) -> bytes:
     return b"".join(chunks)
 
 
+def review_envelope(value: Any) -> Any:
+    """Decode only the explicit native review transport; no authority is added."""
+    from ._review_dependency_wire import WIRE, unpack
+
+    if type(value) is dict and value.get("schema_version") == WIRE:
+        try:
+            return unpack(value, expected_kind="native_envelope")
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            refuse("INPUT_INVALID", "/arguments/envelope")
+    return value
+
+
+def transport_review_arguments(operation: str, value: Any) -> Any:
+    """Freeze new selective review requests using their bounded wire bytes."""
+    if operation != "strict.register_review":
+        return value
+    selected = _selective_review_arguments(value)
+    if selected is None:
+        return value
+    from ._review_dependency_wire import WIRE, pack
+
+    envelope = selected["envelope"]
+    if envelope.get("schema_version") == WIRE:
+        return selected
+    return {"envelope": pack(envelope, kind="native_envelope")}
+
+
+def _selective_review_arguments(value: Any) -> Any:
+    """Reset only the independently checked review child at its owned path."""
+    if type(value) is not dict or set(value) != {"envelope"}:
+        return None
+    envelope = value["envelope"]
+    from ._review_dependency_wire import WIRE
+
+    if type(envelope) is dict and envelope.get("schema_version") == WIRE:
+        review_envelope(envelope)
+        return detached(value)
+    if type(envelope) is not dict or type(envelope.get("payload")) is not dict:
+        return None
+    payload = envelope["payload"]
+    body = payload.get("body")
+    review = body.get("review") if type(body) is dict else None
+    if type(review) is not dict or review.get("schema_version") != "evidence-strict-review/v3":
+        return None
+    if (set(envelope) != {"payload", "authentication"}
+            or set(payload) != {"schema_version", "state_id", "workspace_binding", "request_id", "expected_checkpoint", "action", "body"}
+            or payload["schema_version"] != "evidence-usage-command/v1"
+            or type(payload["action"]) is not str
+            or payload["action"] not in {"register-strict-review", "register-strict-human-review"}
+            or set(body) != {"review"} or type(envelope["authentication"]) is not dict
+            or set(envelope["authentication"]) != {"schema_version", "scheme", "principal", "key_id", "role", "policy_id", "policy_revision", "issued_at", "expires_at", "signature"}):
+        refuse("INVALID", "/arguments/envelope")
+    from ._review_dependency_json import encoded
+
+    try:
+        raw = encoded(value)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        refuse("INVALID", "/arguments/envelope")
+    if raw is None:
+        refuse("INVALID", "/arguments/envelope")
+    return json.loads(raw)
+
+
+def _selective_mutation_document(value: Any, *, intent_preimage: bool = False) -> Any:
+    """Validate closed mutation wrappers without spending their child's depth."""
+    if type(value) is not dict:
+        return None
+    name = value.get("schema_version")
+    if type(name) is not str:
+        return None
+    if name == INSPECTION:
+        record = value.get("record")
+        if (type(record) is not dict or _selective_mutation_document(record.get("intent")) is None):
+            return None
+        _shape(value, schema_document(INSPECTION))
+        return _inspection_detached(value)
+    if name not in {REQUEST, INTENT} or value.get("operation") != "strict.register_review":
+        return None
+    child = _selective_review_arguments(value.get("arguments"))
+    if child is None:
+        return None
+    shape = schema_document(name)
+    if intent_preimage:
+        if name != INTENT or "input_sha256" in value:
+            refuse("INVALID")
+        shape = {**shape, "required": [key for key in shape["required"] if key != "input_sha256"]}
+    _shape(value, shape)
+    projected = detached({**value, "arguments": {"envelope": None}})
+    projected["arguments"] = child
+    from ._review_dependency_json import _aggregate
+
+    try:
+        _aggregate(projected, max_nodes=65536, count_keys=True)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        refuse("LIMIT")
+    return json.loads(_serialized(projected))
+
+
 def _inspection_detached(value: Any) -> Any:
     """Keep each retained document's bounds independent of its fixed wrappers."""
     if type(value) is not dict or value.get("record") is None:
@@ -332,7 +431,9 @@ def _inspection_detached(value: Any) -> Any:
 
 
 def canonical(value: Any) -> bytes:
-    return json.dumps(detached(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    selected = _selective_mutation_document(value)
+    return json.dumps(detached(value) if selected is None else selected,
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def digest(value: Any) -> str:
@@ -346,11 +447,14 @@ def schema_document(name: str) -> dict[str, Any]:
 
 
 def intent_digest(value: dict[str, Any]) -> str:
-    return digest({key: child for key, child in value.items() if key != "input_sha256"})
+    preimage = {key: child for key, child in value.items() if key != "input_sha256"}
+    selected = _selective_mutation_document(preimage, intent_preimage=True)
+    return digest(preimage) if selected is None else "sha256:" + hashlib.sha256(_serialized(selected)).hexdigest()
 
 
 def checked(name: str, value: Any) -> dict[str, Any]:
-    value = _inspection_detached(value) if name == INSPECTION else detached(value)
+    selected = _selective_mutation_document(value) if name in {REQUEST, INTENT} else None
+    value = _inspection_detached(value) if name == INSPECTION else detached(value) if selected is None else selected
     if type(value) is dict and "schema_version" in value and value["schema_version"] != name:
         refuse("VERSION_UNSUPPORTED", "/schema_version")
     _shape(value, schema_document(name))
@@ -444,6 +548,28 @@ def _document_nesting(name: str, text: str) -> None:
             depth -= 1
 
 
+
+def _selective_nesting(text: str) -> None:
+    """Bound parsing before exact schema-owned logical child checks."""
+    depth, quoted, escaped = 0, False, False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > 128:
+                refuse("LIMIT")
+        elif character in "]}":
+            depth -= 1
+
+
 def decode_document(name: str, raw: bytes) -> dict[str, Any]:
     if type(raw) is not bytes or not 0 < len(raw) <= MAX_BYTES:
         refuse("LIMIT")
@@ -458,8 +584,18 @@ def decode_document(name: str, raw: bytes) -> dict[str, Any]:
 
     try:
         text = raw.decode()
-        _document_nesting(name, text)
+        extended = False
+        try:
+            _document_nesting(name, text)
+        except UsageError:
+            if (name not in {REQUEST, INTENT, INSPECTION} or '"evidence-strict-review/v3"' not in text
+                    or '"strict.register_review"' not in text):
+                raise
+            _selective_nesting(text)
+            extended = True
         value = json.loads(text, object_pairs_hook=unique, parse_constant=lambda _: refuse("INVALID"))
+        if extended and _selective_mutation_document(value) is None:
+            refuse("LIMIT")
     except MutationError:
         raise
     except UsageError:

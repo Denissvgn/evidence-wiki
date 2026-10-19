@@ -3,8 +3,8 @@
 from datetime import datetime, timezone
 
 from evidence_wiki import execution_session as native
+from evidence_wiki._review_dependency_json import digest
 from evidence_wiki.errors import EvidenceWikiError
-from evidence_wiki.mutation_contracts import digest
 from evidence_wiki.pack_discovery import owner
 
 from .coverage_examination import fail
@@ -41,15 +41,25 @@ def verify_controller(session, attempt):
     if not usage.configured(config):
         fail("counter_generator_provenance_unknown")
     with usage.current_view(session.root, config) as view:
-        matching = [record for record in view.state.strict_reviews.values()
-            if record["envelope"]["payload"]["body"]["review"]["basis_id"] == prepared["result"]["basis_id"]
-            and record["envelope"]["payload"]["body"]["review"]["claim_id"] == prepared["snapshot"]["claim"]["id"]]
+        native_row = next(row for row in prepared["result"]["claims"] if row["claim"]["id"] == prepared["snapshot"]["claim"]["id"])
+        selected_id = native_row["review"].get("review_id")
+        matching = [record for identifier, record in view.state.strict_reviews.items() if identifier == selected_id]
         if not matching:
             fail("counter_generator_provenance_unknown")
-        generator = matching[-1]["envelope"]["payload"]["body"]["review"]["generator"]
+        selected_review = matching[0]["envelope"]["payload"]["body"]["review"]
+        generator = selected_review["generator"]
         authored = authority.verify_attestation(generator, "generator", view.trust, view.now)
         expected = {"schema_version": "evidence-strict-authorship/v1",
             "basis_id": prepared["result"]["basis_id"], "claim_id": prepared["snapshot"]["claim"]["id"]}
+        if prepared.get("review_schema") == "evidence-strict-review/v3":
+            if selected_review["basis_id"] != prepared["claim_basis_id"]:
+                fail("counter_generator_provenance_unknown")
+            from ._review_dependency_custody import resolve_original
+            resolve_original(selected_review, purpose="reuse").assert_review_envelope(matching[0]["envelope"])
+            expected.update(schema_version="evidence-strict-authorship/v2", basis_id=prepared["claim_basis_id"],
+                claim_schema_version=prepared["claim_schema_version"],
+                observed_workspace_basis_id=selected_review["observed_workspace_basis_id"],
+                semantic_material_id=selected_review["delivery"]["semantic_material_id"])
         if (generator["payload"] != expected or not authored.get("authenticated")
                 or authored.get("controller") != signer.generator.controller_ref
                 or authored.get("controller") == authenticated.get("controller")):

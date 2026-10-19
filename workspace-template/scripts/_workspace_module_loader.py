@@ -22,8 +22,15 @@ _MISSING = object()
 # A loader imported as an owner's sibling retains the trusted binding that was
 # installed during that import, including for later indirect sibling loads.
 _HOST_CONTEXT_BRIDGE = sys.modules.get("_host_context")
-if getattr(_HOST_CONTEXT_BRIDGE, "__name__", None) != "evidence_wiki.host_context":
+if (_HOST_CONTEXT_BRIDGE is None
+        or _HOST_CONTEXT_BRIDGE is not sys.modules.get("evidence_wiki.host_context")):
     _HOST_CONTEXT_BRIDGE = None
+
+
+def _trusted_bridge(bridge):
+    return (bridge is not None and bridge is sys.modules.get("evidence_wiki.host_context")
+            and bridge.trusted_review_bridge(bridge))
+
 
 # One validated content hash per script directory, remembered behind the stat
 # signature it was computed under. The identity a cache key carries is still the
@@ -39,7 +46,7 @@ class _SourceLoader(importlib.machinery.SourceFileLoader):
         path = self.get_filename(fullname)
         source = self.get_data(path)
         bridge = _HOST_CONTEXT_BRIDGE or sys.modules.get("_host_context")
-        if getattr(bridge, "__name__", None) == "evidence_wiki.host_context":
+        if _trusted_bridge(bridge):
             return bridge.compiled_source_code(source, path)
         return self.source_to_code(source, path)
 
@@ -142,10 +149,11 @@ def load_workspace_module(
     path = (root / f"{stem}.py").resolve()
     if path.parent != root or not path.is_file():
         raise SystemExit(f"Missing sibling workspace script: {path}")
-    trusted_bridge = (host_context_bridge is not None and
-                      host_context_bridge is sys.modules.get("evidence_wiki.host_context"))
+    trusted_bridge = _trusted_bridge(host_context_bridge)
     tree_hash = host_context_bridge.script_tree_hash(root) if trusted_bridge else _tree_hash(root)
     cache_key = f"{root}\0{stem}\0{tree_hash}"
+    if trusted_bridge:
+        host_context_bridge.register_review_native_generation(root, tree_hash, host_context_bridge)
     if host_context_bridge is not None:
         host_context_bridge.check_generation(root, tree_hash)
         cache_key += f"\0bridge:{id(host_context_bridge)}"

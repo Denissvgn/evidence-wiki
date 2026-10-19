@@ -2,7 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Offer an explicit two-hour batch observation window with fresh native closing
+  validation, while retaining existing observation profiles and authority limits.
+
 ### Fixed
+
+- Retain more successful large-document validations within a fixed serialized
+  key budget, preserving exact validation identity and detached return values.
+
+- Emit versioned host qualification reports for selective reviews while
+  preserving legacy report schemas, authentication checks and report bounds.
+
+- Preserve a trusted host's original operation deadline through in-process MCP
+  calls while retaining the existing server-owned cancellation limits.
+
+- Bind opt-in process cleanup to the original process object and retain proven
+  completion, preventing later signals to a reused process identifier.
 
 - Inspect and recover deeply nested mutation records without reducing the
   accepted request's nesting allowance. Each retained child keeps its original
@@ -34,6 +51,16 @@
   retained refresh identities and finite host deadlines.
 
 ### Added
+
+- Add opt-in claim dependency review bases and authenticated retained-review
+  eligibility. Source, policy, authority, computation and unclassified workspace
+  changes remain global invalidators; policy migrations require fresh reviews.
+
+- Add explicitly selected complete review context with transitive premises and
+  each owning question’s semantic context and counterevidence criteria. Current
+  native owners revalidate every delivery; strict review identity and legacy
+  delivery defaults remain unchanged. Unsupported investigation paths refuse
+  before dispatch.
 
 - Allow a trusted integration host to freeze bounded process scheduling for
   current original reads, preserving serial defaults, original admission and

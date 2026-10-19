@@ -7,7 +7,6 @@ import json
 import platform
 import re
 import sys
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +19,7 @@ from evidence_wiki.onboarding_mcp import OnboardingMcpServer
 from evidence_wiki.research_command_contracts import error_document
 from tools._acceptance_protocol import digest as owner_digest
 from tools._integration_improvement import BOOLS, COUNTERS, CYCLES, ROUTES
+from tools._native_owner_execution import fixture_window, validate_execution_policy
 from tools._release_decision import bounded_json, canonical, digest
 from tools.decide_release import _deadline
 from tools.verify_acceptance_paths import candidate_manifest
@@ -204,8 +204,11 @@ def _rotate(workspace, descriptor, files, private, index):
 
 
 class Routes:
-    def __init__(self, root, runtime, route):
+    child_tracker = None
+
+    def __init__(self, root, runtime, route, *, child_tracker=None):
         self.root, self.runtime, self.route = root, runtime, route
+        self.child_tracker = child_tracker
         self.calls = []
         self.server = None
         if route == "scoped_mcp":
@@ -222,6 +225,8 @@ class Routes:
             self.calls.append({"operation": "tools/list", "result_sha256": digest(result)})
 
     def call(self, operation, arguments, control=None):
+        if self.child_tracker is not None:
+            self.child_tracker.confirm_completed()
         if control is not None:
             control.checkpoint("reference_route_before_call")
         start = time.monotonic()
@@ -229,19 +234,9 @@ class Routes:
         self.calls.append(record)
         raw = None
         if self.server is not None:
-            cancellation = threading.Event() if control is not None else None
-            timer = None
-            if control is not None:
-                timer = threading.Timer(control.remaining_seconds("reference_mcp_call"), cancellation.set)
-                timer.daemon = True
-                timer.start()
-            try:
-                response = self.server.handle_message({"jsonrpc": "2.0", "id": len(self.calls) + 1,
-                    "method": "tools/call", "params": {"name": "research_" + operation.replace("-", "_"),
-                    "arguments": {"target": str(self.root), **arguments}}}, cancellation=cancellation)
-            finally:
-                if timer is not None:
-                    timer.cancel()
+            response = self.server.handle_message({"jsonrpc": "2.0", "id": len(self.calls) + 1,
+                "method": "tools/call", "params": {"name": "research_" + operation.replace("-", "_"),
+                "arguments": {"target": str(self.root), **arguments}}}, operation_control=control)
             if "error" in response:
                 raise ValueError("integration_mcp_refused")
             raw = response["result"]["content"][0]["text"].encode()
@@ -277,6 +272,8 @@ class Routes:
             record.update(_diagnosis(error))
         if control is not None:
             control.checkpoint("reference_route_after_call")
+        if self.child_tracker is not None:
+            self.child_tracker.confirm_completed()
         if envelope["result"] is None:
             raise error
         return envelope["result"]
@@ -286,7 +283,7 @@ class Routes:
             self.server.close()
 
 
-def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
+def run_scenario(plan, host_id, directory, *, remaining_seconds=900, child_tracker=None):
     """Observe baseline plus two real permitted evidence-identity revisions."""
     host = next(row for row in plan["hosts"] if row["host_id"] == host_id)
     route = host["route"]
@@ -297,6 +294,17 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
         window = (datetime.fromisoformat(plan["expires_at"]) - datetime.fromisoformat(plan["frozen_at"])).total_seconds()
         if run_seconds > window:
             raise ValueError("integration_run_duration_exceeds_study")
+    fixture_options = {}
+    scope = plan["scope"]
+    if "execution_policy" in scope or "execution_policy_sha256" in scope:
+        execution = validate_execution_policy(scope.get("execution_policy"))
+        if (scope.get("execution_policy_sha256") != digest(execution)
+                or run_seconds != execution["native_run_seconds"]
+                or any(slot["elapsed_cap_seconds"] != execution["slot_seconds"] for slot in plan["slots"])):
+            raise ValueError("integration_execution_policy_binding")
+        fixture_window(execution, plan["frozen_at"], plan["expires_at"])
+        fixture_options = {"execution_policy": execution, "study_frozen_at": plan["frozen_at"],
+                           "study_expires_at": plan["expires_at"]}
     if digest(candidate_manifest(ROOT)) != plan["candidate_sha256"] or digest(host_identity(route)) != host["host_sha256"]:
         raise ValueError("integration_candidate_or_host_changed")
     if digest(scenario(route)) != host["scenario_sha256"]:
@@ -328,14 +336,22 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
         with _deadline(min(remaining_seconds, sum(float(slot["elapsed_cap_seconds"]) for slot in selected.values()))):
             provision, _, _, _, _ = _load_example()
             options = {} if "native_run_seconds" not in plan["scope"] else {"run_seconds": run_seconds}
+            options.update(fixture_options)
+            if child_tracker is not None:
+                child_tracker.confirm_completed()
+                options["child_tracker"] = child_tracker
             root, runtime, _ = provision(directory / "fixture", **options)
+            if child_tracker is not None:
+                child_tracker.confirm_completed()
             report.update(workspace=str(root), factory=str(root.parent / "fixture-private/services.py"))
             descriptor, files = _closure(root)
             report["reference_sha256"] = hashlib.sha256(canonical(REFERENCE)).hexdigest()
-            routes = Routes(root, runtime, route)
+            routes = Routes(root, runtime, route) if child_tracker is None else Routes(root, runtime, route, child_tracker=child_tracker)
             routes.observations = observations
             parent_id, previous_basis = None, None
             for index, row in enumerate(report["cycles"]):
+                if child_tracker is not None:
+                    child_tracker.confirm_completed()
                 current_row = row
                 p = row["projection"]
                 p["disposition"] = "started_stop_unknown"
@@ -405,6 +421,8 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
                     previous_basis, parent_id = basis, row["run_id"]
                 finally:
                     control.close()
+                    if child_tracker is not None:
+                        child_tracker.confirm_completed()
             report["calls"] = routes.calls
     except BaseException as error:
         report["failure"] = {"kind": type(error).__name__, "error_code": error.error_code if isinstance(error, EvidenceWikiError) else None}
@@ -417,6 +435,8 @@ def run_scenario(plan, host_id, directory, *, remaining_seconds=900):
     finally:
         if routes is not None:
             routes.close()
+        if child_tracker is not None:
+            child_tracker.confirm_completed()
     report["elapsed_seconds"] = f"{time.monotonic()-started:.6f}"
     report["retained_at"] = datetime.now(timezone.utc).isoformat()
     report["closing_failure"] = None

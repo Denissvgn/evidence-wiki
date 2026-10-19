@@ -77,16 +77,18 @@ def _main(argv, cleanup):
             plan = validate_plan(_read(args.plan), args.expected_plan)
             if digest(candidate_manifest(ROOT)) != plan["candidate_sha256"]:
                 raise ValueError("integration_current_candidate_changed")
+            child_tracker = None
             if "native_child_control_directory" in plan["scope"]:
                 from tools.run_native_owner_feasibility import native_cleanup_context
-                cleanup.enter_context(native_cleanup_context(plan, args.action, args.host, args.directory))
+                child_tracker = cleanup.enter_context(native_cleanup_context(plan, args.action, args.host, args.directory))
             remaining = (datetime.fromisoformat(plan["expires_at"]) - datetime.now(timezone.utc)).total_seconds()
             if remaining <= 0:
                 raise ValueError("integration_plan_expired")
             if args.action == "run":
                 if args.host is None or args.directory is None:
                     raise ValueError("integration_run_arguments")
-                result = run_scenario(plan, args.host, args.directory, remaining_seconds=remaining)
+                options = {} if child_tracker is None else {"child_tracker": child_tracker}
+                result = run_scenario(plan, args.host, args.directory, remaining_seconds=remaining, **options)
                 _publish(args.directory / "report.json", result)
                 result = {"report_path": str(args.directory / "report.json"), "source_head_sha256": digest(result),
                           "completed": result["failure"] is None, "release_published": False}
@@ -120,11 +122,9 @@ def _main(argv, cleanup):
                         result = replay_decision(_read(args.report), args.expected_plan, args.expected_evidence, readers,
                                                  **checks)
                     else:
-                        if args.output is None:
-                            raise ValueError("integration_output_required")
                         result = decide(plan, args.expected_plan, pins, args.expected_evidence, readers,
                                         **checks)
-                    if args.action == "decide":
+                    if args.action == "decide" and args.output is not None:
                         _publish(args.output, result)
         cleanup.close()
         print(json.dumps(result, sort_keys=True))

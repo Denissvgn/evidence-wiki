@@ -468,7 +468,7 @@ def _run_publication(args: list[str]) -> int:
         document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
     except EvidenceWikiError as exc:
         return _refuse(exc, json_mode=True)
-    if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+    if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
         return _emit_refusal(_packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
     rendered = script.render(document)
     if parsed.output:
@@ -489,7 +489,7 @@ def _run_questions_export(forwarded: list[str]) -> int:
     # ``jsonl`` is the same document reshaped by the script's own renderer, and
     # ``--output`` only chooses where the rendered bytes go.
     try:
-        if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+        if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
             raise _packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery")
         rendered = script.render_output(document, parsed.format)
     except Exception as exc:

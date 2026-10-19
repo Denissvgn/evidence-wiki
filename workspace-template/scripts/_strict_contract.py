@@ -20,6 +20,11 @@ RESULT_SCHEMA = "evidence-strict-result/v1"
 CLAIMS_SCHEMA_V2 = "evidence-strict-claims/v2"
 REVIEW_SCHEMA_V2 = "evidence-strict-review/v2"
 RESULT_SCHEMA_V2 = "evidence-strict-result/v2"
+POLICY_SCHEMA_V2 = "evidence-strict-policy/v2"
+REVIEW_SCHEMA_V3 = "evidence-strict-review/v3"
+RESULT_SCHEMA_V3 = "evidence-strict-result/v3"
+SELECTIVE_MODE = "claim_dependencies_v1"
+_DEPENDENCY_CACHE = {}
 _COMPUTATION_CACHE = {}
 MAX_BYTES = 1_048_576
 MAX_CLAIMS = 100
@@ -47,7 +52,16 @@ def identifier(value):
     return value
 
 
+def dependency_contract():
+    return load_workspace_module(Path(__file__).resolve().parent, "_review_dependency_contract", cache=_DEPENDENCY_CACHE)
+
+
 def document(value, schema):
+    if schema in {POLICY_SCHEMA_V2, REVIEW_SCHEMA_V3}:
+        dependency_contract().validate(schema, value)
+        data = canonical_bytes(value)
+        require(len(data) <= MAX_BYTES, "strict_document_bound_exceeded")
+        return json_document(data)
     # The byte reader must also bound the file before decoding it.
     pending = [(value, 1)]
     nodes = 0
@@ -67,18 +81,20 @@ def document(value, schema):
             require(len(item) <= 65536, "strict_string_bound_exceeded")
             string_bytes += len(item.encode("utf-8"))
             require(string_bytes <= MAX_BYTES, "strict_document_bound_exceeded")
-    validate_shape(value, schema_documents()[schema])
+    validate_shape(value, _legacy_schema_documents()[schema])
     data = canonical_bytes(value)
     require(len(data) <= MAX_BYTES, "strict_document_bound_exceeded")
     value = json_document(data)
     exact_object(value, FIELDS[schema])
     require(value["schema_version"] == schema, "strict_schema_unsupported")
-    validate_shape(value, schema_documents()[schema])
+    validate_shape(value, _legacy_schema_documents()[schema])
     return value
 
 
 def policy_document(value):
-    value = document(value, POLICY_SCHEMA)
+    schema = value.get("schema_version") if type(value) is dict else None
+    require(schema in {POLICY_SCHEMA, POLICY_SCHEMA_V2}, "strict_schema_unsupported")
+    value = document(value, schema)
     identifier(value["policy_id"])
     identifier(value["revision"])
     require(value["assurance"] in {"artifact_checked", "host_enforced"}, "strict_assurance_unsupported")
@@ -165,6 +181,10 @@ def claims_document(value):
 
 def review_document(value):
     schema = value.get("schema_version") if type(value) is dict else None
+    if schema == REVIEW_SCHEMA_V3:
+        value = document(value, schema)
+        policy_document(value["snapshot"]["policy"])
+        return value
     require(schema in {REVIEW_SCHEMA, REVIEW_SCHEMA_V2}, "strict_schema_unsupported")
     value = document(value, schema)
     digest(value["basis_id"])
@@ -189,6 +209,13 @@ def artifact_id(value):
 
 
 def validate_shape(value, schema):
+    name = schema.get("properties", {}).get("schema_version", {}).get("const")
+    if name in {POLICY_SCHEMA_V2, REVIEW_SCHEMA_V3, RESULT_SCHEMA_V3,
+            "evidence-strict-publication/v3", "evidence-strict-review-status/v2",
+            "research-dependency-review-material/v1", "evidence-review-dependency-basis/v1",
+            "evidence-review-producer-manifest/v1", "evidence-review-producer-inventory/v1"}:
+        dependency_contract().validate(name, value)
+        return
     if "anyOf" in schema:
         for choice in schema["anyOf"]:
             try:
@@ -223,8 +250,8 @@ def validate_shape(value, schema):
         require(schema.get("minimum", value) <= value <= schema.get("maximum", value), "strict_schema_integer_bound")
 
 
-def schema_documents():
-    """Return closed, bounded public shapes; owning functions add semantic checks."""
+def _legacy_schema_documents():
+    """Retain the original closed shapes independently of selective contracts."""
     def obj(**fields):
         return {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
     def string(maximum=4096):
@@ -318,6 +345,14 @@ def schema_documents():
                          reasons=reasons, review=review)), selection={"const": "latest_matching_current_basis"},
         revocation_owner={"const": "current_host_authority_and_source_usage"},
         authorized={"const": False}, evidence_accepted={"const": False})
-    return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "urn:" + key.replace("/", ":"),
+    result = {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "urn:" + key.replace("/", ":"),
                   "x-evidence-wiki-limits": {"bytes": MAX_BYTES, "claims": MAX_CLAIMS, "depth": 16, "nodes": 65536},
                   **value} for key, value in documents.items()}
+    return result
+
+
+def schema_documents():
+    """Return legacy and additive selective contracts without merging fragments."""
+    documents = _legacy_schema_documents()
+    documents.update(dependency_contract().schema_documents())
+    return documents

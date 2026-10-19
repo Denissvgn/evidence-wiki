@@ -376,3 +376,46 @@ def validate_dependency_origins(resolved, origins, prefix, *, read_files=False):
                            or hashlib.sha256(path.read_bytes()).hexdigest() != value["sha256"]):
             raise ValueError("imported dependency bytes differ from observed origin")
     return origins
+
+
+def check_review_producer_inventory(root, layout):
+    """Require complete owned source selection and both archive projections."""
+    from evidence_wiki import _review_producer as producer
+
+    root = Path(root)
+    roots = (("package/evidence_wiki", root / "src/evidence_wiki"),
+             *(("assets/" + name, root / name) for name in producer.ASSET_NAMES))
+    observed = producer.observe_roots(roots, read=True)
+    inventory = producer.inventory_document(observed[3][producer.INVENTORY_PATH])
+    expected = set(inventory["paths"])
+    if set(observed[0]) != expected:
+        raise ValueError("review producer source inventory differs")
+
+    def coordinate(path, kind):
+        package_prefix = "evidence_wiki/" if kind == "wheel" else "src/evidence_wiki/"
+        asset_prefix = "evidence_wiki/assets/" if kind == "wheel" else ""
+        for name in producer.ASSET_NAMES:
+            prefix = asset_prefix + name + "/"
+            if path.startswith(prefix):
+                return "assets/" + name + "/" + path[len(prefix):]
+        if path.startswith(package_prefix):
+            return "package/evidence_wiki/" + path[len(package_prefix):]
+        return None
+
+    for kind in ("wheel", "sdist"):
+        projected = {}
+        for member, source in layout["maps"][kind].items():
+            logical = coordinate(member, kind)
+            if logical is not None:
+                producer.validate_path(logical)
+                if logical in projected:
+                    raise ValueError("duplicate review producer archive projection")
+                projected[logical] = source
+        if set(projected) != expected:
+            raise ValueError(kind + " review producer owned membership differs from inventory")
+        for logical, source in projected.items():
+            expected_source = ("src/evidence_wiki/" + logical[len("package/evidence_wiki/"):]
+                               if logical.startswith("package/") else logical[len("assets/"):])
+            if source != expected_source:
+                raise ValueError("review producer archive maps to an unrelated source")
+    return inventory

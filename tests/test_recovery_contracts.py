@@ -52,11 +52,23 @@ def test_effect_cursor_must_be_ordered_unique_and_match_last_effect():
 
 def test_installed_recovery_schema_is_in_the_complete_closed_catalog():
     from evidence_wiki._agent_catalog import resource_paths
-    from evidence_wiki.agent_resources import MAX_RESOURCES, resource_document, resource_index
+    from evidence_wiki.agent_resources import MAX_INSTALLED_RESOURCES, MAX_RESOURCES, resource_document, resource_index
     from evidence_wiki.recovery_contracts import schema_document
 
-    index = resource_index()
-    assert len(resource_paths()) <= MAX_RESOURCES
-    assert {row["id"] for row in index["resources"]} == set(resource_paths())
-    assert index["bounds"] == {"total":len(resource_paths()), "returned":len(resource_paths()), "truncated":False}
+    expected = set(resource_paths())
+    assert len(expected) <= MAX_INSTALLED_RESOURCES
+    entries, offset = [], 0
+    while True:
+        page = resource_index(offset=offset)
+        returned, total = page["bounds"]["returned"], page["bounds"]["total"]
+        assert total == len(expected)
+        assert returned == len(page["resources"]) <= MAX_RESOURCES
+        assert page["bounds"]["truncated"] is (returned < total)
+        entries.extend(row["id"] for row in page["resources"])
+        offset += returned
+        if offset >= total:
+            break
+        assert returned > 0
+    assert len(entries) == len(expected)
+    assert set(entries) == expected
     assert json.loads(resource_document("research-recovery-status/v1")["content"]) == schema_document()

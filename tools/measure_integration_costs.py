@@ -13,6 +13,7 @@ import json
 import math
 import os
 import queue
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from tools._command_completion import CommandCompletion, validate_completion, validate_scope  # noqa: E402
 from tools._integration_costs import (  # noqa: E402
     MAX_BYTES,
     METRICS,
@@ -130,7 +132,8 @@ def _event(plan, attempt, status, start, end, receipt_hash, usage=None):
 
 
 def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_root,
-                    timeout_seconds=60, input_bytes=b"", meter=None, meter_id=None, meter_timeout_seconds=5):
+                    timeout_seconds=60, input_bytes=b"", meter=None, meter_id=None, meter_timeout_seconds=5,
+                    native_child_scope=None):
     """Observe explicitly selected argv once; retain failures without redispatch.
 
     Keep the returned receipt hash in a separate trusted custody boundary. A
@@ -138,7 +141,10 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
     Parent waiting for that callback is bounded; its background thread cannot be
     forcibly terminated and does not establish provider or OS containment.
     Same-user workers and process groups are not a malicious-worker sandbox.
+    native_child_scope explicitly selects signed process-birth completion; its
+    absence preserves the legacy receipt format and cleanup behavior.
     """
+    scope = None if native_child_scope is None else validate_scope(native_child_scope)
     budget_started = time.monotonic()
     reserved = _now()
     _key(observer_key)
@@ -169,7 +175,7 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
     effective_timeout = min(timeout_seconds, window_left - 12)
     deadline = budget_started + max(0, effective_timeout)
     effective_timeout = max(0, deadline - time.monotonic())
-    intent = _signed({"schema_version": "integration-cost-intent/v1", "plan_sha256": plan["plan_sha256"],
+    intent = _signed({"schema_version": "integration-cost-intent/v1" if scope is None else "integration-cost-intent/v2", "plan_sha256": plan["plan_sha256"],
         "attempt": attempt, "source": source, "argv": argv, "command_manifest": manifest,
         "observer_id": hashlib.sha256(observer_key).hexdigest(), "directory": str(directory),
         "directory_identity": _identity(directory), "work_root": str(work_root),
@@ -177,10 +183,12 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
         "input_sha256": hashlib.sha256(input_bytes).hexdigest(), "timeout_seconds": str(timeout_seconds),
         "effective_timeout_seconds": str(max(0, effective_timeout)),
         "output_limit_bytes": MAX_EVENT_BYTES, "meter_id": meter_id,
-        "meter_timeout_seconds": str(meter_timeout_seconds)}, observer_key)
+        "meter_timeout_seconds": str(meter_timeout_seconds),
+        **({} if scope is None else {"native_child_scope": scope})}, observer_key)
     publish_new(paths["intent"], intent)
     process, started, failure, pending_interrupt = None, None, None, None
     status, usage, telemetry = "failed", {}, "unobserved"
+    completion, producer_completion = None, None
     meter_work_unresolved = False
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     overflow, lock, readers = threading.Event(), threading.Lock(), []
@@ -212,11 +220,15 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             if time.monotonic() >= deadline:
                 raise TimeoutError("cost_command_timeout")
+            birth_id = None if scope is None else secrets.token_hex(32)
             process = subprocess.Popen(argv, cwd=worker, env=environment, stdin=stdin,  # noqa: S603 -- explicitly selected frozen argv.
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            if scope is not None:
+                completion = CommandCompletion(process, scope, birth_id)
             started = _now()
             publish_new(paths["start"], _signed({"intent_sha256": digest(intent), "started_at": started,
-                "pid": process.pid}, observer_key))
+                "pid": process.pid, **({} if scope is None else {"schema_version": "integration-cost-start/v2",
+                    "birth_id": completion.birth_id, "native_child_scope": scope})}, observer_key))
             for name in buffers:
                 reader = threading.Thread(target=drain, args=(name, getattr(process, name)), daemon=True)
                 readers.append(reader)
@@ -239,7 +251,12 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
     finally:
         if process is not None:
             try:
-                stop_process(process)
+                if scope is None:
+                    stop_process(process)
+                else:
+                    producer_completion = None if completion is None else completion.close()
+                    if producer_completion is None:
+                        status, failure = "failed", "cost_producer_cleanup_unconfirmed"
             except Exception as error:
                 status, failure = "failed", "cost_cleanup_failed: " + type(error).__name__
         for reader in readers:
@@ -316,14 +333,19 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
     for name, raw in retained_buffers.items():
         if read_private(paths[name], MAX_EVENT_BYTES) != raw:
             raise ValueError("cost_output_changed")
-    receipt = _signed({"schema_version": "integration-cost-receipt/v1", "intent_sha256": digest(intent),
+    if scope is not None and (coverage_gap is not None or reader_work_unresolved or meter_work_unresolved
+                              or manifest_after != manifest):
+        producer_completion = None
+        if status == "succeeded":
+            status, failure = "failed", "cost_producer_completion_unavailable"
+    receipt = _signed({"schema_version": "integration-cost-receipt/v1" if scope is None else "integration-cost-receipt/v2", "intent_sha256": digest(intent),
         "started_at": started, "finished_at": finished, "status": status, "failure": failure,
         "exit_code": None if process is None else process.returncode, "command_manifest_after": manifest_after,
         "streams": {name: {"sha256": hashlib.sha256(raw).hexdigest(), "retained_bytes": len(raw)}
                     for name, raw in retained_buffers.items()}, "output_overflow": overflow.is_set(),
         "output_reader_work_unresolved": reader_work_unresolved,
         "meter_id": meter_id, "telemetry_qualification": telemetry, "meter_work_unresolved": meter_work_unresolved,
-        "usage": usage}, observer_key)
+        "usage": usage, **({} if scope is None else {"producer_completion": producer_completion})}, observer_key)
     publish_new(paths["final"], receipt)
     result = {"receipt": receipt, "receipt_sha256": digest(receipt),
               "event": _event(plan, attempt, status, reserved, finished, digest(receipt), usage) if coverage_gap is None else None,
@@ -335,8 +357,14 @@ def observe_command(plan, attempt_id, argv, *, observer_key, directory, work_roo
     return result
 
 
-def read_command_receipt(plan, attempt_id, argv, *, observer_key, directory, work_root, expected_receipt_sha256):
-    """Authenticate a final receipt using the caller's externally held exact hash."""
+def read_command_receipt(plan, attempt_id, argv, *, observer_key, directory, work_root, expected_receipt_sha256,
+                         native_child_scope=None):
+    """Authenticate a final receipt using the caller's externally held exact hash.
+
+    Supplying native_child_scope also requires that exact opt-in lifecycle; it
+    prevents a legacy receipt from satisfying a selected producer completion.
+    """
+    scope = None if native_child_scope is None else validate_scope(native_child_scope)
     _key(observer_key)
     plan, attempt, source, _ = _binding(plan, attempt_id, argv, pin=False)
     directory, work_root = _paths(directory, work_root)
@@ -348,15 +376,43 @@ def read_command_receipt(plan, attempt_id, argv, *, observer_key, directory, wor
             or intent.get("work_root") != str(work_root) or intent.get("directory_identity") != _identity(directory)
             or intent.get("work_root_identity") != _identity(work_root)):
         raise ValueError("cost_receipt_binding_changed")
+    intent_version = intent.get("schema_version")
+    if intent_version not in {"integration-cost-intent/v1", "integration-cost-intent/v2"}:
+        raise ValueError("cost_receipt_lifecycle_version")
+    if intent_version == "integration-cost-intent/v2":
+        selected_scope = validate_scope(intent.get("native_child_scope"))
+        if scope is not None and selected_scope != scope:
+            raise ValueError("cost_receipt_binding_changed")
+    elif scope is not None or "native_child_scope" in intent:
+        raise ValueError("cost_receipt_lifecycle_version")
     receipt = _authenticated(Path(str(base) + ".receipt.json"), observer_key)
+    expected_version = "integration-cost-receipt/v2" if intent_version.endswith("/v2") else "integration-cost-receipt/v1"
+    if (receipt.get("schema_version") != expected_version
+            or (expected_version.endswith("/v2") and "producer_completion" not in receipt)
+            or (expected_version.endswith("/v1") and "producer_completion" in receipt)):
+        raise ValueError("cost_receipt_lifecycle_version")
     if type(expected_receipt_sha256) is not str or digest(receipt) != expected_receipt_sha256:
         raise ValueError("cost_trusted_receipt_hash_mismatch")
     if receipt.get("intent_sha256") != digest(intent):
         raise ValueError("cost_receipt_binding_changed")
+    start = None
     if receipt["started_at"] is not None:
         start = _authenticated(Path(str(base) + ".start.json"), observer_key)
         if start.get("intent_sha256") != digest(intent) or start.get("started_at") != receipt["started_at"]:
             raise ValueError("cost_start_binding_changed")
+        if expected_version.endswith("/v1") and any(
+                field in start for field in ("schema_version", "birth_id", "native_child_scope")):
+            raise ValueError("cost_receipt_lifecycle_version")
+    if expected_version.endswith("/v2"):
+        if start is None:
+            if receipt["producer_completion"] is not None or receipt["status"] == "succeeded":
+                raise ValueError("cost_producer_completion_invalid")
+        else:
+            validate_completion(receipt["producer_completion"], scope=selected_scope, start=start,
+                                receipt=receipt, source=source)
+        if receipt["producer_completion"] is not None and (receipt["output_reader_work_unresolved"]
+                or receipt["meter_work_unresolved"] or receipt["command_manifest_after"] != intent["command_manifest"]):
+            raise ValueError("cost_producer_completion_invalid")
     for name, stream in receipt["streams"].items():
         raw = read_private(Path(str(base) + "." + name), MAX_EVENT_BYTES)
         if len(raw) != stream["retained_bytes"] or hashlib.sha256(raw).hexdigest() != stream["sha256"]:
@@ -375,11 +431,40 @@ def read_command_receipt(plan, attempt_id, argv, *, observer_key, directory, wor
         current_matches = command_manifest(argv) == intent["command_manifest"]
     except Exception:
         current_matches = False
-    return {"receipt": receipt, "receipt_sha256": digest(receipt),
+    result = {"receipt": receipt, "receipt_sha256": digest(receipt),
             "event": _event(plan, attempt, receipt["status"], intent["reserved_at"], receipt["finished_at"],
                             digest(receipt), receipt["usage"]) if coverage_gap is None else None,
             "coverage_gap": coverage_gap, "current_command_manifest_matches": current_matches,
             "qualification": "host-private signed command retention; reservation-to-final host interval; external latest receipt custody required"}
+    return _AuthenticatedCommandReceipt(result) if expected_version.endswith("/v2") else result
+
+
+class _AuthenticatedCommandReceipt(dict):
+    """In-process provenance for a result returned by the authenticated reader."""
+
+    def __init__(self, result):
+        super().__init__(result)
+        self._authenticated_digest = digest(result)
+
+
+def producer_cleanup_proof(verified, *, worker_pid, plan_sha256, stage):
+    """Derive parent proof from read_command_receipt, never a self-asserted dict.
+
+    The caller must retain the exact receipt hash outside the worker custody
+    boundary and supply it to read_command_receipt with the selected scope.
+    This attests process cleanup only; a failed command may have completed.
+    """
+    scope = validate_scope({"plan_sha256": plan_sha256, "stage": stage})
+    if (type(verified) is not _AuthenticatedCommandReceipt or digest(verified) != verified._authenticated_digest
+            or verified["coverage_gap"] is not None or not verified["current_command_manifest_matches"]):
+        raise ValueError("cost_authenticated_producer_receipt_required")
+    certificate = verified["receipt"].get("producer_completion")
+    if (type(worker_pid) is not int or worker_pid <= 0 or type(certificate) is not dict
+            or certificate["worker_pid"] != worker_pid or certificate["plan_sha256"] != scope["plan_sha256"]
+            or certificate["stage"] != scope["stage"]):
+        raise ValueError("cost_producer_completion_invalid")
+    return {"worker_pid": worker_pid, **scope, "group_absent": True, "returncode": certificate["returncode"],
+            "command_receipt_sha256": verified["receipt_sha256"]}
 
 
 def from_comparative_ledger(ledger, scope_id, repeat_use_count=None):

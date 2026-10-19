@@ -40,6 +40,9 @@ INTEGRITY_ERRORS = frozenset({
     "integration_original_response_changed", "integration_original_projection_changed",
     "integration_original_parent_changed", "integration_original_changed_during_read",
     "integration_current_candidate_changed", "integration_closing_candidate_or_host_changed",
+    "integration_execution_policy_binding", "integration_current_execution_authority_changed",
+    "cost_receipt_lifecycle_version", "cost_producer_completion_invalid",
+    "cost_authenticated_producer_receipt_required",
 })
 
 OUTCOMES = ("stop", "revise", "narrow", "continue")
@@ -68,6 +71,26 @@ def freeze_plan(*, candidate_sha256, hosts, slots, scope, frozen_at, expires_at,
              "hosts": hosts, "slots": slots, "scope": scope, "frozen_at": frozen_at, "expires_at": expires_at,
              "proposals": [] if proposals is None else proposals, "policy": policy(), "policy_sha256": digest(policy())}
     return validate_plan(value, digest(value))
+
+
+def validate_execution_scope(plan):
+    """Validate optional native clocks without promoting serialized authority."""
+    scope = plan["scope"]
+    if "execution_policy" in scope or "execution_policy_sha256" in scope:
+        from evidence_wiki._native_owner_execution import fixture_window, validate_execution_policy
+        _require("execution_policy" in scope and "execution_policy_sha256" in scope,
+                 "integration_execution_policy_binding")
+        selected = validate_execution_policy(scope["execution_policy"])
+        _require(scope["execution_policy_sha256"] == digest(selected)
+                 and scope.get("native_run_seconds") == selected["native_run_seconds"]
+                 and scope.get("native_cleanup_recipe") == "owned-popen-groups/v2"
+                 and all(type(slot["elapsed_cap_seconds"]) is int
+                         and slot["elapsed_cap_seconds"] == selected["slot_seconds"] for slot in plan["slots"]),
+                 "integration_execution_policy_binding")
+        fixture_window(selected, plan["frozen_at"], plan["expires_at"], current_utc=plan["frozen_at"])
+    else:
+        _require(scope.get("native_cleanup_recipe") != "owned-popen-groups/v2",
+                 "integration_execution_policy_binding")
 
 
 def validate_plan(plan, expected_plan_sha256):
@@ -109,6 +132,7 @@ def validate_plan(plan, expected_plan_sha256):
         pairs.add((slot["host_id"], slot["cycle"]))
         inputs[slot["host_id"]].add(slot["input_sha256"])
     _require(len(pairs) == 9 and all(len(items) == 3 for items in inputs.values()), "integration_change_cycles")
+    validate_execution_scope(plan)
     proposals = plan["proposals"]
     _require(type(proposals) is list and len(proposals) <= 32, "integration_proposals")
     ids = set()

@@ -162,20 +162,32 @@ def read_artifact(summary, directory):
         return _read_artifact(summary,directory,descriptor)
 
 
-def journal_snapshot(session, records):
+def journal_snapshot(session, records, *, journal_collection=False):
     """Capture the entire event source of the producer-authenticated chain."""
     directory = Path(session.root)/'runs'/session.run_id
-    raw = _private_part(directory/'events.jsonl',PAYLOAD_BYTES)
+    if type(journal_collection) is not bool:
+        raise ValueError('Native journal collection selection is invalid.')
+    source_bound = 16_777_216 if journal_collection else PAYLOAD_BYTES
+    raw = _private_part(directory/'events.jsonl',source_bound)
     events = [json.loads(line) for line in raw.splitlines()]
     retained = [{**event['data']['record'],'event_ref':event['event_id']} for event in events
         if 'record' in (event.get('data') or {})]
-    if retained != records:
+    from evidence_wiki.errors import UsageError
+    from evidence_wiki.research_journal_contracts import canonical_record
+    try:
+        same = (len(retained) == len(records)
+            and all(canonical_record(source) == canonical_record(runtime)
+                    for source, runtime in zip(retained, records, strict=True)))
+    except (UsageError, ValueError, TypeError, RecursionError):
+        same = False
+    if not same:
         raise ValueError('Native journal changed after original owner authentication.')
     state_raw = _private_part(directory/'run-state.json',PART_BYTES*8)
     return {'run_id':session.run_id,'events':events,'state':json.loads(state_raw),
         'source_path':str(directory/'events.jsonl'),'source_sha256':hashlib.sha256(raw).hexdigest(),
         'state_path':str(directory/'run-state.json'),'state_sha256':hashlib.sha256(state_raw).hexdigest(),
-        'original_state_json':state_raw.decode()}
+        'original_state_json':state_raw.decode(),
+        **({'source_bytes_bound':source_bound} if journal_collection else {})}
 
 
 def require_current_probe(records, current, finished_utc):
@@ -191,7 +203,9 @@ def require_current_probe(records, current, finished_utc):
 
 def verify_journal_closing(snapshots):
     for snapshot in snapshots:
-        if (hashlib.sha256(_private_part(snapshot['source_path'],PAYLOAD_BYTES)).hexdigest() != snapshot['source_sha256']
+        if snapshot.get('source_bytes_bound',PAYLOAD_BYTES) not in (PAYLOAD_BYTES,16_777_216):
+            raise ValueError('Native journal source bound is invalid.')
+        if (hashlib.sha256(_private_part(snapshot['source_path'],snapshot.get('source_bytes_bound',PAYLOAD_BYTES))).hexdigest() != snapshot['source_sha256']
                 or hashlib.sha256(_private_part(snapshot['state_path'],PART_BYTES*8)).hexdigest() != snapshot['state_sha256']):
             raise ValueError('Native main or additional journal changed before closing.')
 

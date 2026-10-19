@@ -1147,6 +1147,34 @@ result = workspace.research.run_cycle(
 )
 ```
 
+For ordinary scoped contextual reviews, a host may explicitly select
+`review_application_lease=ReviewApplicationLease(seconds=1800,
+not_after_utc=original_authority_expiry)` before binding the profile. This emits
+profile/v16. Enter `with review_application_window(session):` before assembling
+and reserving each review. The host window captures its start once and freezes
+its absolute end within the original run deadline and selected authority
+expiry. Scoped evaluate jobs then use job/v5 and retain a separate
+`application_deadline_utc`; `deadline_utc` and worker timeout stay bounded to
+600 seconds. A successful worker must finish within its original worker lease.
+Application still requires current authority, sources, qualification and basis.
+Exiting the window revokes its issuance capability, including copied contexts.
+Recovery uses the stored attempt deadline and cannot renew it or promote an
+expired older attempt. Omit the option to preserve existing profile and job
+formats. Both names are available from `evidence_wiki`.
+
+For a longer bounded host application window, explicitly pass
+`schema_version="research-review-application-lease/v2"` to
+`ReviewApplicationLease`. This version accepts integer seconds from 1 through
+3600 and selects profile/v17 with job/v6. Its document still contains exactly
+`schema_version`, `seconds`, and `not_after_utc`. The two-argument constructor
+keeps lease/v1, its 1800-second ceiling, profile/v16, and job/v5. Version 2 also
+accepts shorter windows, so the host can match a measured service cap exactly.
+Start the application window before starting the outer service timer, and choose
+an application duration no greater than that service cap. The original authority
+expiry and run deadline still bound the frozen end; recovery cannot extend it.
+Both versions use the configured trusted executor and preserve its original
+worker limit and all current checks at application and closing.
+
 Restart with the same policy, run ID, host context and `ResearchExecution`.
 Grant `research_session.recovery_status` for inspection and
 `research_session.reconcile_recovery` for explicit reconciliation. The facade
@@ -1293,7 +1321,10 @@ recovery. A finite status snapshot cannot promise instantaneous future withdrawa
 configured host. It requires the `host_qualification.current` and
 `service_authentication.status` grants in addition to the existing current-session
 grants. It challenges provisioned native credentials and verifies retained owned
-attempts, current immutable review contexts and native evaluator attestations.
+attempts, current immutable or selective review contexts and native evaluator
+attestations. Reports use `research-host-qualification/v2` when retained
+authenticated applications contain selective reviews, and v1 otherwise. Both
+versions preserve the existing 64-attempt and 262,144-byte limits.
 Credential readiness, executed reviews and semantic eligibility remain separate;
 missing review execution or attestation remains `not_observed`. Runtime, package,
 policy, profile and journal identities bind the returned observation. The call
@@ -1306,7 +1337,7 @@ draft write/protected read/workspace write probe and returns its dated scope.
 That draft-only observation does not qualify semantic evaluator execution or
 delivery. Independent credential custody, isolated reasoning and remote model
 execution remain unobserved unless separately demonstrated by the integrating host.
-Library API `63` and operation matrix `44` advertise these host observations
+Library API `64` and operation matrix `44` advertise these host observations
 and explicit bounded startup service factories.
 
 Current domain derives from actual authorized source closures, strict claims,
@@ -3141,14 +3172,19 @@ is introduced by the application.
 
 ## Installed and legacy compatibility
 
-Library API `60` advertises every native execution profile version, v1–v13,
-from the execution owner. Operation matrix `41` retains its existing operations.
+Library API `64` advertises every native execution profile version, v1–v17,
+from the execution owner. Operation matrix `44` retains its existing operations.
 
 Open the installed library and its content catalog from the same isolated Python
 environment used by native children. `contract()` describes that installation's
 library API and operation matrix. `Onboarding.open().contracts()` describes its
 scoped adapters; `resources()` and `resource(id)` expose the closed, hashed
 catalog, including schema documents and complete public example bundles.
+Resource discovery returns at most 128 entries per page; use
+`resources(offset=..., limit=...)` and inspect `bounds.total`, `returned` and
+`truncated`. Summary/v2 and bootstrap/v3 expose their first page through
+`resource_bounds`; schema IDs and negotiation cover the complete installed
+catalog. Prior summary and bootstrap schemas retain their original bounds.
 The command-line contract and MCP resource interface use these same owners.
 Optional Git, Poppler and model CLIs are separately selected host capabilities.
 Discovery does not establish live model execution or host isolation. Framework

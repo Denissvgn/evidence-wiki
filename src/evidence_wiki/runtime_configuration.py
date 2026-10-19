@@ -44,9 +44,9 @@ def _key(value):
 
 def _profile(value):
     base = {"schema_version", "profile_ref", "total_steps", "currency", "pricing_ref", "roles", "job_budgets", "cleanup_timeout_seconds"}
-    optional = {"scheduling", "role_scopes", "required_diversity"}
+    optional = {"scheduling", "role_scopes", "required_diversity", "review_application_lease"}
     if (type(value) is not dict or not base <= set(value) or set(value)-base-optional
-            or value["schema_version"] not in {"research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3"}):
+            or value["schema_version"] not in {"research-execution-profile/v1", "research-execution-profile/v2", "research-execution-profile/v3", "research-execution-profile/v16", "research-execution-profile/v17"}):
         refuse("runtime_profile_unsupported")
     roles = tuple(ExecutionRole(**_fields(row, {"config_ref","role","controller_ref","model_ref","prompt_version"})) for row in value["roles"])
     budget = _fields(value["job_budgets"], {"model_calls","tool_calls","tokens","cost"})
@@ -62,9 +62,16 @@ def _profile(value):
         limits = [ExecutionRoleLimit(row["role"], row["controller_ref"], row["budgets"]["model_calls"], row["budgets"]["tool_calls"],
             row["budgets"]["tokens"], row["budgets"]["cost"], row["budgets"]["seconds"]) for row in data["role_limits"]]
         schedule = ExecutionSchedule(tuple(limits), tuple(data["retry_reasons"]), data["backoff_seconds"], tuple(tuple(row) for row in data["failover"]))
+    application_lease = None
+    if "review_application_lease" in value:
+        from .review_application_lease import ReviewApplicationLease
+        lease = _fields(value["review_application_lease"], {"schema_version", "seconds", "not_after_utc"})
+        application_lease = ReviewApplicationLease(lease["seconds"], lease["not_after_utc"], schema_version=lease["schema_version"])
+        if lease != application_lease.document():
+            refuse("runtime_profile_not_reproduced")
     profile = ExecutionProfile(value["profile_ref"], value["total_steps"], value["currency"], value["pricing_ref"], roles,
         budget["model_calls"], budget["tool_calls"], budget["tokens"], budget["cost"], value["cleanup_timeout_seconds"],
-        schedule=schedule, role_scopes=scopes, required_diversity=tuple(value.get("required_diversity", ())))
+        schedule=schedule, role_scopes=scopes, required_diversity=tuple(value.get("required_diversity", ())), review_application_lease=application_lease)
     if profile.document() != value:
         refuse("runtime_profile_not_reproduced")
     return profile

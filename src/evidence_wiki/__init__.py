@@ -10,7 +10,12 @@ facade tree into every CLI startup to serve callers that never touch it.
 
 from __future__ import annotations
 
+import sys as _sys
 from typing import TYPE_CHECKING, Any
+
+from . import _review_producer as _review_producer_owner
+
+_review_producer_owner.initialize_package(_sys.modules[__name__])
 
 __version__ = "1.1.2"
 
@@ -77,6 +82,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
     "ReadabilityCalibrationSelection": (".readability_plan", "ReadabilityCalibrationSelection"),
     "ReviewServicePlan": (".review_service_policy", "ReviewServicePlan"),
     "ReviewServiceRoute": (".review_service_policy", "ReviewServiceRoute"),
+    "ReviewApplicationLease": (".review_application_lease", "ReviewApplicationLease"),
+    "review_application_window": (".review_application_lease", "review_application_window"),
     "ReviewDelivery": (".review_delivery", "ReviewDelivery"),
     "ProtectedPages": (".review_page_operations", "ProtectedPages"),
     "create_review_context": (".review_context", "create_review_context"),

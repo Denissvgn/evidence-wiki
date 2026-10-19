@@ -1,29 +1,68 @@
 """Current protected source custody around each immutable blinded page read."""
 
+import asyncio
+import copy
 import hashlib
 import re
 import secrets
+import threading
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from evidence_wiki import claim_diagnostics
 from evidence_wiki._facades._base import _translated
 from evidence_wiki._pack_io import canonical, json_document
+from evidence_wiki._review_dependency_json import digest
 from evidence_wiki.host_context import current_context
-from evidence_wiki.mutation_contracts import digest
 from evidence_wiki.mutation_store import capture_revision
+from evidence_wiki.operation_control import OperationControl, checkpoint
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.retrieval_operations import _documents, _ScopedView
 from evidence_wiki.review_context import create_review_context
 
 from .packet_pages import create, refuse
+from .review_material import current_review_material
 from .review_packet_sections import create as create_sections
+
+_MATERIAL = ContextVar("held_review_material", default=None)
+
+
+def _material_task():
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
 
 
 @contextmanager
-def snapshot(root, claim_id, *, source_ids=(), _closing_time=False, _closing_diagnostics=None):
+def _material_scope(root, prepared, material):
+    lifetime = [True]
+    observation = (root, prepared, digest(prepared), current_context(),
+        threading.get_ident(), _material_task(), copy.deepcopy(material), lifetime)
+    token = _MATERIAL.set(observation)
+    try:
+        yield
+    finally:
+        lifetime[0] = False
+        _MATERIAL.reset(token)
+
+
+def _held_material(root, prepared):
+    observed = _MATERIAL.get()
+    if (observed is not None and observed[7][0] and observed[0] == root and observed[1] is prepared
+            and observed[2] == digest(prepared) and observed[3] is current_context()
+            and observed[4] == threading.get_ident() and observed[5] is _material_task()):
+        return copy.deepcopy(observed[6])
+    return current_review_material(root, prepared)
+
+
+@contextmanager
+def snapshot(root, claim_id, *, source_ids=(), context_version="legacy", _closing_time=False, _closing_diagnostics=None):
     """Existing strict and retrieval owners select complete current permitted bytes."""
+    if type(context_version) is not str or context_version not in {"legacy", "complete", "dependencies"}:
+        refuse("context_version_invalid")
     context = current_context()
     if context is None or context.mutation_control_directory is None:
         refuse("current_host_control_required")
@@ -37,7 +76,11 @@ def snapshot(root, claim_id, *, source_ids=(), _closing_time=False, _closing_dia
         if translated is None:
             raise
         raise translated from None
-    selected = list(dict.fromkeys(item["source_id"] for claim in [prepared["snapshot"]["claim"], *prepared["snapshot"]["premises"]]
+    material = current_review_material(root, prepared) if context_version in {"complete", "dependencies"} else None
+    if (prepared.get("review_schema") == "evidence-strict-review/v3") != (context_version == "dependencies"):
+        refuse("context_version_invalid")
+    claims = material["claims"] if material is not None else [prepared["snapshot"]["claim"], *prepared["snapshot"]["premises"]]
+    selected = list(dict.fromkeys(item["source_id"] for claim in claims
         for item in claim["evidence"]))
     computation = prepared["snapshot"].get("computation")
     if computation is not None:
@@ -78,20 +121,25 @@ def snapshot(root, claim_id, *, source_ids=(), _closing_time=False, _closing_dia
                 for identifier, slugs in originals.items()]}
         diagnosed = claim_diagnostics.current(root, proposal)
         counter_instruction = None
-        if source_ids:
+        if material is not None:
+            from evidence_wiki.coverage_observation import observe_questions
+            counter_instruction = observe_questions(root, question_slugs=[
+                question.get("manifest_question", question)["slug"] for question in material["questions"]], source_ids=selected)
+        elif source_ids:
             from evidence_wiki.coverage_observation import observe
             counter_instruction = observe(root, question_slug=prepared["snapshot"]["claim"]["question_slug"], source_ids=selected)
-        yield prepared, sources, diagnosed, counter_instruction, primary
-        if _closing_time:
-            _recheck_time(root, view.config, prepared, inventory, diagnosed, policy, live)
-        if _closing_diagnostics is not None and any(row["result"] != "verified" for claim in diagnosed["claims"] for row in claim["evidence"]):
-            _closing_diagnostics(claim_diagnostics.current(root, proposal))
-        view.recheck_scope()
-        view.finish()
-        if live is not None:
-            live.revalidate(root, view.config)
-        if current_context() is not context or capture_revision(root, excluded=(".locks", "raw/.locks"))["revision_id"] != before:
-            refuse("current_owner_changed")
+        with _material_scope(root, prepared, material) if material is not None else nullcontext():
+            yield prepared, sources, diagnosed, counter_instruction, primary
+            if _closing_time:
+                _recheck_time(root, view.config, prepared, inventory, diagnosed, policy, live)
+            if _closing_diagnostics is not None and any(row["result"] != "verified" for claim in diagnosed["claims"] for row in claim["evidence"]):
+                _closing_diagnostics(claim_diagnostics.current(root, proposal))
+            view.recheck_scope()
+            view.finish()
+            if live is not None:
+                live.revalidate(root, view.config)
+            if current_context() is not context or capture_revision(root, excluded=(".locks", "raw/.locks"))["revision_id"] != before:
+                refuse("current_owner_changed")
 
 
 def _recheck_time(root, config, prepared, inventory, diagnosed, policy, live):
@@ -150,6 +198,7 @@ class ProtectedPages:
     _source_input: str = field(repr=False)
     _section_input: str = field(repr=False)
     _source_ids: tuple = field(repr=False)
+    _context_version: str = field(default="legacy", repr=False)
     _workspace: object = field(default=None, repr=False)
 
     @contextmanager
@@ -160,12 +209,16 @@ class ProtectedPages:
         if context is not self._context:
             refuse("host_selection_changed")
         context.require_grant("review_page_operations.page")
-        with snapshot(self.root, self.claim_id, source_ids=self._source_ids) as (prepared, sources, diagnosed, counter, primary):
+        with snapshot(self.root, self.claim_id, source_ids=self._source_ids, context_version=self._context_version) as (prepared, sources, diagnosed, counter, primary):
             self._check_snapshot(prepared, sources, diagnosed, counter, primary)
             yield prepared
 
     def _check_snapshot(self, prepared, sources, diagnosed, counter, primary):
-        self._review_context.check(prepared["snapshot"], prepared["rubric"], [row for row in sources if row["source_id"] in primary])
+        complete = ({"dependency_material" if self._context_version == "dependencies" else "complete_material": _held_material(self.root, prepared)}
+            if self._context_version in {"complete", "dependencies"} else {})
+        if complete:
+            self._review_context.check_owner(owner_snapshot=prepared["snapshot"], basis_id=prepared.get("claim_basis_id", prepared["result"]["basis_id"]))
+        self._review_context.check(prepared["snapshot"], prepared["rubric"], [row for row in sources if row["source_id"] in primary], **complete)
         if digest(sources) != self._source_input:
             refuse("source_input_changed")
         sections, _binding = create_sections(self._review_context, sources, diagnosed, counter_instruction=counter)
@@ -176,7 +229,7 @@ class ProtectedPages:
         with self.current():
             value = self._pages.header()
         from .review_packet_contracts import validate
-        return validate("research-paged-review/v1", value)
+        return validate(value["schema_version"], value)
 
     def page(self, page_id):
         with self.current():
@@ -192,7 +245,7 @@ class ProtectedPages:
 
 @contextmanager
 def _prepared_snapshot(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(), _order_seed=None,
-        _closing_time=False):
+        _closing_time=False, context_version="legacy"):
     """Keep preparation and private read validation inside current custody."""
     context = current_context()
     if context is None:
@@ -208,40 +261,82 @@ def _prepared_snapshot(root, *, claim_id, context_id, task_role="evaluator", pag
     root = context.require_path(Path(root)).resolve(strict=True)
     def check_closing(diagnostics):
         handle._check_snapshot(prepared, sources, diagnostics, counter, primary)
-    current = snapshot(root, claim_id, source_ids=source_ids, _closing_time=True,
-        _closing_diagnostics=check_closing) if _closing_time else snapshot(root, claim_id, source_ids=source_ids)
+    current = snapshot(root, claim_id, source_ids=source_ids, context_version=context_version, _closing_time=True,
+        _closing_diagnostics=check_closing) if _closing_time else snapshot(root, claim_id, source_ids=source_ids, context_version=context_version)
     with current as (prepared, sources, diagnosed, counter, primary):
-        review = create_review_context(context_id=context_id, task_role=task_role, basis_id=prepared["result"]["basis_id"],
+        complete = {"dependency_material" if context_version == "dependencies" else "complete_material": _held_material(root, prepared)} if context_version in {"complete", "dependencies"} else {}
+        review = create_review_context(context_id=context_id, task_role=task_role, basis_id=prepared.get("claim_basis_id", prepared["result"]["basis_id"]),
             owner_snapshot=prepared["snapshot"], rubric=prepared["rubric"], sources=[row for row in sources if row["source_id"] in primary],
-            order_seed=seed, max_bytes=262144)
+            order_seed=seed, max_bytes=262144, **complete)
         sections, _binding = create_sections(review, sources, diagnosed, counter_instruction=counter)
         pages = create(review, [row for row in sources if row["source_id"] in primary], page_chars=page_chars, sections=sections)
         if len(canonical(pages.header())) > 65536:
             refuse("header_bound")
-        handle = ProtectedPages(root, claim_id, context, review, pages, digest(sources), digest(sections), tuple(source_ids))
+        handle = ProtectedPages(root, claim_id, context, review, pages, digest(sources), digest(sections), tuple(source_ids), context_version)
         yield handle, (prepared, sources, diagnosed, counter, primary)
 
 
-def prepare(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(), _order_seed=None):
+def prepare(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(), _order_seed=None, context_version="legacy"):
     """Pin complete actual owner inputs; stored identity grants no source access."""
     with _prepared_snapshot(root, claim_id=claim_id, context_id=context_id, task_role=task_role,
-            page_chars=page_chars, source_ids=source_ids, _order_seed=_order_seed) as (handle, _snapshot):
+            page_chars=page_chars, source_ids=source_ids, _order_seed=_order_seed, context_version=context_version) as (handle, _snapshot):
         pass
     return handle
 
 
-@contextmanager
-def _current_packet(root, *, packet, claim_id, context_id, task_role, page_chars, source_ids, _order_seed):
-    """Compare retained header and all pages without exporting a held approval."""
+def _collect_packet(root, *, claim_id, context_id, task_role="evaluator", page_chars=4096, source_ids=(),
+        context_version="legacy", max_packet_bytes=196608, _order_seed=None, _control=None):
+    """Collect one inert packet before closing its single current-owner scope."""
+    if type(max_packet_bytes) is not int or not 4096 <= max_packet_bytes <= 196608:
+        refuse("packet_bound")
+    # Arbitrary host callbacks must never execute inside held source custody.
+    if type(_control) is OperationControl and _control._native._cancel_requested is not None:
+        refuse("packet_operation_control_invalid")
+    checkpoint(_control, "before_packet_collection")
+    version = "v3" if context_version == "dependencies" else "v2" if context_version == "complete" else "v1"
     with _prepared_snapshot(root, claim_id=claim_id, context_id=context_id, task_role=task_role,
-            page_chars=page_chars, source_ids=source_ids, _order_seed=_order_seed, _closing_time=True) as (handle, current):
+            page_chars=page_chars, source_ids=source_ids, context_version=context_version, _order_seed=_order_seed,
+            _closing_time=True) as (handle, current):
         context = current_context()
         if context is not handle._context:
             refuse("host_selection_changed")
         context.require_grant("review_page_operations.page")
         handle._check_snapshot(*current)
         from .review_packet_contracts import validate
-        header = validate("research-paged-review/v1", handle._pages.header())
+        header = validate("research-paged-review/" + version, handle._pages.header())
+        pages = []
+        for row in header["pages"]:
+            checkpoint(_control, "before_required_page")
+            page = validate("research-review-page/v1", handle._pages.page(row["page_id"]))
+            checkpoint(_control, "after_required_page")
+            pages.append(page)
+        complete = handle._pages.completeness(pages)
+        packet = validate("research-review-packet/" + version, {"schema_version": "research-review-packet/" + version,
+            "header": header, "pages": pages, "complete": complete})
+        if not complete["complete"]:
+            refuse("decisive_context_incomplete")
+        if len(canonical(packet)) > max_packet_bytes:
+            refuse("complete_packet_requires_supported_paging_executor")
+    if current_context() is not context:
+        refuse("host_selection_changed")
+    context.require_grant("review_page_operations.prepare")
+    context.require_grant("review_page_operations.page")
+    checkpoint(_control, "after_packet_collection")
+    return packet
+
+
+@contextmanager
+def _current_packet(root, *, packet, claim_id, context_id, task_role, page_chars, source_ids, _order_seed, context_version="legacy"):
+    """Compare retained header and all pages without exporting a held approval."""
+    with _prepared_snapshot(root, claim_id=claim_id, context_id=context_id, task_role=task_role,
+            page_chars=page_chars, source_ids=source_ids, _order_seed=_order_seed, _closing_time=True, context_version=context_version) as (handle, current):
+        context = current_context()
+        if context is not handle._context:
+            refuse("host_selection_changed")
+        context.require_grant("review_page_operations.page")
+        handle._check_snapshot(*current)
+        from .review_packet_contracts import validate
+        header = validate(handle._pages.header()["schema_version"], handle._pages.header())
         if (header != packet["header"] or handle._pages.completeness(packet["pages"]) != packet["complete"]
                 or not packet["complete"]["complete"]):
             refuse("decisive_context_incomplete_or_stale")

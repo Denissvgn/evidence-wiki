@@ -12,7 +12,7 @@ from evidence_wiki import HostRuntime, Workspace
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.research_command_contracts import RESULT, checked
 from tools._acceptance_protocol import digest as native_digest
-from tools._integration_improvement import OwnerEvidence, OwnerReader
+from tools._integration_improvement import OwnerEvidence, OwnerReader, validate_execution_scope
 from tools._release_decision import OriginalCitation, _original, _time, digest
 from tools._repeated_integration_host import (
     CYCLES,
@@ -188,6 +188,7 @@ def host_readers(plan, originals, *, expected_control_root=None):
     authentication and current acceptance. Reference facts and model meters are
     synthetic; local integration execution and host elapsed time are observed.
     """
+    validate_execution_scope(plan)
     if type(originals) is not dict or set(originals) - {h["host_id"] for h in plan["hosts"]}:
         raise ValueError("integration_original_selection")
     if expected_control_root is not None and len(originals) != 1:
@@ -220,10 +221,25 @@ def host_readers(plan, originals, *, expected_control_root=None):
                             "--expected-plan", digest(plan), "--host", host["route"], "--directory", str(path.parent)]
                         or observation["plan"]["binding"] != {"integration_plan_sha256": digest(plan)}):
                     raise ValueError("integration_original_producer_selection")
+                scope_options = {}
+                if plan["scope"].get("native_cleanup_recipe") == "owned-popen-groups/v2":
+                    scope_options = {"native_child_scope": {"plan_sha256": digest(plan), "stage": "run-primary-" + host["route"]}}
                 verified = read_command_receipt(observation["plan"], observation["attempt_id"], observation["argv"],
                     observer_key=read_private(Path(observation["observer_key_path"]), 128),
                     directory=observation["directory"], work_root=observation["work_root"],
-                    expected_receipt_sha256=observation["expected_receipt_sha256"])
+                    expected_receipt_sha256=observation["expected_receipt_sha256"], **scope_options)
+                if scope_options:
+                    from tools.measure_integration_costs import producer_cleanup_proof
+                    from tools.run_native_owner_feasibility import verify_child_registry
+                    certificate = verified["receipt"].get("producer_completion")
+                    if type(certificate) is not dict or type(certificate.get("worker_pid")) is not int:
+                        raise ValueError("cost_producer_completion_invalid")
+                    worker_pid = certificate["worker_pid"]
+                    stage = scope_options["native_child_scope"]["stage"]
+                    producer = producer_cleanup_proof(verified, worker_pid=worker_pid,
+                        plan_sha256=digest(plan), stage=stage)
+                    verify_child_registry(Path(plan["scope"]["native_child_control_directory"]) / "children" / (stage + ".jsonl"),
+                        plan=plan, stage=stage, worker_pid=worker_pid, producer_cleanup=producer)
                 if not verified["current_command_manifest_matches"]:
                     raise ValueError("integration_original_command_changed")
                 if digest(_original(read_private(Path(argv[4]), 1_048_576))) != digest(plan):
@@ -260,6 +276,15 @@ def host_readers(plan, originals, *, expected_control_root=None):
                     workspace, factory = Path(report["workspace"]), Path(report["factory"])
                     if workspace != path.parent / "fixture/workspace" or factory != path.parent / "fixture/fixture-private/services.py":
                         raise ValueError("integration_original_native_paths")
+                    if "execution_policy" in plan["scope"]:
+                        from evidence_wiki._native_owner_execution import validate_fixture_authority
+                        services = _original(read_private(factory.parent / "finite-services.json", 1_048_576))
+                        authority = validate_fixture_authority(services.get("execution_authority"))
+                        if (authority["execution_policy"] != plan["scope"]["execution_policy"]
+                                or authority["study_frozen_at"] != plan["frozen_at"]
+                                or authority["study_expires_at"] != plan["expires_at"]
+                                or services.get("expires_utc") != authority["expires_at"]):
+                            raise ValueError("integration_current_execution_authority_changed")
                     runtime = HostRuntime.from_factory(factory, workspace)
                     if expected_control_root is not None:
                         expected = Path(expected_control_root)

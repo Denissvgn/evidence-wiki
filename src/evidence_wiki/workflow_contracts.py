@@ -24,6 +24,10 @@ JOB = "research-host-job/v1"
 JOB_V2 = "research-host-job/v2"
 JOB_V3 = "research-host-job/v3"
 JOB_V4 = "research-host-job/v4"
+JOB_V5 = "research-host-job/v5"
+JOB_V6 = "research-host-job/v6"
+MAX_APPLICATION_LEASE_SECONDS = 1800
+MAX_EXTENDED_APPLICATION_LEASE_SECONDS = 3600
 EXECUTION_OBSERVATION = "research-execution-observation/v1"
 RESULT = "research-host-result/v1"
 DECISION = "research-decision/v1"
@@ -270,6 +274,17 @@ def _build_schemas() -> dict[str, dict[str, Any]]:
     for branch in job_v4["anyOf"]:
         branch["properties"]["schema_version"] = {"const": JOB_V4}
         branch["properties"]["task_role"]["enum"].append("calculation")
+    job_v5 = copy.deepcopy(job_v4)
+    job_v5["anyOf"] = [branch for branch in job_v5["anyOf"]
+        if branch["properties"]["operation"].get("const") == "evaluate"]
+    for branch in job_v5["anyOf"]:
+        branch["properties"]["schema_version"] = {"const": JOB_V5}
+        branch["properties"].update(application_started_utc=utc, application_deadline_utc=utc)
+        branch["required"].extend(["application_started_utc", "application_deadline_utc"])
+    job_v6 = copy.deepcopy(job_v5)
+    for branch in job_v6["anyOf"]:
+        branch["properties"]["schema_version"] = {"const": JOB_V6}
+        branch["properties"]["task_role"] = {"enum": ["evaluator", "critic"]}
     # A whole-brief purpose has no claim target. Keep old job branches intact
     # and add two closed scoped evaluator alternatives, never an open payload.
     evaluation = next(branch for branch in job_v3["anyOf"]
@@ -283,7 +298,7 @@ def _build_schemas() -> dict[str, dict[str, Any]]:
         branch["properties"]["payload"] = _object(**fields)
         job_v3["anyOf"].append(branch)
     return copy.deepcopy({name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
-                          for name, shape in ((JOB, job), (JOB_V2, job_v2), (JOB_V3, job_v3), (JOB_V4, job_v4), (RESULT, result), (DECISION, decision))})
+                          for name, shape in ((JOB, job), (JOB_V2, job_v2), (JOB_V3, job_v3), (JOB_V4, job_v4), (JOB_V5, job_v5), (JOB_V6, job_v6), (RESULT, result), (DECISION, decision))})
 
 
 @lru_cache(maxsize=1)
@@ -415,12 +430,18 @@ def _utc(value: str, field: str) -> datetime:
 
 
 def _semantic(name: str, value: dict[str, Any]) -> None:
-    if name in {JOB, JOB_V2, JOB_V3, JOB_V4}:
+    if name in {JOB, JOB_V2, JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
         issued = _utc(value["issued_utc"], "/issued_utc")
         deadline = _utc(value["deadline_utc"], "/deadline_utc")
         lease = (deadline - issued).total_seconds()
         if not 0 < lease <= MAX_LEASE_SECONDS or value["timeout_seconds"] > lease:
             _refuse("INVALID", "/deadline_utc")
+        if name in {JOB_V5, JOB_V6}:
+            started = _utc(value["application_started_utc"], "/application_started_utc")
+            application_end = _utc(value["application_deadline_utc"], "/application_deadline_utc")
+            application_limit = MAX_APPLICATION_LEASE_SECONDS if name == JOB_V5 else MAX_EXTENDED_APPLICATION_LEASE_SECONDS
+            if not started <= issued < application_end or not deadline <= application_end or not 0 < (application_end - started).total_seconds() <= application_limit:
+                _refuse("INVALID", "/application_deadline_utc")
         if value["operation"] == "generate" and value["original_text"] != value["payload"]["question"]:
             _refuse("INVALID", "/original_text")
         for field in ("scope", "required_capabilities"):
@@ -520,7 +541,7 @@ def validate_job(value: Any, *, now_utc: str, parent_job: Any = None) -> dict[st
     the clock, references or the caller's stored parent.
     """
     name = value.get("schema_version") if type(value) is dict else JOB
-    if name not in {JOB, JOB_V2, JOB_V3, JOB_V4}:
+    if name not in {JOB, JOB_V2, JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
         _refuse("VERSION_UNSUPPORTED", "/schema_version")
     job = validate_document(name, value)
     now = _utc(now_utc, "/now_utc")

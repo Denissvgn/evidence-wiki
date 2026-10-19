@@ -3,11 +3,11 @@
 from copy import deepcopy
 
 from .mutation_contracts import digest
-from .resolution_contracts import RESOLUTION, checked, refuse
+from .resolution_contracts import DEPENDENCY_RESOLUTION, RESOLUTION, checked, refuse
 
 
 def _eligible_content(question):
-    """Copy allowed canonical content without private global proof commitments."""
+    """Copy canonical content and public provenance without review attestations."""
     value = deepcopy(question)
     for claim in value["claims"]:
         claim.pop("verification", None)
@@ -27,12 +27,14 @@ def _project(*, run_id, binding_id, current, policy_document, policy_observation
         refuse("resolution_original_accounting_conflict")
     release = current["canonical_release"]
     publication = release["publication"]
+    version = (DEPENDENCY_RESOLUTION if publication is not None
+        and publication.get("schema_version") == "evidence-strict-publication/v3" else RESOLUTION)
     blockers = list(release["gaps"])
     if accounting["accounting_complete"] is not True or set(by_original) != set(wanted):
         blockers.append("original_accounting_incomplete")
     if not current["policy_compatible"]:
         blockers.append("frozen_policy_incompatible")
-    if publication is None or publication.get("schema_version") not in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+    if publication is None or publication.get("schema_version") not in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
         blockers.append("current_strict_publication_unavailable")
         publication = None
     elif publication.get("selection_complete") is not True:
@@ -102,7 +104,7 @@ def _project(*, run_id, binding_id, current, policy_document, policy_observation
     eligible_ids = {row["original_id"] for row in rows if row["outcome"] in {"accept", "partial"}}
     # The complete native publication and its proof commitments stay private.
     run = lifecycle or {}
-    return checked({"schema_version": RESOLUTION, "run_id": run_id, "binding_id": binding_id,
+    return checked({"schema_version": version, "run_id": run_id, "binding_id": binding_id,
         "current_basis_id": digest({"schema_version": "resolution-visible-basis/v1", "rows": rows}) if eligible_ids and not blockers else None,
         "publication_basis_id": None,
         "policy_id": current["policy_id"], "verdict": "accept" if len(eligible_ids) == len(rows) and all(row["outcome"] == "accept" for row in rows)

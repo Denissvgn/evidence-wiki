@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from evidence_wiki import change_operations
+from evidence_wiki._review_dependency_json import canonical, detached
 from evidence_wiki.errors import UsageError
 from evidence_wiki.host_context import HostContext, current_context
-from evidence_wiki.mutation_contracts import canonical, detached
 from evidence_wiki.pack_discovery import owner
 
 MAX_BYTES = 1_048_576
@@ -43,6 +43,7 @@ def _project(result, live, changes):
             if any(dimension["state"] in {"denied", "unavailable"} for dimension in row["dimensions"].values()):
                 uncertain.update((row["before_source_id"], row["after_source_id"]))
     rows = []
+    selective = result["schema_version"] == "evidence-strict-result/v3"
     for selected in result["claims"]:
         claim = selected["claim"]
         premises, pending = set(), list(claim["premises"])
@@ -56,8 +57,12 @@ def _project(result, live, changes):
         direct = {item["source_id"] for item in claim["evidence"]}
         sources = direct | {item["source_id"] for identifier in premises if identifier in claims
             for item in claims[identifier]["evidence"]}
-        retained = [record for record in live.state.strict_reviews.values()
-            if record["envelope"]["payload"]["body"]["review"]["claim_id"] == claim["id"]]
+        if selective:
+            identifier = selected["review"].get("review_id")
+            retained = [record for key, record in live.state.strict_reviews.items() if key == identifier]
+        else:
+            retained = [record for record in live.state.strict_reviews.values()
+                if record["envelope"]["payload"]["body"]["review"]["claim_id"] == claim["id"]]
         latest = retained[-1] if retained else None
         differences = []
         retained_source_changes = set()
@@ -65,7 +70,7 @@ def _project(result, live, changes):
         if latest is not None:
             payload = latest["envelope"]["payload"]["body"]["review"]
             snapshot = payload["snapshot"]
-            basis_changed = payload["basis_id"] != result["basis_id"]
+            basis_changed = payload["basis_id"] != (selected["claim_basis_id"] if selective else result["basis_id"])
             retained_source_changes = {identifier for identifier in sources
                 if snapshot["source_revisions"].get(identifier) != result["source_revisions"].get(identifier)}
             if retained_source_changes:
@@ -74,13 +79,13 @@ def _project(result, live, changes):
                     ("premises", snapshot["premises"], [claims[name] for name in claim["premises"]]),
                     ("question", snapshot["question"], next(q for q in result["questions"] if q["slug"] == claim["question_slug"])),
                     ("policy", snapshot["policy"], result.get("effective_policy")),
-                    ("implementation", payload["observation"]["producer_id"], result["producer_id"]),
+                    ("implementation", payload["observation"]["producer_id"], result["review_producer_id"] if selective else result["producer_id"]),
                     ("permission", latest["authority"]["content_hash"], live.trust["content_hash"])):
                 if before != after:
                     differences.append(label)
         invalidation_reasons = []
         if basis_changed is True:
-            invalidation_reasons.append("whole_workspace_review_basis_changed")
+            invalidation_reasons.append("claim_dependency_review_basis_changed" if selective else "whole_workspace_review_basis_changed")
         if "permission" in differences:
             invalidation_reasons.append("global_review_authority_changed")
         rows.append({"claim_id": claim["id"], "question_slug": claim["question_slug"],
@@ -100,10 +105,10 @@ def _project(result, live, changes):
         "claims": rows, "requires_review_claim_ids": [row["claim_id"] for row in rows if row["requires_review"]],
         "conservatively_invalidated_claim_ids": [row["claim_id"] for row in rows if row["conservative_invalidation"]],
         "changes": changes, "global_dependencies": list(GLOBAL_DEPENDENCIES),
-        "approval_basis": "whole_workspace_native_strict", "selective_approval_reuse": False,
+        "approval_basis": "claim_dependencies_native_strict" if selective else "whole_workspace_native_strict", "selective_approval_reuse": selective,
         "legacy_assessments": "not_strict_approval; use assessment refresh only under its own contract",
         "coverage": {"claims_total": len(rows), "claims_returned": len(rows), "truncated": False,
-            "dependencies": "declared_current_claim_edges; not_complete_selective_review_bases",
+            "dependencies": "native_claim_dependencies" if selective else "declared_current_claim_edges; not_complete_selective_review_bases",
             "changes": "selected_local_comparisons" if changes is not None else "not_requested",
             "unattributed_basis_changes": any(row["retained_review_basis_changed"] is True for row in rows),
             "attribution": "partial; complete historical workspace delta unavailable",

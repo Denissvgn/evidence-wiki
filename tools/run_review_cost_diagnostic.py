@@ -183,12 +183,13 @@ def run_diagnostic(plan, expected_plan, directory):
                     artifacts[name] = value
                     report["input_pins"].append(retain(directory / "inputs" / name, raw, raw=True))
                 root, runtime, _, _, _ = provision(directory / "fixture", artifacts["fresh-fixture-input.json"]["fixture"],
-                    originals, run_seconds=1560, allocation_binding={"plan_sha256": expected_plan,
+                    originals, children=tracker, run_seconds=1560, allocation_binding={"plan_sha256": expected_plan,
                         "candidate_sha256": plan["candidate_sha256"], "study": report["study"],
                         "assignments": rows, "phase_caps": plan["phase_caps"], "profile_enabled": plan["profile_enabled"]})
                 report["reference_checks"] = 200
                 retain(directory / "realized-input-manifest.json", file_manifest(root))
             phase("setup", setup)
+            tracker.confirm_completed()
 
             def review_group():
                 nonlocal opened
@@ -203,7 +204,8 @@ def run_diagnostic(plan, expected_plan, directory):
                     with profile if profile is not None else nullcontext():
                         entered = True
                         workload.drive(root, runtime, "direct", run_id, originals, case_id=CASE_ID,
-                            claim_ids={CLAIM_ID}, job_cap_seconds=JOB_CAP_SECONDS, job_elapsed=report["job_elapsed"])
+                            claim_ids={CLAIM_ID}, job_cap_seconds=JOB_CAP_SECONDS, job_elapsed=report["job_elapsed"], children=tracker)
+                        tracker.confirm_completed()
                 except (Exception, SystemExit, _HostDeadline) as error:
                     drive_error = error
                     raise
@@ -222,6 +224,7 @@ def run_diagnostic(plan, expected_plan, directory):
                         report["instrumentation"]["status"] = "unavailable"
                 observe()
             phase("review_group", review_group)
+            tracker.confirm_completed()
     except (Exception, SystemExit, _HostDeadline) as error:
         fail(error)
     finally:

@@ -42,11 +42,13 @@ from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
 REVIEWERS = (('evidence', 'evaluator'), ('scope', 'evaluator'), ('critic', 'critic'), ('adjudicator', 'adjudicator'))
 
 
-def provision(base, *, observation_sink=None, run_seconds=1800):
+def provision(base, *, observation_sink=None, run_seconds=1800, execution_policy=None,
+        study_frozen_at=None, study_expires_at=None, child_tracker=None):
     """Create the finite fixture once; restore retains its exact keys and IDs."""
     from fixture_host import provision as create
     return create(base, 'Assess the exact declared finite observation for fixture-cohort at fixture-observation.',
-        finite=True, observation_sink=observation_sink, run_seconds=run_seconds)
+        finite=True, observation_sink=observation_sink, run_seconds=run_seconds, execution_policy=execution_policy,
+        study_frozen_at=study_frozen_at, study_expires_at=study_expires_at, child_tracker=child_tracker)
 
 
 def configuration(profile, config):
@@ -60,7 +62,12 @@ def configuration(profile, config):
         'domain_descriptor_sha256': digest(DESCRIPTOR), 'domains': [DOMAIN], 'active': True, 'execution_kind': 'model'}
 
 
-def selections(document):
+def selections(document, *, child_tracker=None):
+    if 'execution_authority' in document:
+        from evidence_wiki._native_owner_execution import validate_fixture_authority
+        bound = validate_fixture_authority(document['execution_authority'])
+        if document['expires_utc'] != bound['expires_at'] or document['policy']['budgets']['seconds'] != bound['run_seconds']:
+            raise ValueError('Finite fixture authority binding differs.')
     root = Path(document['root'])
     worker = Path(document['worker'])
     required = [{'role': role, 'profile_ref': name, 'controller_ref': name+'-controller', 'human_required': False}
@@ -81,7 +88,7 @@ def selections(document):
         calibration=calibration, semantic_judging=SemanticJudgingPlan('evidence','scope','critic'))
     keys = {name: bytes.fromhex(value) for name, value in document['keys'].items()}
     commands = {role.config_ref: [document['interpreter'], str(worker), role.config_ref] for role in roles}
-    executor = BoundedSubprocessExecutor(profile,commands=commands,cwd=Path(document['workers']),receipt_key=keys['receipt'],meter=FixtureMeter())
+    executor = BoundedSubprocessExecutor(profile,commands=commands,cwd=Path(document['workers']),receipt_key=keys['receipt'],meter=FixtureMeter(child_tracker))
     executor.calibration_configuration = lambda name: configuration(profile,name)
     executor.qualification_configuration = lambda request: {'request': copy.deepcopy(request), 'configuration': configuration(profile,request['config_ref'])}
     authority = CalibrationAuthority('fixture-finite-issuer',keys['qualifier'],'generator-controller')
@@ -94,12 +101,15 @@ def selections(document):
     return policy, profile, suite, executor, authority, signer, context
 
 
-def provision_services(root, private, control, workers, keys, policy, rubric, until, *, observation_sink=None):
+def provision_services(root, private, control, workers, keys, policy, rubric, until, *, observation_sink=None, child_tracker=None,
+        execution_authority=None):
     document = {'root': str(root), 'private': str(private), 'control': str(control), 'workers': str(workers),
         'worker': str(Path(__file__).with_name('finite_workers.py').resolve()), 'interpreter': sys.executable,
         'policy': policy.to_dict(), 'rubric': rubric, 'expires_utc': until,
         'keys': {name: value.hex() for name, value in keys.items() if type(value) is bytes}, 'qualification_records': []}
-    selected, profile, suite, executor, authority, _signer, _context = selections(document)
+    if execution_authority is not None:
+        document['execution_authority'] = execution_authority
+    selected, profile, suite, executor, authority, _signer, _context = selections(document, child_tracker=child_tracker)
     job_budgets = profile.document()['job_budgets']
     private_write(private/'reference-observations.jsonl',b'')
     def retain(attempt, observed):
@@ -128,7 +138,7 @@ def provision_services(root, private, control, workers, keys, policy, rubric, un
                 binding_id='fixture-finite-reference',profile=profile,config_ref=config,job=job,input_document=case['input_document'])
             # Select the current logical case identity through host-owned argv.
             reference_executor = BoundedSubprocessExecutor(profile, commands={config:[document['interpreter'],document['worker'],config,case['case_id']]},
-                cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter())
+                cwd=workers,receipt_key=keys['receipt'],meter=FixtureMeter(child_tracker))
             reference_executor.calibration_configuration = executor.calibration_configuration
             retain(attempt,{'state':'reserved','attempt_id':attempt.attempt_id,'start_observed':False})
             try:
@@ -143,6 +153,8 @@ def provision_services(root, private, control, workers, keys, policy, rubric, un
             authenticated = reference_executor.authenticate(observed,attempt)
             if authenticated != initial:
                 retain(attempt,authenticated)
+            if child_tracker is not None:
+                child_tracker.confirm_completed()
             observations.append((attempt,authenticated))
         record = authority.issue(selected,profile,config,suite,observations,executor,
             observed_utc=datetime.now(timezone.utc).isoformat(),expires_utc=until,verification_seconds=30,auxiliary=task_role=='adjudicator')
@@ -153,7 +165,7 @@ def provision_services(root, private, control, workers, keys, policy, rubric, un
     factory = ('import sys\nfrom pathlib import Path\nsys.path.insert(0,'+repr(str(Path(__file__).parent))+')\n'
         'from finite_host import restore\ndef build_runtime(root):\n    return restore(root,Path('+repr(str(private/'finite-services.json'))+'))\n')
     private_write(private/'services.py',factory.encode())
-    return restore(root,private/'finite-services.json')
+    return restore(root,private/'finite-services.json',child_tracker=child_tracker)
 
 
 def refresh_current(runtime, root, run_id):
@@ -174,7 +186,7 @@ def refresh_current(runtime, root, run_id):
     return True
 
 
-def restore(root, path, *, current_run_id=None):
+def restore(root, path, *, current_run_id=None, child_tracker=None):
     supplied = Path(path).absolute()
     if '..' in supplied.parts or supplied.is_symlink():
         raise ValueError('Finite host configuration path is linked or unsafe.')
@@ -211,7 +223,7 @@ def restore(root, path, *, current_run_id=None):
     document = json.loads(raw)
     if Path(document['root']).resolve()!=Path(root).resolve():
         raise ValueError('Finite factory root differs from the selected workspace.')
-    policy, _profile, _suite, executor, authority, signer, context = selections(document)
+    policy, _profile, _suite, executor, authority, signer, context = selections(document, child_tracker=child_tracker)
     execution = ResearchExecution(executor,qualifications=CalibratedEvaluators(document['qualification_records'],authority),
         review_signer=signer,observer_key=bytes.fromhex(document['keys']['observer']))
     runtime = HostRuntime.from_services(policy,context,execution)

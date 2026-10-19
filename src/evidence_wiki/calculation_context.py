@@ -51,10 +51,12 @@ def check_projection(projection, result, source_aliases):
     return digest(projection)
 
 
-def schema_document():
+def schema_document(native=None):
     """Publish the complete redacted decisive packet shape."""
-    from .pack_discovery import owner
-    native = owner("_computation_contract").schemas()["evidence-computation-result/v1"]["properties"]
+    if native is None:
+        from .pack_discovery import owner
+        native = owner("_computation_contract").schemas()
+    native = native["evidence-computation-result/v1"]["properties"]
     hashed = native["result_id"]
     source = {"type":"object", "properties":{"source_id":{"type":"string", "pattern":r"^source-[1-9][0-9]?$"},
         "record_sha256":hashed, "structured_sha256":hashed, "source_revision":{"anyOf":[hashed, {"type":"null"}]}},

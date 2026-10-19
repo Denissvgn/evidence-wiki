@@ -64,6 +64,7 @@ exclude = [
   "/temp_workspace",
   "/venv",
   "*.egg-info",
+  "*.orig",
   "*.pyc",
   "__pycache__",
   "*-smoke-test",

@@ -392,18 +392,29 @@ class HostReviewSigner:
         auth = {"schema_version": "evidence-authentication/v1", "scheme": "hmac-sha256", "principal": identity.principal,
             "key_id": identity.key_id, "role": identity.role, "policy_id": self.authority_policy_id,
             "policy_revision": self.authority_revision, "issued_at": now, "expires_at": self.expires_utc}
-        auth["signature"] = hmac.new(identity.key, b"evidence-attestation/v1\0" + _json({"payload": payload,
-            "authentication": auth}) + b"\n", hashlib.sha256).hexdigest()
-        return {"payload": json.loads(_json(payload)), "authentication": auth}
+        unsigned = _json({"payload": payload, "authentication": auth})
+        auth["signature"] = hmac.new(identity.key, b"evidence-attestation/v1\0" + unsigned
+            + b"\n", hashlib.sha256).hexdigest()
+        return {"payload": json.loads(unsigned)["payload"], "authentication": auth}
 
-    def authorship(self, basis_id, claim_id, now_utc):
+    def authorship(self, basis_id, claim_id, now_utc, *, claim_schema_version=None,
+            observed_workspace_basis_id=None, semantic_material_id=None):
         _ref(claim_id)
         if type(basis_id) is not str or re.fullmatch(r"sha256:[a-f0-9]{64}", basis_id) is None:
             _fail("review_authorship_basis_invalid")
-        return self._sign({"schema_version": "evidence-strict-authorship/v1", "basis_id": basis_id,
-                           "claim_id": claim_id}, self.generator, now_utc)
+        payload = {"schema_version": "evidence-strict-authorship/v1", "basis_id": basis_id, "claim_id": claim_id}
+        if claim_schema_version is not None:
+            if claim_schema_version not in {"evidence-strict-claims/v1", "evidence-strict-claims/v2"} or any(
+                    type(value) is not str or re.fullmatch(r"sha256:[a-f0-9]{64}", value) is None
+                    for value in (observed_workspace_basis_id, semantic_material_id)):
+                _fail("review_authorship_basis_invalid")
+            payload.update(schema_version="evidence-strict-authorship/v2", claim_schema_version=claim_schema_version,
+                observed_workspace_basis_id=observed_workspace_basis_id, semantic_material_id=semantic_material_id)
+        elif observed_workspace_basis_id is not None or semantic_material_id is not None:
+            _fail("review_authorship_basis_invalid")
+        return self._sign(payload, self.generator, now_utc)
 
-    def registration(self, prepared, verdicts, rationale, request_id, now_utc, *, config_ref=None):
+    def registration(self, prepared, verdicts, rationale, request_id, now_utc, *, config_ref=None, delivery=None):
         from .pack_discovery import owner
 
         contract = owner("_strict_contract")
@@ -419,23 +430,37 @@ class HostReviewSigner:
         if identity is None:
             _fail("review_signing_profile_unavailable")
         try:
-            return self._prepared_envelope(prepared, verdicts, rationale, request_id, now_utc, identity, contract)
+            return self._prepared_envelope(prepared, verdicts, rationale, request_id, now_utc, identity, contract, delivery=delivery)
         except QualificationError:
             raise
         except (KeyError, TypeError, IndexError, AttributeError, ValueError):
             _fail("review_prepared_invalid")
 
-    def _prepared_envelope(self, prepared, verdicts, rationale, request_id, now_utc, identity, contract):
+    def _prepared_envelope(self, prepared, verdicts, rationale, request_id, now_utc, identity, contract, *, delivery=None):
         command = prepared["registration"]
         if command["action"] != "register-strict-review" or prepared["snapshot"]["policy"]["human_review"]:
             _fail("review_human_role_incompatible")
         claim_id, basis_id = prepared["snapshot"]["claim"]["id"], prepared["result"]["basis_id"]
+        selective = prepared["review_schema"] == "evidence-strict-review/v3"
+        if selective:
+            basis_id = prepared["claim_basis_id"]
+            if type(delivery) is not dict or delivery.get("semantic_material_id") != prepared["semantic_material_id"]:
+                _fail("review_delivery_required")
+        elif delivery is not None:
+            _fail("review_delivery_version_invalid")
         row = next((row for row in prepared["result"]["claims"] if row["claim"]["id"] == claim_id), None)
         if row is None or row["claim"] != prepared["snapshot"]["claim"]:
             _fail("review_prepared_claim_mismatch")
+        authorship = ({"claim_schema_version": prepared["claim_schema_version"],
+            "observed_workspace_basis_id": prepared["observed_workspace_basis_id"],
+            "semantic_material_id": prepared["semantic_material_id"]} if selective else {})
         payload = {"schema_version": prepared["review_schema"], "basis_id": basis_id, "claim_id": claim_id,
-            "generator": self.authorship(basis_id, claim_id, now_utc), "verdicts": dict(verdicts), "rationale": rationale,
+            "generator": self.authorship(basis_id, claim_id, now_utc, **authorship), "verdicts": dict(verdicts), "rationale": rationale,
             "reviewed_at": now_utc, "observation": row["observation"], "snapshot": prepared["snapshot"]}
+        if selective:
+            payload.update(review_basis_mode="claim_dependencies_v1", claim_schema_version=prepared["claim_schema_version"],
+                observed_workspace_basis_id=prepared["observed_workspace_basis_id"], dependency_basis=prepared["dependency_basis"],
+                delivery=json.loads(_json(delivery)))
         contract.review_document(payload)
         command["request_id"] = request_id
         command["body"]["review"] = payload

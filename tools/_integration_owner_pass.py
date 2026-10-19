@@ -25,7 +25,12 @@ from tools._release_decision import OriginalCitation, _original, bounded_json, c
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_FILES = ("tools/_integration_owner_pass.py", "tools/read_integration_owner.py",
                 "tools/_integration_improvement.py", "tools/_integration_improvement_owners.py",
-                "tools/run_repeated_integrations.py", "tools/replay_qualification_native.py")
+                "tools/run_repeated_integrations.py", "tools/replay_qualification_native.py",
+                "tools/_native_owner_execution.py", "src/evidence_wiki/_native_owner_execution.py",
+                "tools/_native_child_registry.py", "tools/_command_completion.py",
+                "src/evidence_wiki/_process_groups.py",
+                "tools/measure_integration_costs.py", "tools/_repeated_integration_host.py",
+                "examples/unattended-host/fixture_host.py", "examples/unattended-host/finite_host.py")
 MAX_REQUEST_BYTES = 1_048_576
 MAX_RAW_BYTES = 1_048_576
 MAX_FRAME_BYTES = 2_097_152
@@ -170,6 +175,12 @@ def _group_alive(process):
 
 def _stop_group(process):
     """Confirm both leader reaping and disappearance of its process group."""
+    from evidence_wiki._process_groups import ownership_for
+
+    guard = ownership_for(process)
+    if guard is not None:
+        guard.stop()
+        return
     if process.poll() is not None and not _group_alive(process):
         return
     try:

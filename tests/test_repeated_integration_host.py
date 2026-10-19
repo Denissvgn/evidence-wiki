@@ -171,55 +171,88 @@ def test_review_burden_includes_applied_adjudication_and_preserves_dispatch_scop
 
 
 @pytest.mark.parametrize("operation", ["run-cycle", "brief", "report"])
-def test_mcp_original_remaining_allowance_cancels_blocked_public_call(operation, tmp_path):
+@pytest.mark.parametrize("stopped", ["expired", "cancelled"])
+def test_mcp_original_control_stops_blocked_public_call(operation, stopped, tmp_path, monkeypatch):
+    import threading
+    from datetime import datetime, timedelta, timezone
+
+    from evidence_wiki import OperationControl
+
     route = object.__new__(host.Routes)
     route.root, route.route, route.calls = tmp_path, "scoped_mcp", []
-    checkpoints, remaining_names, observed = [], [], []
-    class Control:
-        def checkpoint(self, name):
-            checkpoints.append(name)
-            if name == "reference_route_after_call":
-                raise TimeoutError("original allowance exhausted")
-        def remaining_seconds(self, name):
-            remaining_names.append(name)
-            return 0.02
+    checkpoints, observed = [], []
+    cancellation = threading.Event()
+    borrowed = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+        timeout_seconds=0.05 if stopped == "expired" else 60,
+        cancel_requested=cancellation.is_set if stopped == "cancelled" else None)
+    original_checkpoint = borrowed.checkpoint
+
+    def checkpoint(name):
+        checkpoints.append(name)
+        original_checkpoint(name)
+
+    monkeypatch.setattr(borrowed, "checkpoint", checkpoint)
+
     class Server:
-        def handle_message(self, message, *, cancellation):
+        def handle_message(self, message, *, operation_control):
             observed.append(message["params"]["name"])
-            assert cancellation is not None
-            assert cancellation.wait(0.5), "original finite deadline was not propagated"
-            envelope = {"status": "returned", "result": {}, "error": None}
+            assert operation_control is borrowed
+            if stopped == "expired":
+                time.sleep(0.1)
+            else:
+                cancellation.set()
+            with pytest.raises(EvidenceWikiError) as failure:
+                operation_control.checkpoint("blocked_public_call")
+            envelope = {"status": "refused", "result": None, "error": host.error_document(failure.value)}
             return {"result": {"content": [{"text": json.dumps(envelope)}]}}
+
     route.server = Server()
-    started = time.monotonic()
-    with pytest.raises(TimeoutError, match="original allowance exhausted"):
-        route.call(operation, {"run_id": "finite-run"}, Control())
-    assert time.monotonic() - started < 0.5
-    assert observed == ["research_" + operation.replace("-", "_")]
-    assert remaining_names == ["reference_mcp_call"]
-    assert checkpoints == ["reference_route_before_call", "reference_route_after_call"]
+    try:
+        with pytest.raises(EvidenceWikiError) as failure:
+            route.call(operation, {"run_id": "finite-run"}, borrowed)
+        expected = "OPERATION_DEADLINE_EXCEEDED" if stopped == "expired" else "OPERATION_CANCELLED"
+        assert failure.value.error_code == expected
+        assert observed == ["research_" + operation.replace("-", "_")]
+        assert checkpoints == ["reference_route_before_call", "blocked_public_call", "reference_route_after_call"]
+        assert route.calls[0]["state"] == "refused"
+    finally:
+        borrowed.close()
 
 
-def test_mcp_timer_is_cancelled_when_public_handler_raises(monkeypatch, tmp_path):
+def test_mcp_borrowed_control_remains_usable_when_public_handler_raises(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from evidence_wiki import OperationControl
+
     route = object.__new__(host.Routes)
     route.root, route.route, route.calls = tmp_path, "scoped_mcp", []
-    observed = []
-    class Timer:
-        def __init__(self, seconds, callback):
-            observed.append(("allowance", seconds))
-        def start(self):
-            observed.append("started")
-        def cancel(self):
-            observed.append("cancelled")
+    observed, checkpoints = [], []
+    borrowed = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+                                timeout_seconds=60)
+    original_checkpoint = borrowed.checkpoint
+
+    def checkpoint(name):
+        checkpoints.append(name)
+        original_checkpoint(name)
+
+    monkeypatch.setattr(borrowed, "checkpoint", checkpoint)
+    monkeypatch.setattr(borrowed, "close", lambda: pytest.fail("route closed the borrowed control"))
+
     class Server:
-        def handle_message(self, *args, **kwargs):
+        def handle_message(self, message, *, operation_control):
+            observed.append(operation_control)
             raise RuntimeError("handler stopped")
-    control = SimpleNamespace(checkpoint=lambda _: None, remaining_seconds=lambda _: 0.1)
+
     route.server = Server()
-    monkeypatch.setattr(host.threading, "Timer", Timer)
-    with pytest.raises(RuntimeError, match="handler stopped"):
-        route.call("brief", {"run_id": "finite-run"}, control)
-    assert observed == [("allowance", 0.1), "started", "cancelled"]
+    try:
+        with pytest.raises(RuntimeError, match="handler stopped"):
+            route.call("brief", {"run_id": "finite-run"}, borrowed)
+        assert observed == [borrowed]
+        assert checkpoints == ["reference_route_before_call"]
+        borrowed.checkpoint("host_reuses_control_after_handler_exception")
+        assert route.calls[0]["state"] == "started"
+    finally:
+        OperationControl.close(borrowed)
 
 
 def owner_fixture(monkeypatch, tmp_path, route="direct"):

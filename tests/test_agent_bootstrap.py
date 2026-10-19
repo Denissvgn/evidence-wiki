@@ -29,11 +29,30 @@ def envelope(kind, version, payload):
     return {"schema_version": version, "kind": kind, "request_id": "example", "payload": payload}
 
 
+
+def complete_resources(read_index=agent_resources.resource_index):
+    """Traverse every bounded page and verify the reported complete count."""
+    entries, offset = [], 0
+    while True:
+        page = read_index(offset=offset)
+        returned, total = page["bounds"]["returned"], page["bounds"]["total"]
+        assert returned == len(page["resources"]) <= agent_resources.MAX_RESOURCES
+        assert page["bounds"]["truncated"] is (returned < total)
+        entries.extend(page["resources"])
+        offset += returned
+        if offset >= total:
+            break
+        assert returned > 0
+    assert len(entries) == total == len({row["id"] for row in entries})
+    return entries
+
+
 def test_exports_match_owners_and_all_resources_remain_usable():
     module = load_module("resource_export", ROOT / "tools/sync_agent_resources.py")
     assert all((ROOT / path).read_bytes() == content for path, content in module.exports().items())
-    entries = agent_resources.resource_index()["resources"]
-    assert 1 <= len(entries) <= agent_resources.MAX_RESOURCES
+    entries = complete_resources()
+    assert 1 <= len(entries) <= agent_resources.MAX_INSTALLED_RESOURCES == 256
+    assert {entry["id"] for entry in entries} == set(resource_paths())
     for entry in entries:
         document = agent_resources.resource_document(entry["id"])
         assert hashlib.sha256(document["content"].encode()).hexdigest() == entry["sha256"]
@@ -74,10 +93,13 @@ def test_zip_resource_lifetime_and_progressive_loading(tmp_path):
         # The other inventory entries are intentionally absent: index and a
         # selected read must not extract or load unrelated resources.
         inventory = agent_resources.resource_index()
+        entries = complete_resources()
         document = agent_resources.resource_document(selected)
     archive.unlink()
     assert document["content"].startswith("# Start research")
-    assert inventory["bounds"]["truncated"] is False
+    assert inventory["bounds"]["total"] == len(entries) == len(resource_paths())
+    assert inventory["bounds"]["truncated"] is (inventory["bounds"]["returned"] < len(entries))
+    assert {entry["id"] for entry in entries} == set(resource_paths())
     document["content"] = "changed by caller"
     assert agent_resources.resource_document(selected)["content"] != document["content"]
 
@@ -129,7 +151,7 @@ with (patch("evidence_wiki._contract.contract", forbidden),
                               capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert captured.returncode == 0, captured.stderr
     assert not captured.stderr
-    value = decode_document("onboarding/bootstrap/v2", captured.stdout.encode())
+    value = decode_document("onboarding/bootstrap/v3", captured.stdout.encode())
     assert len(captured.stdout.encode()) <= agent.SUMMARY_BYTES
     payload = value["payload"]
     assert payload["workspace"] == "absent"
@@ -183,7 +205,7 @@ def test_compact_summary_negotiates_without_full_contract(capsys):
     assert agent.main(["summary", "--format", "json", "--require", "strict-evidence/v1",
                        "--require", "declarative-computation/v1", "--require", "onboarding/research_request/v2"]) == 0
     raw = capsys.readouterr().out.encode()
-    summary = decode_document("onboarding/capabilities/v1", raw)["payload"]
+    summary = decode_document("onboarding/capabilities/v2", raw)["payload"]
     assert len(raw) < agent.SUMMARY_BYTES
     assert summary["strict"]["checker"]["available"]
     assert summary["strict"]["host_probe"] == "not_run"
@@ -192,22 +214,32 @@ def test_compact_summary_negotiates_without_full_contract(capsys):
     assert effects["doctor"] == effects["pack validate"] == "temporary_write"
     assert effects["strict export"] == "read"
     assert set(schema_ids()) <= set(summary["schema_ids"])
+    complete = complete_resources()
+    assert summary["resource_bounds"] == agent_resources.resource_index(limit=64)["bounds"]
+    assert summary["resources"] == complete[:64]
+    assert set(summary["schema_ids"]) == {row["id"] for row in complete if row["media_type"] == "application/schema+json"}
     with patch.object(agent, "resource_availability", return_value={"script/_strict_evidence/v1": False}):
         assert agent.main(["summary", "--require", "strict-evidence/v1", "--format", "json"]) == 2
     assert json.loads(capsys.readouterr().out)["error_code"] == "ONBOARDING_ENVIRONMENT_INCOMPATIBLE"
 
 
-def test_current_catalog_bootstrap_cli_retains_all_resources_within_its_byte_bound(tmp_path, capsys):
+def test_current_catalog_bootstrap_cli_retains_complete_discovery_within_its_byte_bound(tmp_path, capsys):
     (tmp_path / "research.yml").write_text("project: {name: 'Scoped local workspace'}\n")
     shutil.copyfile(ROOT / "workspace-template/workspace-system.yml", tmp_path / "workspace-system.yml")
     assert agent.main(["bootstrap", "--target", str(tmp_path), "--request-id", "console-0", "--format", "json"]) == 0
     raw = capsys.readouterr().out.encode()
     assert len(raw) <= agent.SUMMARY_BYTES == 32768
-    document = decode_document("onboarding/bootstrap/v2", raw)
+    document = decode_document("onboarding/bootstrap/v3", raw)
     assert document["request_id"] == "console-0" and document["payload"]["workspace"] == "present"
-    assert document["payload"]["resources"] == agent_resources.resource_index()["resources"]
-    assert {"research-host-qualification/v1", "research-protected-host-qualification/v1"} <= {
-        item["id"] for item in document["payload"]["resources"]}
+    page = agent_resources.resource_index(limit=64)
+    assert document["payload"]["resources"] == page["resources"]
+    assert document["payload"]["resource_bounds"] == page["bounds"]
+    complete = complete_resources()
+    assert page["bounds"]["total"] == len(complete) == len(resource_paths())
+    assert set(document["payload"]["schema_ids"]) == {
+        row["id"] for row in complete if row["media_type"] == "application/schema+json"}
+    assert {"research-host-qualification/v1", "research-host-qualification/v2",
+        "research-protected-host-qualification/v1"} <= set(document["payload"]["schema_ids"])
 
 
 def test_top_level_help_discovers_bootstrap(capsys):
@@ -280,8 +312,12 @@ def test_schema_exports_and_examples_validate_with_owners(tmp_path):
 
 def test_resource_and_operation_discovery_fit_shared_finite_bounds():
     from evidence_wiki.onboarding_schemas import LIMITS
-    assert len(resource_paths())<=agent_resources.MAX_RESOURCES==LIMITS['resources']
-    assert len(agent.OPERATIONS)<=LIMITS['operations']
+    assert len(resource_paths()) <= agent_resources.MAX_INSTALLED_RESOURCES == 256
+    assert agent_resources.MAX_RESOURCES == LIMITS["resources"] == 128
+    assert len(agent.OPERATIONS) <= LIMITS["operations"]
     with Onboarding.open() as host:
-        assert host.resources()['bounds']['truncated'] is False
-        assert host.bootstrap()['payload']['operations']
+        entries = complete_resources(host.resources)
+        assert {row["id"] for row in entries} == set(resource_paths())
+        summary = host.bootstrap()["payload"]
+        assert summary["operations"] and len(summary["resources"]) == 64
+        assert summary["resource_bounds"] == {"total": len(entries), "returned": 64, "truncated": len(entries) > 64}

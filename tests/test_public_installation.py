@@ -21,6 +21,42 @@ def save_reports(root, reports):
         (target / "summary.json").write_text(json.dumps(report), encoding="utf-8")
 
 
+def test_source_layout_excludes_backup_files_from_both_archives(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "pyproject.toml").write_bytes((artifacts.REPO_ROOT / "pyproject.toml").read_bytes())
+    for name in (
+        "README.md", "LICENSE", "src/evidence_wiki/__init__.py",
+        "src/evidence_wiki/module.py", "src/evidence_wiki/module.py.orig",
+        "src/evidence_wiki/nested/module.py.orig", "tests/test_module.py.orig",
+        "workspace-template/AGENTS.md", "domain-packs/example.txt", "orchestrator/example.txt",
+        "examples/urban-heat-resilience-workspace/AGENTS.md",
+        "tests/fixtures/madrid-autonomo-workspace/AGENTS.md",
+    ):
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+
+    layout, sources = artifacts.source_layout(project)
+
+    assert layout["maps"]["wheel"]["evidence_wiki/module.py"] == "src/evidence_wiki/module.py"
+    assert layout["maps"]["sdist"]["src/evidence_wiki/module.py"] == "src/evidence_wiki/module.py"
+    for members in layout["maps"].values():
+        assert not any(name.endswith(".orig") for name in members)
+        assert not any(name.endswith(".orig") for name in members.values())
+    assert not any(path.name.endswith(".orig") for path in sources)
+    assert (project / "src/evidence_wiki/module.py.orig").read_text(encoding="utf-8") == "fixture\n"
+
+    # Forced wheel assets bypass Hatch's global excludes; keep that membership
+    # visible so the producer's archive projection guard can reject a mismatch.
+    asset_backup = project / "workspace-template/example.txt.orig"
+    asset_backup.write_text("asset backup\n", encoding="utf-8")
+    layout, sources = artifacts.source_layout(project)
+    assert layout["maps"]["wheel"]["evidence_wiki/assets/workspace-template/example.txt.orig"] == "workspace-template/example.txt.orig"
+    assert "workspace-template/example.txt.orig" not in layout["maps"]["sdist"]
+    assert asset_backup in sources
+
+
 def test_probe_uses_only_public_package_imports_and_frozen_legacy_vectors():
     tree = ast.parse(Path(public.__file__).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -122,8 +158,86 @@ def test_profile_advertisement_matches_all_supported_public_owner_versions():
     from evidence_wiki import contract
     from evidence_wiki.agent_execution import PROFILE_SCHEMA_VERSIONS
 
-    assert PROFILE_SCHEMA_VERSIONS == tuple("research-execution-profile/v" + str(index) for index in range(1, 14))
+    assert PROFILE_SCHEMA_VERSIONS == tuple("research-execution-profile/v" + str(index) for index in range(1, 18))
     advertised = contract()["research_sessions"]["execution_profile_schemas"]
     assert advertised == list(PROFILE_SCHEMA_VERSIONS)
-    assert contract()["library_api"]["version"] == "61"
-    assert contract()["library_api"]["matrix_version"] == "42"
+    assert contract()["library_api"]["version"] == "64"
+    assert contract()["library_api"]["matrix_version"] == "44"
+
+
+class PagedPublicResources:
+    def __init__(self, rows, documents, *, page_size=2):
+        self.rows, self.documents, self.page_size = rows, documents, page_size
+        self.offsets = []
+
+    def resources(self, *, offset=0):
+        self.offsets.append(offset)
+        selected = self.rows[offset:offset + self.page_size]
+        return {"resources": selected, "bounds": {
+            "total": len(self.rows), "returned": len(selected),
+            "truncated": len(selected) < len(self.rows)}}
+
+    def resource(self, resource_id):
+        return self.documents[resource_id]
+
+
+def public_resource_fixture():
+    rows = [{"id": str(index), "media_type": "application/schema+json"} for index in range(5)]
+    documents = {row["id"]: {"content": json.dumps({"title": row["id"]})} for row in rows}
+    expected = {
+        "resource_documents": {key: public.digest(value) for key, value in documents.items()},
+        "schema_documents": {key: public.digest(json.loads(value["content"])) for key, value in documents.items()},
+    }
+    return rows, documents, expected
+
+
+def test_public_resources_read_all_pages_even_when_tail_is_truncated():
+    rows, documents, expected = public_resource_fixture()
+    host = PagedPublicResources(rows, documents)
+    first = host.resources()
+    assert first["bounds"]["truncated"] is True
+    assert public.resource_inventory(host, first) == rows
+    assert host.offsets == [0, 2, 4]
+    host.offsets.clear()
+    public.checked_resource_documents(host, expected)
+    assert host.offsets == [0, 2, 4]
+
+
+@pytest.mark.parametrize("defect", ["missing_tail", "resource_mismatch", "schema_mismatch"])
+def test_public_resources_reject_tail_omission_and_document_mismatch(defect):
+    rows, documents, expected = public_resource_fixture()
+    if defect == "missing_tail":
+        rows.pop()
+    elif defect == "resource_mismatch":
+        documents["4"] = {"content": '{"title":"changed"}'}
+    else:
+        expected["schema_documents"]["4"] = "0" * 64
+    with pytest.raises(ValueError, match="inventory differs|document differs"):
+        public.checked_resource_documents(PagedPublicResources(rows, documents), expected)
+
+
+@pytest.mark.parametrize("defect", ["duplicate", "nonprogress", "total", "returned", "total_float", "returned_bool"])
+def test_public_resource_pagination_rejects_invalid_followup_pages(defect):
+    rows, documents, _ = public_resource_fixture()
+    host = PagedPublicResources(rows, documents)
+    original = host.resources
+
+    def resources(*, offset=0):
+        page = original(offset=offset)
+        if offset:
+            if defect == "duplicate":
+                page["resources"][0] = rows[0]
+            elif defect == "nonprogress":
+                page["resources"] = []
+                page["bounds"]["returned"] = 0
+            elif defect == "total_float":
+                page["bounds"]["total"] = float(page["bounds"]["total"])
+            elif defect == "returned_bool":
+                page["bounds"]["returned"] = True
+            else:
+                page["bounds"][defect] += 1
+        return page
+
+    host.resources = resources
+    with pytest.raises(ValueError, match="Duplicate|no progress|bounds differ"):
+        public.resource_inventory(host)

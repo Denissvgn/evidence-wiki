@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import base64
+import copy
+import hashlib
+import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,7 +28,7 @@ from _evidence_authority import (
 from _evidence_revision import canonical_bytes, content_id
 from _host_context import selection_identity, state_path
 from _host_evidence_store import locked_state, read_state, write_state
-from _publication_context import captured_view
+from _publication_context import capture_active, captured_view, live_read, refuse_read_scope_write
 from _record_artifacts import artifact_path, closure_identity, json_document, validate_file_bounds
 from _strict_contract import artifact_id as strict_artifact_id
 from _strict_contract import review_document as strict_review_document
@@ -382,6 +385,7 @@ def qualify_revision(record: dict[str, Any], revision: str, trust: dict[str, Any
 
 def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files: dict[str, bytes] | None = None) -> dict[str, Any]:
     """Authenticate and scrub-bind protected bytes before any package persistence."""
+    refuse_read_scope_write()
     now = datetime.now(timezone.utc)
     state_id = selection(config)
     # Detach mutable caller containers before qualifying or persisting them.
@@ -432,7 +436,7 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
         strict = None
         if command["action"] in {"register-strict-review", "register-strict-human-review"}:
             strict = load_workspace_module(Path(__file__).resolve().parent, "_strict_evidence")
-            strict.validate_review(root, config, envelope, UsageView(state, trust, now))
+            _validate_strict_review(strict, root, config, envelope, state, trust, now)
         receipt = state.append(envelope, artifacts, trust, now)
         # A host policy change during validation cannot authorize the commit.
         committed_at = datetime.now(timezone.utc)
@@ -450,7 +454,7 @@ def transact(root: Path, config: dict[str, Any], envelope: dict[str, Any], files
         if command["action"] == "invalidate-assessments":
             assessment_engine.closing_apply(root, config, command["body"]["plan"], assessment_view)
         if strict is not None:
-            strict.validate_review(root, config, envelope, UsageView(state, trust, committed_at))
+            _validate_strict_review(strict, root, config, envelope, state, trust, committed_at)
         write_state(directory, canonical_bytes(state.document))
         return receipt
 
@@ -561,15 +565,134 @@ class UsageView:
                 "checkpoint": self.state.checkpoint, "nodes": nodes, "limit": limit}
 
 
+def _read_execution_owner():
+    import asyncio
+
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), task
+
+
+def _read_generation():
+    path = Path(__file__).resolve()
+    return path, hashlib.sha256(path.read_bytes()).digest()
+
+
+class _ObservationRead:
+    """One native, lock-held replay; successful usage checks are never borrowed."""
+
+    def __init__(self, root, config, view):
+        self.root = Path(root).resolve()
+        self.config = copy.deepcopy(config)
+        self.view = view
+        self.generation = _read_generation()
+        self.execution = _read_execution_owner()
+        self.active = True
+        self.failure = None
+
+    def fail(self, reason):
+        if self.failure is None:
+            self.failure = reason
+        raise EvidenceInvalid(self.failure)
+
+    def require(self, root, config):
+        try:
+            if self.failure is not None:
+                self.fail(self.failure)
+            if not self.active or self.execution != _read_execution_owner():
+                self.fail("usage_observation_scope_unavailable")
+            if self.root != Path(root).resolve() or self.config != config:
+                self.fail("usage_observation_scope_changed")
+            if self.generation != _read_generation():
+                self.fail("usage_observation_generation_changed")
+            self.view.revalidate(self.root, self.config)
+        except (ValueError, OSError) as error:
+            self.fail(str(error) if type(error).__name__ == "EvidenceInvalid" else "usage_observation_scope_changed")
+
+
+def _validate_strict_review(strict, root, config, envelope, state, trust, now):
+    """Let selective validation read the transaction's actual lock-held replay."""
+    view = UsageView(state, trust, now)
+    if envelope["payload"]["body"]["review"].get("schema_version") != "evidence-strict-review/v3":
+        return strict.validate_review(root, config, envelope, view)
+    with _transaction_observation_reads(root, config, view):
+        return strict.validate_review(root, config, envelope, view)
+
+
+@contextmanager
+def _transaction_observation_reads(root, config, view):
+    """Expose one transaction-owned replay solely during selective validation."""
+    if live_read.get() is not None:
+        live_read.get().fail("usage_observation_scope_nested")
+    if capture_active():
+        raise EvidenceInvalid("usage_observation_scope_changed")
+    scope = _ObservationRead(root, config, view)
+    token = live_read.set(scope)
+    try:
+        scope.require(root, config)
+        yield
+        scope.require(root, config)
+    finally:
+        scope.active = False
+        live_read.reset(token)
+
+
+@contextmanager
+def _observation_reads(root: Path, config: dict[str, Any]):
+    """Share only a native replay during one synchronous constructor's reads."""
+    if live_read.get() is not None:
+        live_read.get().fail("usage_observation_scope_nested")
+    if capture_active():
+        yield
+        return
+    with ExitStack() as stack:
+        try:
+            view = stack.enter_context(current_view(root, config))
+        except (ValueError, OSError):
+            # No scope has been exposed: preserve the ordinary owners' partial
+            # availability and typed refusals when native storage cannot open.
+            yield
+            return
+        scope = _ObservationRead(root, config, view)
+        token = live_read.set(scope)
+        try:
+            yield
+            scope.require(root, config)
+        finally:
+            scope.active = False
+            live_read.reset(token)
+
+
 @contextmanager
 def current_view(root: Path, config: dict[str, Any], *, exclusive: bool = False) -> Iterator[UsageView]:
     """Hold one revocation generation through the caller's complete read operation."""
+    if exclusive:
+        refuse_read_scope_write()
     borrowed = captured_view(root, config)
     if borrowed is not None:
+        scope = live_read.get()
+        if scope is not None:
+            if borrowed is not scope.view:
+                scope.fail("usage_observation_scope_changed")
+            scope.require(scope.root, scope.config)
         borrowed.require_selection()
         if exclusive:
             raise EvidenceInvalid("assessment_capture_is_read_only")
-        yield borrowed
+        try:
+            yield borrowed
+        finally:
+            if scope is not None:
+                scope.require(scope.root, scope.config)
+        return
+    scope = live_read.get()
+    if scope is not None:
+        scope.require(root, config)
+        try:
+            yield scope.view
+        finally:
+            scope.require(root, config)
         return
     state_id = selection(config)
     with locked_state(root, write=exclusive) as directory:

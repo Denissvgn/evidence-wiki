@@ -255,7 +255,10 @@ def test_onboarding_intersects_existing_roots_and_grants(selections, monkeypatch
     monkeypatch.setenv("EVIDENCE_WIKI_STATE_DIR", str(first[0] / "ambient-state"))
     with Onboarding.open(allowed_roots=[first[0]]) as handle:
         with context(first[0], grants=["onboarding.resources"]).activate():
-            assert handle.resources()["bounds"]["truncated"] is False
+            page = handle.resources()
+            returned, total = page["bounds"]["returned"], page["bounds"]["total"]
+            assert returned == len(page["resources"]) <= 128
+            assert page["bounds"]["truncated"] is (returned < total)
             with pytest.raises(ConfigError):
                 handle.recipes()
             assert handle._scope.path(first[0]) == first[0].resolve()

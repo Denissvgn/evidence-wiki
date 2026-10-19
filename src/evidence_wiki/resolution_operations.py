@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from evidence_wiki import execution_session as native
+from evidence_wiki._review_dependency_inputs import bound_session
 from evidence_wiki.mutation_contracts import MAX_BYTES, detached, digest
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.research_journal_contracts import canonical_record, digest_record
@@ -299,6 +300,7 @@ def _held_readability_input(session, admission):
         yield observed
 
 
+@bound_session
 def current(session):
     """Read every frozen original; never resolve questions or dispatch effects."""
     with _held_current(session) as observed:

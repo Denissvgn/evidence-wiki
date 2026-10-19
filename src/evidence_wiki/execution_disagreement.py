@@ -11,10 +11,10 @@ import json
 import re
 from datetime import datetime, timezone
 
+from ._review_dependency_json import canonical, detached, digest
 from .agent_execution import ExecutionError, validate_observation
 from .disagreement import CRITERIA, _hash, _ref, disagreement_action
-from .mutation_contracts import canonical, detached, digest
-from .review_context import create_review_context
+from .review_context import ReviewContext, create_review_context
 
 PROJECTION = "research-disagreement-projection/v1"
 ATTEMPT = "research-disagreement-attempt/v1"
@@ -51,13 +51,25 @@ def _content(value):
     return value.replace("\r\n", "\n").strip()
 
 
-def material_basis(owner_snapshot, rubric, sources):
+def material_basis(owner_snapshot, rubric, sources, *, complete_material=None, dependency_material=None):
     """Bind relevant content, excluding identity/status and transport bookkeeping.
 
     This is a change detector, not a semantic adequacy or source-authentication
     proof. Fresh canonical checks and first passes remain required after changes.
     """
+    if dependency_material is not None:
+        if complete_material is not None:
+            _fail("material_unsupported")
+        from .pack_discovery import owner
+        owner("_review_dependency_contract").validate_material(dependency_material)
+        return owner("_evidence_revision").content_id("research-dependency-review-material/v1",
+            {key: value for key, value in dependency_material.items() if key != "dependency_basis_id"})
     snapshot, rubric, sources = detached(owner_snapshot), detached(rubric), detached(sources)
+    complete_questions = None
+    if complete_material is not None:
+        from .review_context import _complete_material
+        claims, complete_questions = _complete_material(complete_material, snapshot, complete_material["basis_id"])
+        snapshot["premises"] = [claim for claim in claims if claim["id"] != snapshot["claim"]["id"]]
     if (type(snapshot) is not dict or type(rubric) is not dict or type(rubric.get("criteria")) is not dict
             or set(rubric["criteria"]) != CRITERIA or type(sources) is not list or len(sources) > 64):
         _fail("material_unsupported")
@@ -143,6 +155,8 @@ def material_basis(owner_snapshot, rubric, sources):
             "sources": _distinct(source_material.values()), "rubric_criteria": rubric["criteria"]}
         if calculated is not None:
             material.update(schema_version="research-claim-material/v2", computation=calculated)
+        if complete_questions is not None:
+            material.update(schema_version="research-claim-material/v3", questions=complete_questions)
         return digest(material)
     except (KeyError, TypeError, IndexError, AttributeError):
         _fail("material_invalid")
@@ -226,8 +240,15 @@ def project_claim(session, *, claim_id, prepared, sources):
     claim_id = _ref(claim_id)
     if prepared["snapshot"]["claim"]["id"] != claim_id:
         _fail("claim_mismatch")
-    basis = material_basis(prepared["snapshot"], prepared["rubric"], sources)
-    strict_basis = _hash(prepared["result"]["basis_id"])
+    from .execution_session import _complete_context_kwargs, _context_material, _review_basis
+    context_material = _complete_context_kwargs(session, prepared)
+    if context_material:
+        from .execution_continuations import claim_sources
+        from .execution_session import _sources
+        packets, _bindings = _sources(session)
+        sources = claim_sources(prepared, packets, complete_material=_context_material(context_material))
+    basis = material_basis(prepared["snapshot"], prepared["rubric"], sources, **context_material)
+    strict_basis = _hash(_review_basis(prepared))
     records = session.execution.records(session)
     attempts, applications, applied, observations = {}, {}, {}, {}
     for record in records:
@@ -331,6 +352,20 @@ def project_claim(session, *, claim_id, prepared, sources):
         material = data.get("review_material_basis")
         if result["strict_basis_id"] != strict_basis:
             continue
+        if "review_context" in data:
+            from .execution_session import _check_review_context
+            context = ReviewContext.restore(attempt.input_document["packet"], data["review_context"])
+            if "dependency_material" in context_material:
+                from ._review_dependency_custody import resolve_original
+                from .review_context import dependency_material
+                proof = resolve_original(review, purpose="reuse")
+                proof.assert_review_envelope(application["envelope"])
+                if dependency_material(context) != context_material["dependency_material"]:
+                    _fail("review_material_mismatch")
+            else:
+                _check_review_context(session, context, prepared, sources)
+        elif context_material:
+            _fail("review_context_missing")
         if material is None:
             material = basis
         _hash(material)
@@ -377,8 +412,17 @@ def adjudication_packet(session, *, claim_id, prepared, sources, context_id, ord
         service_profile=session.execution.profile if getattr(session.execution.profile, "service_repair", None) is not None else None)
     if decision["operation"] != "adjudicate":
         _fail("adjudication_not_selected")
+    from .execution_session import _complete_context_kwargs
+    context_material = _complete_context_kwargs(session, prepared)
+    if context_material:
+        from .execution_continuations import claim_sources
+        from .execution_session import _sources
+        packets, _bindings = _sources(session)
+        sources = claim_sources(prepared, packets, complete_material=context_material["complete_material"])
     context = create_review_context(context_id=context_id, task_role="adjudicator", basis_id=prepared["result"]["basis_id"],
-        owner_snapshot=prepared["snapshot"], rubric=prepared["rubric"], sources=sources, order_seed=order_seed)
+        owner_snapshot=prepared["snapshot"], rubric=prepared["rubric"], sources=sources, order_seed=order_seed, **context_material)
+    context.check_owner(owner_snapshot=prepared["snapshot"], basis_id=prepared["result"]["basis_id"])
+    context.check(prepared["snapshot"], prepared["rubric"], sources, **context_material)
     if not context.document()["manifest"]["context_complete"]:
         _fail("adjudication_context_incomplete")
     findings = {row["review_ref"]: row for row in projection["first_pass_findings"]}

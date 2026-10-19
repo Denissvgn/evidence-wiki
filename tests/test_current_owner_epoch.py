@@ -7,8 +7,10 @@ import pytest
 
 from evidence_wiki import execution_session as native
 from evidence_wiki import research_execution
+from evidence_wiki._facades._base import _translated
 from evidence_wiki.errors import UsageError
 from evidence_wiki.run_policy import RunPolicy
+from tests.test_research_journal_bounds import observer
 from tests.test_run_policy import evaluator, observation, policy_document
 
 
@@ -70,7 +72,7 @@ def test_no_epoch_reuse_after_journal_effect_or_external_wait(epoch, monkeypatch
             if boundary == "callback":
                 assert research_execution.bounded_host_call(lambda: "result", (), 1) == ("result", None)
             else:
-                monkeypatch.setattr(session, "execution", SimpleNamespace(seal_record=lambda *_a, **_k: {}), raising=False)
+                monkeypatch.setattr(session, "execution", observer(), raising=False)
                 monkeypatch.setattr("evidence_wiki.research_session._owner", lambda *_a, **_k: {"event_id": "observed"})
                 native.append(session, "kind", "request", {})
             native.current_qualifications(session)
@@ -151,7 +153,7 @@ def test_configured_native_capture_qualifier_resolves_usage_identity_and_current
                 assert result["selected_outcomes"][0]["independently_eligible"]
         assert set(calls) == {"research", "qa-export"}
     else:
-        expected = UsageError if failure == "missing_packet" else type(strict_owner.refusal("source_usage_unavailable"))
+        expected = UsageError if failure == "missing_packet" else type(_translated(strict_owner.refusal("source_usage_unavailable")))
         with pytest.raises(expected) as caught:
             with native._current_facts(session):
                 if failure == "withdrawn":

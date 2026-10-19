@@ -51,7 +51,7 @@ def test_custom_native_exception_class_names_are_not_exported():
     assert runner.exception_token(ValueError("private diagnostic")) == "ValueError"
 
 
-def frozen(tmp_path, monkeypatch, *, mode="limited"):
+def frozen(tmp_path, monkeypatch, *, mode="limited", execution_profile=None):
     root = tmp_path / "study"
     root.mkdir(mode=0o700)
     reporter = tmp_path / "archival-reporter.py"
@@ -65,6 +65,8 @@ def frozen(tmp_path, monkeypatch, *, mode="limited"):
         expected_proposals_raw=runner.raw_pin(proposals.read_bytes()), mode=mode,
         expected_candidate=identity["candidate_sha256"], expected_controller=identity["controller_sha256"],
         expected_adapter=identity["adapter_raw_sha256"], expected_reporter=identity["reference_reporter_raw_sha256"])
+    if execution_profile is not None:
+        args.execution_profile = execution_profile
     monkeypatch.setattr("tempfile.mkdtemp", lambda **_: str(root))
     result = runner.freeze_study(args)
     args.control = root
@@ -317,8 +319,11 @@ def test_production_cleanup_closes_before_final_decision_clock(tmp_path, monkeyp
                       "cleanup_closed", "final_clock", "published"]
 
 
-@pytest.mark.parametrize("action", ["run", "decide", "replay"])
+@pytest.mark.parametrize("action", ["run", "decide", "decide-stdout", "replay"])
 def test_cleanup_binding_rejects_changed_actual_argv(tmp_path, monkeypatch, action):
+    stdout_only = action == "decide-stdout"
+    if stdout_only:
+        action = "decide"
     plan, _, _, _ = fixture()
     (tmp_path / "children").mkdir(mode=0o700)
     (tmp_path / "control").mkdir(mode=0o700)
@@ -339,6 +344,8 @@ def test_cleanup_binding_rejects_changed_actual_argv(tmp_path, monkeypatch, acti
                 "--originals", str(tmp_path / "control/originals.json"), "--expected-evidence", digest({}),
                 "--output" if action == "decide" else "--report", str(tmp_path / "decisions/decision.json")]
         host, directory = None, None
+        if stdout_only:
+            argv = argv[:-2]
     monkeypatch.setattr(runner.sys, "argv", argv[1:])
     assert runner._cleanup_binding(plan, action, host, directory)[0] == tmp_path
     monkeypatch.setattr(runner.sys, "argv", argv[1:-1] + [str(tmp_path / "different-destination")])

@@ -6,12 +6,13 @@ from tools._review_dependency_workload import digest
 
 
 def observation_policy(profile):
-    if type(profile) is not str or profile not in {"interactive", "batch"}:
+    if type(profile) is not str or profile not in {"interactive", "batch", "batch-extended"}:
         raise ValueError("observation_policy_invalid")
-    return {"schema_version": "observer-recency-policy/v1", "profile": profile,
-        "max_age_seconds": 3600 if profile == "batch" else 30,
+    batch = profile in {"batch", "batch-extended"}
+    return {"schema_version": "observer-recency-policy/v2" if profile == "batch-extended" else "observer-recency-policy/v1", "profile": profile,
+        "max_age_seconds": 7200 if profile == "batch-extended" else 3600 if batch else 30,
         "witness_semantics": "observer_recency_bound_not_native_calibration_witness",
-        "closing_validation": "fresh_native_owner_read" if profile == "batch" else "original_native_owner_reads",
+        "closing_validation": "fresh_native_owner_read" if batch else "original_native_owner_reads",
         "original_window_renewal": "forbidden"}
 
 
@@ -20,6 +21,11 @@ def validate_observation_policy(policy):
             or policy != observation_policy(policy.get("profile"))):
         raise ValueError("observation_policy_invalid")
     return policy
+
+
+def is_batch_policy(policy):
+    policy = validate_observation_policy(policy)
+    return policy["profile"] in {"batch", "batch-extended"}
 
 
 def observer_deadline(witnesses, policy):

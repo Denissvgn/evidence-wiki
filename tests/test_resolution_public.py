@@ -6,7 +6,7 @@ import pytest
 
 from evidence_wiki import Workspace, contract
 from evidence_wiki.errors import ConfigError, UsageError
-from evidence_wiki.resolution_contracts import RESOLUTION, checked, schemas
+from evidence_wiki.resolution_contracts import DEPENDENCY_RESOLUTION, RESOLUTION, checked, schemas
 from evidence_wiki.resolution_projection import _project
 from tests.test_research_session import files, host, policy
 from tests.test_research_session import root as root
@@ -25,7 +25,7 @@ def test_public_schema_detached_current_and_workspace_lifetime(root, tmp_path):
     with selected(root, tmp_path).activate(), Workspace.open(root) as workspace:
         before = files(root)
         returned = workspace.strict.resolution_schemas()
-        assert returned == schemas() and set(returned) == {RESOLUTION}
+        assert returned == schemas() and set(returned) == {RESOLUTION, DEPENDENCY_RESOLUTION}
         returned[RESOLUTION]["required"].clear()
         assert workspace.strict.resolution_schemas() == schemas()
         assert files(root) == before

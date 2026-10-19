@@ -28,6 +28,8 @@ from evidence_wiki._agent_catalog import (  # noqa: E402
     resource_paths,
 )
 from evidence_wiki._contract import LIBRARY_API_VERSION  # noqa: E402
+from evidence_wiki._review_dependency_wire import WIRE
+from evidence_wiki._review_dependency_wire import schema as wire_schema
 from evidence_wiki._script_host import load_packaged_script  # noqa: E402
 from evidence_wiki.artifact_delivery_contracts import schemas as delivery_schemas
 from evidence_wiki.brief_contracts import _schemas as brief_schemas
@@ -66,21 +68,27 @@ def exports() -> dict[str, bytes]:
     paths = resource_paths()
     strict = load_packaged_script(ROOT, "_strict_contract")
     computation = load_packaged_script(ROOT, "_computation_contract")
+    diagnostics = load_packaged_script(ROOT, "_claim_diagnostics")
     initializer = load_packaged_script(ROOT, "init_research_workspace")
+    # The fixed-root export owner can bootstrap newly declared resource anchors.
+    # Public discovery still requires a complete installed asset generation.
+    native_shapes = strict.schema_documents()
+    computation_shapes = computation.schemas()
+    diagnostic_shape = diagnostics.schema_document()
     schemas = {key: schema_document(key) for key in schema_ids()}
-    schemas.update(strict.schema_documents())
-    schemas.update(computation.schemas())
-    schemas.update({key:calculation_schema(key) for key in CALCULATION_SCHEMAS})
-    schemas.update({key: handoff_schema() if key == HANDOFF else repair_binding_schema() if key == REPAIR_BINDING else repair_schema(key) for key in REPAIR_SCHEMAS})
-    schemas.update({key:review_packet_schema(key) for key in REVIEW_PACKET_SCHEMAS})
+    schemas.update(native_shapes)
+    schemas[WIRE] = {"$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:research-review-native-bytes:v1", **wire_schema()}
+    schemas.update(computation_shapes)
+    schemas.update({key:calculation_schema(key, computation_shapes) for key in CALCULATION_SCHEMAS})
+    schemas.update({key: handoff_schema() if key == HANDOFF else repair_binding_schema() if key == REPAIR_BINDING else repair_schema(key, native_shapes) for key in REPAIR_SCHEMAS})
+    schemas.update({key:review_packet_schema(key, computation_shapes, diagnostic_shape,
+        native_dependency=native_shapes) for key in REVIEW_PACKET_SCHEMAS})
     schemas.update({key:recovery_schema() for key in RECOVERY_SCHEMAS})
     service_documents = {**service_schemas(), SERVICE_PLAN: service_plan_schema()}
     schemas.update({key: service_documents[key] for key in SERVICE_SCHEMAS})
     schemas.update({key: host_qualification_schemas()[key] for key in HOST_QUALIFICATION_SCHEMAS})
-    # The fixed-root export owner can bootstrap newly declared resource anchors.
-    # Public discovery still requires a complete installed asset generation.
-    native_shapes = strict.schema_documents()
-    schemas.update({key: resolution_schema(native_shapes) for key in RESOLUTION_SCHEMAS})
+    schemas.update({key: resolution_schema(native_shapes, version=key) for key in RESOLUTION_SCHEMAS})
     schemas.update(brief_schemas(native_shapes))
     schemas.update(readability_schemas(native_shapes))
     schemas.update(readability_plan_schemas())
@@ -132,7 +140,7 @@ def exports() -> dict[str, bytes]:
     }}
     initializer.validate_profile(profile["workspace_init"])
     output[paths["example/init-profile/v1"]] = encoded(profile)
-    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), ("agent-host", ROOT / "examples/agent-host"), ("integration-docs", ROOT / "examples/integration-docs"), *(
+    for name, directory in [("pack", ROOT / "domain-packs/general-science"), ("unattended-host", ROOT / "examples/unattended-host"), ("review-cases", ROOT / "examples/review-cases"), ("agent-host", ROOT / "examples/agent-host"), ("integration-docs", ROOT / "examples/integration-docs"), *(
             (name, ROOT / "workspace-template/docs/computation-examples" / name)
             for name in ("sample-benchmark", "sample-portfolio", "sample-filing"))]:
         files = {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")

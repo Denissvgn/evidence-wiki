@@ -18,6 +18,7 @@ from _evidence_authority import EvidenceInvalid
 from _evidence_revision import observation
 from _host_context import state_path
 from _native_fs import os
+from _publication_context import refuse_read_scope_write
 
 try:
     import fcntl
@@ -103,6 +104,7 @@ def read_state(directory: int, *, allow_missing: bool = False) -> bytes | None:
 
 def write_state(directory: int, data: bytes) -> None:
     """Publish one complete event generation, retaining the old one on failure."""
+    refuse_read_scope_write()
     if not isinstance(data, bytes) or len(data) > MAX_STATE_BYTES:
         raise EvidenceInvalid("host_state_bound_exceeded")
     temporary = ".evidence-state-" + secrets.token_hex(16)
@@ -128,6 +130,8 @@ def write_state(directory: int, data: bytes) -> None:
 
 @contextmanager
 def locked_state(project_root: Path, *, write: bool = False, initialize: bool = False) -> Iterator[int]:
+    if write:
+        refuse_read_scope_write()
     with host_directory(project_root) as directory:
         if initialize and not write:
             raise EvidenceInvalid("invalid_host_state_lock_mode")

@@ -435,6 +435,9 @@ def prepare_request(project_root: str | Path, *, request_id: str, operation: str
                     arguments: Any) -> dict[str, Any]:
     """Freeze explicit arguments, input bytes, revision and installed owners."""
     root, control = _scope(project_root, "prepare_request")
+    from .mutation_contracts import transport_review_arguments
+
+    arguments = transport_review_arguments(operation, arguments)
     value = checked_arguments(operation, arguments)
     if operation in STAGED_ARTIFACTS:
         from .artifact_delivery_operations import require_scope
@@ -503,6 +506,10 @@ def _invoke(root: Path, intent: dict[str, Any], capture: dict[str, Any], *,
         if operation == "telemetry.record":
             return call_seam(workspace._script, stem, seam, root, **value)
         namespace, method = operation.split(".", 1)
+        if operation == "strict.register_review":
+            from .mutation_contracts import review_envelope
+
+            value = {"envelope": review_envelope(value["envelope"])}
         return getattr(getattr(workspace, namespace), method)(**value)
 
 
@@ -853,8 +860,9 @@ def _intake_proof(root, basis, revision_id):
 
 def _strict_proof(root, value, config, workspace):
     from .host_context import checked_operation
+    from .mutation_contracts import review_envelope
 
-    envelope = value["envelope"]
+    envelope = review_envelope(value["envelope"])
     identifier = envelope["payload"].get("request_id")
     current_context().require_grant("evidence_usage.run_status")
     with checked_operation("evidence_usage", "run_status", (root,), {"request_id": identifier}) as revalidate:

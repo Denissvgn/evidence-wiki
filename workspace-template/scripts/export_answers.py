@@ -914,7 +914,7 @@ def build_export(
 
 
 def render_output(document: dict[str, Any], output_format: str) -> str:
-    if document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+    if document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
         strict = load_sibling_module("_strict_evidence")
         strict.bounded_result(document)
         values = [document] if output_format == "json" else [
@@ -977,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     json_mode = json_mode_requested(argv, default_json=True)
     try:
         document = run_export(args.project_root, status=args.status)
-        if args.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+        if args.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
             raise load_sibling_module("_strict_evidence").refusal("strict_output_requires_host_delivery")
         rendered = render_output(document, args.format)
     except ScriptRefusal as refusal:

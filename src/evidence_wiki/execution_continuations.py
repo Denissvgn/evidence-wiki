@@ -2,17 +2,18 @@
 
 from datetime import datetime, timezone
 
+from ._review_dependency_json import detached, digest
 from .agent_execution import _utc
 from .errors import EvidenceWikiError
 from .execution_disagreement import driver_action, project_claim
-from .mutation_contracts import detached, digest
 from .pack_discovery import owner
 from .review_context import create_review_context
 
 
-def claim_sources(prepared, packets):
+def claim_sources(prepared, packets, *, complete_material=None):
     snapshot = prepared["snapshot"]
-    identifiers = {item["source_id"] for claim in [snapshot["claim"], *snapshot["premises"]]
+    claims = [snapshot["claim"], *snapshot["premises"]] if complete_material is None else complete_material["claims"]
+    identifiers = {item["source_id"] for claim in claims
         for item in claim["evidence"]}
     if snapshot.get("computation") is not None:
         identifiers.update(row["source_id"] for row in snapshot["computation"]["sources"])
@@ -27,12 +28,20 @@ def current_gates(session, view, prepared, sources):
     authentication = "fail" if reason in {"strict_review_authority_changed", "strict_review_authentication_failed",
         "strict_review_not_independent"} else "unknown" if reason in {
         "strict_authenticated_review_unavailable", "strict_review_expired"} else "pass"
-    observation = row.get("observation", {})
+    observation = row.get("observation") or {}
     mechanical = ("unknown" if type(observation.get("reasons")) is not list else
         "fail" if observation["reasons"] else "pass")
+    from .execution_session import _complete_context_kwargs, _context_material, _review_basis
+    context_material = _complete_context_kwargs(session, prepared)
+    if context_material:
+        from .execution_session import _sources
+        packets, _bindings = _sources(session)
+        sources = claim_sources(prepared, packets, complete_material=_context_material(context_material))
     context = create_review_context(context_id="continuation-context", task_role="evaluator",
-        basis_id=prepared["result"]["basis_id"], owner_snapshot=prepared["snapshot"],
-        rubric=prepared["rubric"], sources=sources, order_seed=b"current-native-context-check-seed")
+        basis_id=_review_basis(prepared), owner_snapshot=prepared["snapshot"],
+        rubric=prepared["rubric"], sources=sources, order_seed=b"current-native-context-check-seed", **context_material)
+    context.check_owner(owner_snapshot=prepared["snapshot"], basis_id=_review_basis(prepared))
+    context.check(prepared["snapshot"], prepared["rubric"], sources, **context_material)
     profile, policy = session.execution.profile, session.policy.to_dict()
     scopes = profile.role_scopes
     repair = scopes is not None and any(scope.task_role == "repair" for scope in scopes.scopes)
@@ -58,7 +67,9 @@ def current_gates(session, view, prepared, sources):
 
 def claim_action(session, view, claim_id, original_id, packets):
     prepared = owner("strict_evidence").prepare_review(session.root, claim_id)
-    sources = claim_sources(prepared, packets)
+    from .execution_session import _complete_context_kwargs, _context_material
+    sources = claim_sources(prepared, packets,
+        complete_material=_context_material(_complete_context_kwargs(session, prepared)))
     projection = project_claim(session, claim_id=claim_id, prepared=prepared, sources=sources)
     gates = current_gates(session, view, prepared, sources)
     gates = authenticated_gates(session, projection, gates, prepared=prepared)

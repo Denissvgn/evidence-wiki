@@ -278,7 +278,7 @@ def _document(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
 def schema_ids() -> tuple[str, ...]:
     """Return the closed public resource inventory, without probing assets."""
     return (*tuple(f"onboarding/{kind}/v1" for kind in _PAYLOADS), "onboarding/research_request/v2",
-            "onboarding/bootstrap/v2", "onboarding/resource/v2")
+            "onboarding/bootstrap/v2", "onboarding/resource/v2", "onboarding/capabilities/v2", "onboarding/bootstrap/v3")
 
 
 def schema_document(resource_id: str) -> dict[str, Any]:
@@ -289,11 +289,23 @@ def schema_document(resource_id: str) -> dict[str, Any]:
             recoverable=False,
             remediation="Select an exact resource ID from onboarding_contract.schema_ids.",
         )
+    if resource_id == "onboarding/bootstrap/v3":
+        result = schema_document("onboarding/bootstrap/v2")
+        result["$id"] = "urn:evidence-wiki:onboarding:bootstrap:3"
+        result["properties"]["schema_version"] = {"const": "3.0"}
+        payload = result["properties"]["payload"]
+        payload["properties"]["resource_bounds"] = deepcopy(_BOUNDS)
+        payload["required"].append("resource_bounds")
+        return deepcopy(result)
     kind = resource_id.split("/")[1]
     result = deepcopy(_document(kind, _PAYLOADS[kind]))
     if resource_id.endswith("/v2"):
         result["$id"] = f"urn:evidence-wiki:onboarding:{kind}:2"
         result["properties"]["schema_version"] = {"const": "2.0"}
+    if resource_id == "onboarding/capabilities/v2":
+        payload = result["properties"]["payload"]
+        payload["properties"]["resource_bounds"] = deepcopy(_BOUNDS)
+        payload["required"].append("resource_bounds")
     if resource_id == "onboarding/resource/v2":
         result["properties"]["payload"] = deepcopy(_RESOURCE_V2)
     if resource_id == "onboarding/bootstrap/v2":

@@ -68,7 +68,10 @@ schemas, command routes, recipes and MCP declarations. The operation matrix in
 decoded objects or bounded UTF-8 JSON bytes and return canonical owner payloads.
 CLI `--output` publication is a separate effect. `bootstrap()` returns the
 capabilities envelope; `bootstrap(target)` returns the workspace-aware envelope.
-Resource methods return the CLI envelope's payload. Pack inspection returns full
+Resource methods return the CLI envelope's payload. `resources(offset=0,
+limit=128)` returns bounded catalog pages with explicit total, returned and
+truncation counts. MCP `resources/list` supplies a continuation cursor when more
+entries remain. Pack inspection returns full
 owner observations before CLI filtering/summary formatting. Errors retain
 `EvidenceWikiError` subclasses, stable codes, exit codes, recoverability and
 remediation. Unknown codes retain the base-class fallback. Closed handles raise

@@ -3,7 +3,7 @@
 import re
 
 from evidence_wiki._pack_io import bounded
-from evidence_wiki.mutation_contracts import detached, digest
+from evidence_wiki._review_dependency_json import detached, digest
 from evidence_wiki.onboarding_contract import _matches
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.review_context import ReviewContext
@@ -26,6 +26,8 @@ def create(context, sources, diagnostics, counter_material=(), *, counter_instru
         refuse("mechanical_diagnostics_invalid")
     aliases = context.binding()["aliases"]
     packet = context.document()
+    if packet["schema_version"] == "research-review-context/v4":
+        return _dependency_sections(context, sources, diagnostics, counter_material)
     claims = {row["id"]: row for row in [packet["claim"], *packet["premises"]]}
     rows = {}
     for row in diagnostics["claims"]:
@@ -90,7 +92,10 @@ def create(context, sources, diagnostics, counter_material=(), *, counter_instru
         retained_refs.append(item["search_ref"])
     counter_scope = {"status": "not_observed", "criteria": [], "scope": {}, "alternative_sources": []}
     instruction_ref = None
-    if counter_instruction is not None:
+    complete = packet["schema_version"] == "research-review-context/v3"
+    if complete:
+        counter_scope, instruction_ref = _complete_counter_scope(context, bodies, counter_instruction, claims)
+    elif counter_instruction is not None:
         from evidence_wiki.counter_context import alternative_aliases
         from evidence_wiki.coverage_examination import check_instruction
         from evidence_wiki.review_context import _metadata
@@ -125,10 +130,97 @@ def create(context, sources, diagnostics, counter_material=(), *, counter_instru
             "criteria": [{**detached(row), "facet_id": facet_aliases[row["facet_id"]]} for row in instruction["criteria"]],
             "alternative_sources": alternatives}
         instruction_ref = digest(instruction)
-    visible = {"schema_version": "research-review-sections/v1", "context_sha256": context.packet_id,
+    visible = {"schema_version": "research-review-sections/v2" if complete else "research-review-sections/v1", "context_sha256": context.packet_id,
         "mechanical": [rows[identifier] for identifier in claims], "counter_material": counter,
         "counter_context": counter_scope,
         "counter_search_completeness": "not_established", "semantic_approval": "not_evaluated", "accepted": False}
     bounded(visible)
     return detached(visible), {"section_sha256": digest(visible), "diagnostics_sha256": digest(diagnostics),
         "search_refs": retained_refs, "source_input_sha256": digest(sources), "counter_instruction_ref": instruction_ref}
+
+
+def _dependency_sections(context, sources, diagnostics, counter_material):
+    """Deliver complete native rows already bound by the selective carrier."""
+    from .review_context import dependency_material
+    from .review_packet_contracts import validate
+
+    material = dependency_material(context)
+    from .review_wire import decode_dependency_material
+    local = decode_dependency_material(context.document()["dependency_material"])["local_context"]
+    by_claim = {row["claim_id"]: row for row in diagnostics["claims"]}
+    if any(by_claim.get(row["claim_id"]) != row for row in material["local_context"]["mechanical"]):
+        refuse("mechanical_claim_changed")
+    if counter_material:
+        refuse("selective_counter_receipt_unsupported")
+    typed = owner("_question_dependencies")
+    counter = local["counterevidence"]
+    questions = [{**row, "scope": typed.typed_value(row["scope"]), "criteria": typed.typed_value(row["criteria"]),
+        "alternative_sources": [{**source, "metadata": typed.typed_value(source["metadata"])}
+            for source in row["alternative_sources"]]} for row in counter["questions"]]
+    visible = {"schema_version": "research-review-sections/v3", "context_sha256": context.packet_id,
+        "mechanical": local["mechanical"], "counter_material": counter["slices"],
+        "counter_context": {"status": counter["state"], "questions": questions},
+        "counter_search_completeness": counter["search_completeness"], "semantic_approval": "not_evaluated", "accepted": False}
+    visible = validate(visible["schema_version"], visible)
+    return visible, {"section_sha256": digest(visible), "diagnostics_sha256": digest(diagnostics),
+        "search_refs": [], "source_input_sha256": digest(sources), "counter_instruction_ref": None}
+
+
+def _complete_counter_scope(context, bodies, instructions, claims):
+    """Retain each closure question's own native criteria and permitted alternatives."""
+    from evidence_wiki.counter_context import alternative_aliases
+    from evidence_wiki.coverage_examination import check_instruction
+    from evidence_wiki.review_context import _claim, _metadata
+
+    packet, aliases = context.document(), context.binding()["aliases"]
+    if type(instructions) is not list or len(instructions) > 33:
+        refuse("counter_instruction_question_missing")
+    by_question = {}
+    for supplied in instructions:
+        instruction = check_instruction(supplied)
+        alias = aliases["question"].get(instruction["question_slug"])
+        if alias is None or alias in by_question:
+            refuse("counter_instruction_question_changed")
+        by_question[alias] = instruction
+    expected = {row["slug"] for row in packet["questions"]}
+    if set(by_question) != expected:
+        refuse("counter_instruction_question_missing")
+    questions, references = [], []
+    for question in packet["questions"]:
+        instruction = by_question[question["slug"]]
+        instructed = {row["id"]: row for row in instruction["claims"]}
+        own = [row for row in claims.values() if row["question_slug"] == question["slug"]]
+        for identifier, alias in aliases["claims"].items():
+            if alias not in {row["id"] for row in own}:
+                continue
+            supplied = instructed.get(identifier)
+            try:
+                projected = _claim(supplied, aliases["claims"], aliases["sources"], aliases["question"])
+                projected["qualification"] = supplied["qualification"]
+                if "calculations" in claims[alias]:
+                    projected["calculations"] = detached(supplied.get("calculations", []))
+            except (KeyError, TypeError):
+                refuse("counter_instruction_claim_changed")
+            if projected != claims[alias]:
+                refuse("counter_instruction_claim_changed")
+        retained = {row["source_id"]: row for row in instruction["source_contexts"]}
+        for identifier in aliases["sources"]:
+            source, actual = bodies.get(identifier), retained.get(identifier)
+            if (source is None or actual is None or source["record_sha256"] != actual["record_sha256"]
+                    or source["content"] != actual["text"]):
+                refuse("counter_instruction_source_changed")
+        alternatives = []
+        for identifier, alias in alternative_aliases(instruction, context).items():
+            source, actual = bodies.get(identifier), retained[identifier]
+            if (source is None or source["record_sha256"] != actual["record_sha256"]
+                    or source["content"] != actual["text"]):
+                refuse("counter_instruction_source_changed")
+            alternatives.append({"source_id": alias, "record_sha256": source["record_sha256"],
+                "metadata": _metadata(source.get("metadata", {})), "content": source["content"]})
+        facets = {row["facet_id"]: "facet-" + str(index + 1) for index, row in enumerate(instruction["facets"])}
+        questions.append({"question_slug": question["slug"], "claim_ids": [row["id"] for row in own],
+            "scope": detached(instruction["scope"]),
+            "criteria": [{**detached(row), "facet_id": facets[row["facet_id"]]} for row in instruction["criteria"]],
+            "alternative_sources": alternatives})
+        references.append(digest(instruction))
+    return {"status": "current_native_instruction", "questions": questions}, digest(references)

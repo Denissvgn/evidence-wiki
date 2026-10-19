@@ -5,17 +5,19 @@ from __future__ import annotations
 import hashlib
 import platform
 import sys
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 
+from ._review_dependency_json import canonical, digest
 from .agent_execution import BoundedSubprocessExecutor, ExecutionError, _utc
 from .errors import ConfigError, EvidenceWikiError
-from .mutation_contracts import canonical, digest
 from .research_journal_contracts import digest_record
 from .research_session import ResearchSession
 
 SCHEMA = "research-host-qualification/v1"
+SCHEMA_V2 = "research-host-qualification/v2"
 MAX_ATTEMPTS = 64
 
 
@@ -29,7 +31,9 @@ def _boundary(function):
     def guarded(*args, **kwargs):
         from ._facades._base import _translated
         try:
-            return function(*args, **kwargs)
+            from ._review_dependency_inputs import bind_session
+            with bind_session(args[0]) if type(args[0]) is ResearchSession else nullcontext():
+                return function(*args, **kwargs)
         except EvidenceWikiError:
             raise
         except (Exception, SystemExit) as error:
@@ -69,6 +73,7 @@ def host_qualification(session):
     configuration = driver.owner("_strict_evidence").configuration(session.root)
     sources = None
     observed = []
+    report_schema = SCHEMA
     closing_reviews = []
     for retained in attempts:
         attempt = session.execution.attempt(retained["attempt"])
@@ -99,11 +104,9 @@ def host_qualification(session):
                 row.update(context_state="not_current", context_reason="retained_claim_not_current")
             if prepared is not None:
                 if sources is None:
-                    sources, _ = driver._sources(session)
-                selected = set(retained["review_context"]["aliases"]["sources"])
+                    sources, _ = driver._host_sources(session)
                 try:
-                    context.check_owner(owner_snapshot=prepared["snapshot"], basis_id=prepared["result"]["basis_id"])
-                    context.check(prepared["snapshot"], prepared["rubric"], [item for item in sources if item["source_id"] in selected])
+                    driver._check_review_context(session, context, prepared, sources)
                     row.update(context_state="current_immutable_packet" if context.document()["manifest"]["context_complete"] else "incomplete")
                 except ExecutionError:
                     row.update(context_state="not_current", context_reason="retained_context_does_not_match_current_evidence")
@@ -122,17 +125,41 @@ def host_qualification(session):
             review = envelope["payload"]["body"]["review"]
             generator = session.execution.review_signer.generator
             authorship = review.get("generator", {})
+            expected_authorship = {"schema_version": "evidence-strict-authorship/v1",
+                "basis_id": review.get("basis_id"), "claim_id": review.get("claim_id")}
+            selective = review.get("schema_version") == "evidence-strict-review/v3"
+            if selective:
+                report_schema = SCHEMA_V2
+            if selective:
+                expected_authorship.update(schema_version="evidence-strict-authorship/v2",
+                    claim_schema_version=review["claim_schema_version"],
+                    observed_workspace_basis_id=review["observed_workspace_basis_id"],
+                    semantic_material_id=review["delivery"]["semantic_material_id"])
             if (identity.controller_ref == generator.controller_ref
                     or any(authorship.get("authentication", {}).get(key) != getattr(generator, key) for key in ("principal", "key_id"))
-                    or authorship.get("payload") != {"schema_version": "evidence-strict-authorship/v1",
-                        "basis_id": review.get("basis_id"), "claim_id": review.get("claim_id")}):
+                    or authorship.get("payload") != expected_authorship):
                 _refuse("attestation_generator_binding_mismatch")
             if (application.get("profile_ref") != attempt.config_ref or application.get("claim_id") != retained.get("claim_id")
                     or review.get("claim_id") != retained.get("claim_id") or application.get("strict_basis_id") != review.get("basis_id")
                     or receipt is None or receipt["state"] != "succeeded" or not receipt["final_accounting"]
                     or _utc(receipt["completed_utc"]) > _utc(attempt.job["deadline_utc"])):
                 _refuse("attestation_attempt_binding_mismatch")
-            if prepared is not None and row["context_state"] == "current_immutable_packet":
+            if selective and prepared is not None:
+                native = next((item for item in prepared["result"]["claims"] if item["claim"]["id"] == retained["claim_id"]), None)
+                selected = native is not None and native["review"].get("review_id") == driver.owner("_strict_contract").artifact_id(review)
+                if selected:
+                    from ._review_dependency_custody import resolve_original
+                    proof = resolve_original(review, purpose="reuse")
+                    proof.assert_review_envelope(envelope)
+                    if (review["basis_id"] != native["claim_basis_id"] or review["observation"] != native["observation"]
+                            or not 0 <= (datetime.now(timezone.utc) - _utc(review["reviewed_at"])).total_seconds() <= prepared["snapshot"]["policy"]["max_review_age_seconds"]
+                            or _utc(review["reviewed_at"]) > _utc(envelope["authentication"]["issued_at"])):
+                        _refuse("attestation_current_context_mismatch")
+                    row.update(context_state="current_selective_semantics", context_reason=None,
+                        attestation_state="current_bound_review")
+                else:
+                    row["attestation_state"] = "native_controller_verified"
+            elif prepared is not None and row["context_state"] == "current_immutable_packet":
                 native = next((item for item in prepared["result"]["claims"] if item["claim"]["id"] == retained["claim_id"]), None)
                 if (review.get("snapshot") != prepared["snapshot"] or review.get("basis_id") != prepared["result"]["basis_id"]
                         or native is None or review.get("observation") != native["observation"]
@@ -191,7 +218,7 @@ def host_qualification(session):
     native_observed = bool(required and required <= represented and credentials["state"] == "ready")
     package = Path(__file__).resolve().parent
     generation = session.binding["owner_generation"]
-    result = {"schema_version": SCHEMA, "observed_utc": datetime.now(timezone.utc).isoformat(),
+    result = {"schema_version": report_schema, "observed_utc": datetime.now(timezone.utc).isoformat(),
         "run_id": session.run_id, "binding_id": digest(session.binding), "basis_id": after["basis_id"],
         "policy_id": session.policy.policy_id, "execution_profile_sha256": session.execution.profile.sha256,
         "registry_sha256": session.execution.qualifications.sha256, "journal_head_ref": digest_record(records[-1]) if records else None,
@@ -222,4 +249,4 @@ def host_qualification(session):
     if len(canonical(result)) > 262144:
         _refuse("report_bound_exceeded")
     from .host_qualification_contracts import validate
-    return validate(SCHEMA, result)
+    return validate(report_schema, result)

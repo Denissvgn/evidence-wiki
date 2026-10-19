@@ -1,10 +1,13 @@
 """Closed bounded host observation documents; no grants or asserted isolation."""
 
+from copy import deepcopy
+
 from .mutation_contracts import canonical, detached
 from .onboarding_contract import _matches
 from .source_contracts import array, obj, string
 
 HOST = "research-host-qualification/v1"
+HOST_V2 = "research-host-qualification/v2"
 PROTECTED = "research-protected-host-qualification/v1"
 
 
@@ -37,12 +40,15 @@ def schemas():
         capability_matrix={"type": "array", "minItems": 3, "maxItems": 3,
             "prefixItems": [artifact, enforced, remote], "items": {"anyOf": [artifact, enforced, remote]}},
         limitations=array(string(512), 8), authorized={"const": False}, evidence_accepted={"const": False})
+    host_v2 = deepcopy(host)
+    host_v2["properties"]["schema_version"] = {"const": HOST_V2}
+    host_v2["properties"]["attempts"]["items"]["properties"]["context_state"]["enum"].append("current_selective_semantics")
     protected = obj(schema_version={"const": PROTECTED}, observed_utc=string(40), backend={"const": "darwin-sbpl"},
         probe_program_sha256=text, draft_write={"const": "allowed"}, protected_authority_read={"const": "denied"},
         workspace_write={"const": "denied"}, host_implementation=text, action_id=hashed, policy_id=hashed, basis_id=hashed,
         boundary={"const": "draft_worker"}, state={"const": "observed"}, semantic_host_enforced={"const": "unsupported"},
         limitations=array(string(512), 8), authorized={"const": False}, evidence_accepted={"const": False})
-    return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", **value} for key, value in ((HOST, host), (PROTECTED, protected))}
+    return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", **value} for key, value in ((HOST, host), (HOST_V2, host_v2), (PROTECTED, protected))}
 
 
 def validate(identifier, value):
@@ -50,7 +56,7 @@ def validate(identifier, value):
 
     try:
         _matches(value, schemas()[identifier])
-        if identifier == HOST and [row["boundary"] for row in value["capability_matrix"]] != ["artifact_checked", "host_enforced", "remote_model"]:
+        if identifier in {HOST, HOST_V2} and [row["boundary"] for row in value["capability_matrix"]] != ["artifact_checked", "host_enforced", "remote_model"]:
             _refuse("capability_matrix_selection_invalid")
         if len(canonical(value)) > 262144:
             _refuse("report_bound_exceeded")

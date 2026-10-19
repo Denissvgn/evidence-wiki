@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -105,7 +106,8 @@ class OnboardingMcpServer:
             and type(message["params"].get("name")) is str
             and message["params"].get("name") in self.research_operations)
 
-    def handle_message(self, message, *, cancellation=None):
+    def handle_message(self, message, *, cancellation=None, operation_control=None):
+        """Dispatch with an optional borrowed host-only operation control."""
         if not valid_request(message):
             return rpc_error(None, -32600, "Invalid request")
         identifier, method, params = message.get("id"), message["method"], message.get("params", {})
@@ -135,24 +137,45 @@ class OnboardingMcpServer:
                 if method == "tools/list" and not params:
                     result = {"tools": manifest(self.allowed) + research_manifest(self.research_allowed)}
                 elif method == "tools/call" and set(params) <= {"name", "arguments"} and isinstance(params.get("name"), str):
+                    control = operation_control
+                    owns_control = False
                     try:
-                        control = None
+                        from .operation_control import OperationControl, checkpoint
+                        if cancellation is not None and operation_control is not None:
+                            from .errors import ConfigError
+                            raise ConfigError("OPERATION_CONTROL_INVALID", "Select one host operation control source.",
+                                recoverable=False, details={"checkpoint": "mcp_control_selection"})
                         if cancellation is not None:
-                            from .operation_control import OperationControl
                             seconds = min(600, self.runtime.policy.to_dict()["budgets"]["seconds"]) if self.runtime else 600
                             control = OperationControl(deadline_utc=(datetime.now(timezone.utc)+timedelta(seconds=seconds)).isoformat(),
                                 timeout_seconds=seconds, cancel_requested=cancellation.is_set)
+                            owns_control = True
+                        checkpoint(control, "before_mcp_tool")
                         payload = self.call_tool(params["name"], params.get("arguments", {}), operation_control=control)
                         failed = payload.get("status") == "refused"
                     except EvidenceWikiError as error:
                         payload, failed = error_payload(error), True
                     finally:
-                        if control is not None:
+                        if owns_control:
                             control.close()
                     result = {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False, allow_nan=False)}], "isError": failed}
-                elif method == "resources/list" and not params:
+                elif method == "resources/list" and set(params) <= {"cursor"}:
+                    offset = 0
+                    if "cursor" in params:
+                        cursor = params["cursor"]
+                        if (type(cursor) is not str or len(cursor) > 32
+                                or re.fullmatch(r"resources:(0|[1-9][0-9]{0,2})", cursor) is None):
+                            return rpc_error(identifier, -32602, "Invalid resource cursor")
+                        offset = int(cursor.split(":", 1)[1])
+                        from .agent_resources import MAX_INSTALLED_RESOURCES
+                        if offset > MAX_INSTALLED_RESOURCES:
+                            return rpc_error(identifier, -32602, "Invalid resource cursor")
+                    page = self.handle.resources(offset=offset)
                     result = {"resources": [{"uri": "evidence-wiki://resource/" + row["id"], "name": row["id"], "mimeType": row["media_type"]}
-                        for row in self.handle.resources()["resources"]]}
+                        for row in page["resources"]]}
+                    next_offset = offset + page["bounds"]["returned"]
+                    if next_offset < page["bounds"]["total"]:
+                        result["nextCursor"] = "resources:" + str(next_offset)
                 elif method == "resources/read" and set(params) == {"uri"} and isinstance(params["uri"], str):
                     prefix = "evidence-wiki://resource/"
                     if not params["uri"].startswith(prefix):

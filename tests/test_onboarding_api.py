@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from evidence_wiki import Onboarding, cli
+from evidence_wiki._agent_catalog import resource_paths
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.planning import compile_plan
@@ -19,7 +20,14 @@ def test_bootstrap_cli_parity_and_closed_lifetime(capsys):
     value = handle.bootstrap(request_id="parity")
     assert cli.main(["agent", "summary", "--request-id", "parity", "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out) == value
-    assert handle.resources()["bounds"]["truncated"] is False
+    assert value["schema_version"] == "2.0"
+    first = handle.resources()
+    assert len(first["resources"]) == first["bounds"]["returned"] == 128
+    assert first["bounds"]["truncated"] is (first["bounds"]["total"] > 128)
+    pages = [handle.resources(offset=offset) for offset in range(0, first["bounds"]["total"], 128)]
+    entries = [row for page in pages for row in page["resources"]]
+    assert len(entries) == first["bounds"]["total"] == len(resource_paths())
+    assert {row["id"] for row in entries} == set(resource_paths())
     handle.close()
     handle.close()
     with pytest.raises(EvidenceWikiError) as error:

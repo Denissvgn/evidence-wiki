@@ -47,6 +47,15 @@ def _refuse(reason: str, code: str = "MUTATION_STORE_REFUSED") -> NoReturn:
 
 def _json(value: Any) -> tuple[dict[str, Any], bytes]:
     try:
+        if type(value) is dict and value.get("schema_version") == "research-mutation-intent/v1":
+            from .mutation_contracts import INTENT, _selective_mutation_document, encode_document
+
+            selected = _selective_mutation_document(value)
+            if selected is not None:
+                from ._review_dependency_json import _aggregate
+
+                _aggregate(selected, max_nodes=32768, count_keys=True)
+                return selected, encode_document(INTENT, selected)
         bounded(value)
         raw = canonical(value)
         if len(raw) > MAX_RECORD_BYTES:
@@ -426,6 +435,13 @@ class MutationStore:
         if raw is None:
             return None
         try:
+            if (name == "intent.json" and b'"evidence-strict-review/v3"' in raw
+                    and b'"strict.register_review"' in raw):
+                from .mutation_contracts import INTENT, _selective_mutation_document, decode_document
+
+                value = decode_document(INTENT, raw)
+                if _selective_mutation_document(value) is not None:
+                    return _json(value)[0]
             return _json(json_document(raw))[0]
         except EvidenceWikiError:
             _refuse("stored_record_invalid")

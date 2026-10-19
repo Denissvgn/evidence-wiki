@@ -24,6 +24,12 @@ from _strict_evidence import (
     review_status,
     sibling,
 )
+from _strict_evidence import (
+    prepare_dependency_review_material as prepare_dependency_review_material,
+)
+from _strict_evidence import (
+    prepare_review_material as prepare_review_material,
+)
 
 
 def run_operation(root, operation, *, claim_id=None, envelope=None):

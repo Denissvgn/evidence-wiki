@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
 from ._facades._base import _process_exit, _translated, call_seam
+from ._review_dependency_json import canonical, detached, digest
 from .errors import EvidenceWikiError
 from .host_context import checked_operation, current_context
-from .mutation_contracts import canonical, detached, digest, validate_request_id
+from .mutation_contracts import validate_request_id
 from .mutation_operations import _generation, _host_selection
 from .mutation_store import MutationStore
 from .research_observation import ResearchObservation
@@ -31,7 +33,10 @@ def _boundary(function):
             owner_args = args[1:] if method and seam == "session" else (args[0].root,) if method else args
             with checked_operation("research_session", seam, owner_args, kwargs) as revalidate:
                 revalidate()
-                return function(*args, **kwargs)
+                from ._review_dependency_inputs import bind_session
+                scope = bind_session(args[0]) if method and seam != "session" else nullcontext()
+                with scope:
+                    return function(*args, **kwargs)
         except (Exception, SystemExit) as error:
             if isinstance(error, EvidenceWikiError):
                 raise
@@ -92,24 +97,76 @@ def _original_binding(view):
         for row in view["accounting"]["original_outcomes"]])
 
 
-def _request_binding(root):
-    """Bind canonical original mappings without computing unrelated publication."""
+def _request_inputs(root, *, question_prefix=None):
+    """Prove coherent mapping bytes and full-tree metadata, not unrelated readability."""
+    import stat
+    import sys
     from types import MappingProxyType
 
     from ._pack_io import yaml_document
     from .pack_discovery import owner
 
     revisions = owner("_evidence_revision")
-    before = revisions.capture_workspace(root)
-    config = yaml_document(before.files["research.yml"])
-    questions = owner("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"
-    selected = lambda name: name in {"research.yml", "docs/research-requirements.json"} or (
-        name.startswith(questions) and name.endswith(".md"))
-    files = {name: raw for name, raw in before.files.items() if selected(name)}
+    if sys.platform == "win32":
+        # Keep the native Windows capture's complete open-handle lifetime.
+        captured = revisions.capture_workspace(root)
+        config = yaml_document(captured.files["research.yml"]) if question_prefix is None else None
+        questions = (owner("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"
+            if question_prefix is None else question_prefix)
+        files = {name: raw for name, raw in captured.files.items()
+            if name in {"research.yml", "docs/research-requirements.json"}
+            or name.startswith(questions) and name.endswith(".md")}
+    else:
+        for attempt in range(revisions.MAX_ATTEMPTS):
+            try:
+                before = revisions.observe_tree(root)
+                if revisions.os.open not in revisions.os.supports_dir_fd or not hasattr(revisions.os, "O_NOFOLLOW"):
+                    raise revisions.refuse("EVIDENCE_REVISION_UNSUPPORTED", "No-follow descriptor capture is unavailable.")
+                pins = revisions._DirectoryPins(root, before)
+                try:
+                    config, questions, files = None, question_prefix, {}
+                    if question_prefix is None:
+                        raw_config = revisions.read_observed_file(root, "research.yml", before["research.yml"], pins)
+                        config = yaml_document(raw_config)
+                        questions = owner("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"
+                        files["research.yml"] = raw_config
+                    for name, info in sorted(before.items()):
+                        if name not in files and stat.S_ISREG(info[2]) and (name in {"research.yml", "docs/research-requirements.json"}
+                                or name.startswith(questions) and name.endswith(".md")):
+                            files[name] = revisions.read_observed_file(root, name, info, pins)
+                    pins.verify()
+                    if revisions.observe_tree(root) != before:
+                        raise revisions.refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
+                    pins.verify()
+                except BaseException as error:
+                    try:
+                        pins.close()
+                    except BaseException as cleanup:
+                        raise error from cleanup
+                    raise
+                else:
+                    pins.close()
+                break
+            except (FileNotFoundError, NotADirectoryError):
+                if attempt + 1 == revisions.MAX_ATTEMPTS:
+                    raise revisions.refuse("EVIDENCE_REVISION_CHANGED", "Workspace paths changed during capture.") from None
+            except revisions.ScriptRefusal as error:
+                if error.error_code != "EVIDENCE_REVISION_CHANGED" or attempt + 1 == revisions.MAX_ATTEMPTS:
+                    raise
+            except OSError as error:
+                raise revisions.refuse("EVIDENCE_REVISION_UNSAFE", "Workspace could not be captured safely.",
+                    reason=error.strerror) from error
     directories = {".", questions.rstrip("/")}
     for name in [*files, *directories]:
         directories.update(parent.as_posix() for parent in Path(name).parents if parent.as_posix() != ".")
-    captured = revisions.WorkspaceRevision(MappingProxyType(files), tuple(sorted(directories)))
+    return revisions.WorkspaceRevision(MappingProxyType(files), tuple(sorted(directories))), config
+
+
+def _request_binding(root):
+    """Bind canonical original mappings without computing unrelated publication."""
+    from .pack_discovery import owner
+
+    captured, config = _request_inputs(root)
     with captured.materialize() as snapshot:
         mapping = owner("_caller_context").original_questions(snapshot, config)
     if mapping["gaps"]:
@@ -118,8 +175,9 @@ def _request_binding(root):
         "question_ids": [identifier for identifier in row["question_ids"] if identifier in mapping["expected"]],
         "missing_question_ids": [identifier for identifier in row["question_ids"] if identifier not in mapping["expected"]]}
         for row in mapping["originals"]])
-    after = revisions.capture_workspace(root)
-    if {name: raw for name, raw in after.files.items() if selected(name)} != files:
+    questions = owner("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"
+    after, _ = _request_inputs(root, question_prefix=questions)
+    if after.files != captured.files:
         refuse("ORIGINALS_CHANGED")
     return result
 
@@ -283,7 +341,9 @@ class ResearchSession:
             approved_profiles(self.policy.to_dict(), execution.profile)
         self._closed = False
         self._owner_workspace = None
-        view = current(root, self.policy, run_id=None)
+        from ._review_dependency_inputs import bind_constructing_session
+        with bind_constructing_session(self):
+            view = current(root, self.policy, run_id=None)
         if not view["policy_compatible"]:
             refuse("SCOPE_ACCOUNTING")
         info = root.stat()

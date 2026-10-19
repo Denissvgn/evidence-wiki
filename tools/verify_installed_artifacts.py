@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from evidence_wiki import __version__
+from tools._installation_contract import check_review_producer_inventory
 from tools._installed_receipts import evidence_inventory, replay_installation
 from tools._journey_cases import load_cases, reference_cases
 from tools.probe_installed_cli import OUTCOME_CASES, checked_outcomes
@@ -41,6 +42,7 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None, require
     membership = check_archive_membership(wheel, sdist)
     inputs = validation_identity()
     layout, source_files = source_layout(REPO_ROOT)
+    check_review_producer_inventory(REPO_ROOT, layout)
     source = source_identity(source_files)
     expectations = qualification_expectations(layout)
     # Synthetic report-shape fixtures cannot prove bytes. Actual archives are

@@ -116,7 +116,11 @@ def test_inert_projection_rejects_malformed_decisive_fields(owner_case, change):
 def test_legacy_job_and_next_versions_preserve_frozen_closed_shapes():
     from evidence_wiki.research_session_contracts import schema_document as next_schema
     from evidence_wiki.workflow_contracts import schema_document as job_schema
-    assert digest(job_schema("research-host-job/v3")) == "sha256:416284eb9459f267b07f7e4a9b8e3cdfb7c9025e256c4e40c693a418cf334564"
+    job_v3 = job_schema("research-host-job/v3")
+    assert digest(job_v3) == "sha256:9462041e2df4995c029c1eb9b504bc642b62793d49bec4b1080d2a1384a0dfe7"
+    # Readability appended two closed alternatives; the original eight stay exact.
+    legacy_job_v3 = {**job_v3, "anyOf": job_v3["anyOf"][:8]}
+    assert digest(legacy_job_v3) == "sha256:416284eb9459f267b07f7e4a9b8e3cdfb7c9025e256c4e40c693a418cf334564"
     assert digest(next_schema("research-session-next/v3")) == "sha256:31c5c9e7648da0f1231ee786ab58b26fa77fe09c55ed61ecd99348ba54f26302"
 
 

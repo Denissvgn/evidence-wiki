@@ -23,11 +23,12 @@ from tools._execution_budget import (
     validate_runtime_allocation,
 )
 from tools._observation_freshness import (
-    observation_policy as select_observation_policy,
-)
-from tools._observation_freshness import (
+    is_batch_policy,
     validate_observation_policy,
     validate_observer_window,
+)
+from tools._observation_freshness import (
+    observation_policy as select_observation_policy,
 )
 from tools._review_dependency_workload import (
     OriginalResponses,
@@ -80,12 +81,13 @@ def reference_plan(bundle, *, journal_count=4, phase_caps=None, observation_prof
         raise ValueError("closure_journal_count_invalid")
     policy = None if observation_profile is None else select_observation_policy(observation_profile)
     execution = None if execution_profile is None else select_execution_policy(execution_profile)
-    if execution is not None and observation_profile != "batch":
+    if execution is not None and (policy is None or not is_batch_policy(policy)):
         raise ValueError("execution_observation_profile_invalid")
     authority_seconds = 7200 if execution is None else execution["authority_seconds"]
-    limits = EXECUTION_PHASE_CAPS if execution is not None else BATCH_PHASE_CAPS if observation_profile == "batch" else PHASE_CAPS
+    limits = EXECUTION_PHASE_CAPS if execution is not None else BATCH_PHASE_CAPS if policy is not None and is_batch_policy(policy) else PHASE_CAPS
     if execution is not None:
-        limits = dict(limits, global_close=workload.phase_ceilings(policy, execution)["global_close"])
+        ceilings = workload.phase_ceilings(policy, execution)
+        limits = dict(limits, **{key: ceilings[key] for key in ("owner_read", "global_close")})
     caps = dict(limits if phase_caps is None else phase_caps)
     if (set(caps) != set(limits)
             or any(type(value) is not int or not 0 < value <= limits[key] for key, value in caps.items())
@@ -290,7 +292,7 @@ def run_diagnostic(plan, expected_plan, directory):
                     artifacts[name] = value
                     report["input_pins"].append(retain(directory / "inputs" / name, raw, raw=True))
                 root, runtime, _, _, _ = provision(directory / "fixture", artifacts["fresh-fixture-input.json"]["fixture"],
-                    originals, run_seconds=plan["elapsed_cap_seconds"], allocation_binding={
+                    originals, children=tracker, run_seconds=plan["elapsed_cap_seconds"], allocation_binding={
                         "plan_sha256": expected_plan, "candidate_sha256": plan["candidate_sha256"],
                         "study": report["study"], "phase_caps": plan["phase_caps"], "run_ids": plan["run_ids"], "review_jobs": 0,
                         **({"observation_policy": policy, "observation_policy_sha256": digest(policy),
@@ -306,9 +308,11 @@ def run_diagnostic(plan, expected_plan, directory):
                 report["initial_journal_receipts"] = create_journals(root, runtime, opened_runs, originals)
                 report["review_attempts"] = len(runtime.execution.executor._attempts)
             phase("setup", plan["phase_caps"]["setup"], setup)
+            tracker.confirm_completed()
             for index in range(2):
                 observed, round_snapshots, records = phase("owner-read-" + str(index + 1),
                     plan["phase_caps"]["owner_read"], owner_read)
+                tracker.confirm_completed()
                 report["owner_reads"].append(observed)
                 snapshots.extend(round_snapshots)
                 identity = workload.owner_read_identity(observed)
@@ -368,13 +372,14 @@ def run_diagnostic(plan, expected_plan, directory):
             report["native_journal_pins"], report["retention"] = workload.collect_journals(root, directory)
             if report["retention"]["status"] != "complete":
                 errors.append(ValueError("workload_journal_collection_bound"))
-        if (policy is not None and policy["profile"] == "batch" and runtime is not None
+        if (policy is not None and is_batch_policy(policy) and runtime is not None
                 and len(report["owner_reads"]) == 2 and report["failure"] is None and not errors):
             originals.capture_original_window = False
             try:
                 owner_started = time.monotonic()
                 with workload_deadline(plan["phase_caps"]["owner_read"]):
                     observed, closing_snapshots, records = owner_read()
+                tracker.confirm_completed()
                 if time.monotonic() - owner_started > plan["phase_caps"]["owner_read"]:
                     raise _HostDeadline()
                 report["closing_owner_read"] = observed
@@ -422,7 +427,7 @@ def run_diagnostic(plan, expected_plan, directory):
             report["observation_freshness"]["actual_age_seconds"] = witness["closing_latency_seconds"]
             for observed in report["owner_reads"]:
                 validate_observer_window(observed, closing, policy)
-            if policy["profile"] == "batch":
+            if is_batch_policy(policy):
                 validate_observer_window(report["closing_owner_read"], closing, policy)
         if not witness["closed_within_original_bound"]:
             raise ValueError("workload_original_witness_expired")
@@ -451,8 +456,8 @@ def main(argv=None):
     parser.add_argument("--expected-plan")
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--journal-count", type=int, default=4)
-    parser.add_argument("--observation-profile", choices=("interactive", "batch"), default="batch")
-    parser.add_argument("--execution-profile", choices=("two-hour", "four-hour"))
+    parser.add_argument("--observation-profile", choices=("interactive", "batch", "batch-extended"), default="batch")
+    parser.add_argument("--execution-profile", choices=("two-hour", "four-hour", "six-hour"))
     args = parser.parse_args(argv)
     try:
         if args.action == "freeze":

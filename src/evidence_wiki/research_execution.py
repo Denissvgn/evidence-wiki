@@ -6,15 +6,73 @@ import hashlib
 import hmac
 import threading
 from datetime import datetime, timezone
+from inspect import getattr_static
+from types import MethodType
 
 from . import execution_accounting as accounting
-from .agent_execution import ExecutionAttempt, ExecutionProfile
-from .mutation_contracts import canonical, detached, digest, validate_request_id
-from .research_journal_contracts import JOURNAL, canonical_record, detached_record, digest_record
+from ._review_dependency_json import canonical, detached, digest
+from .agent_execution import MAX_BYTES, BoundedSubprocessExecutor, ExecutionAttempt, ExecutionProfile
+from .mutation_contracts import validate_request_id
+from .research_journal_contracts import (
+    JOURNAL,
+    _canonical_owned_record,
+    canonical_record,
+    detached_record,
+    digest_record,
+    expanded_size,
+)
 from .research_session_contracts import refuse
 
 SCOPE = "session-work-execution"
 _HOST_CALL_CAPACITY = threading.BoundedSemaphore(16)
+_NATIVE_AUTHENTICATE = BoundedSubprocessExecutor.authenticate
+_NATIVE_CHECK = BoundedSubprocessExecutor._check
+_NATIVE_PROFILE_METHODS = tuple((name, getattr(ExecutionProfile, name))
+    for name in ("role", "document", "check_job_scope"))
+
+
+def _native_receipt_owner(executor, attempt, observation):
+    """Recognize the bundled, local historical receipt verifier only."""
+    if type(executor) is not BoundedSubprocessExecutor or type(attempt) is not ExecutionAttempt:
+        return False
+    profile = getattr_static(executor, "profile", None)
+    if type(profile) is not ExecutionProfile or type(getattr_static(executor, "_key", None)) is not bytes:
+        return False
+    for instance, name, original in ((executor, "authenticate", _NATIVE_AUTHENTICATE),
+            (executor, "_check", _NATIVE_CHECK),
+            *((profile, name, original) for name, original in _NATIVE_PROFILE_METHODS)):
+        method = getattr_static(instance, name, None)
+        if method is original and name not in vars(instance):
+            continue
+        if type(method) is not MethodType or method.__self__ is not instance or method.__func__ is not original:
+            return False
+    # Inspect only exact inert values before the native codec can examine
+    # schema coordinates. Foreign objects retain the external-call boundary.
+    pending, count, text_size = [(observation, 0)], 0, 0
+    while pending:
+        item, depth = pending.pop()
+        count += 1
+        if count > 65_536 or depth > 64:
+            return False
+        if type(item) is dict:
+            if count + len(pending) + len(item) > 65_536 or any(type(key) is not str for key in item):
+                return False
+            text_size += sum(len(key) for key in item)
+            pending.extend((child, depth + 1) for child in item.values())
+        elif type(item) is list:
+            if count + len(pending) + len(item) > 65_536:
+                return False
+            pending.extend((child, depth + 1) for child in item)
+        elif type(item) is str:
+            text_size += len(item)
+        elif type(item) is int:
+            if item.bit_length() > 256:
+                return False
+        elif type(item) not in (float, bool, type(None)):
+            return False
+        if text_size > MAX_BYTES:
+            return False
+    return True
 
 
 def bounded_host_call(function, arguments, timeout_seconds):
@@ -158,30 +216,44 @@ class ResearchExecution:
             "data": detached(data), "authentication": None})
 
     def records(self, session):
+        return self._records_for_binding(session.root, session.run_id, session.binding)
+
+    def _records_for_binding(self, root, run_id, binding):
+        """Authenticate a bound run without constructing a current session."""
         from .research_session import _load
 
-        controller = _load(session.root, "run_controller")
-        if not controller.run_state_path(session.root, session.run_id).exists():
+        controller = _load(root, "run_controller")
+        if not controller.run_state_path(root, run_id).exists():
             return []
-        document = controller._session_state(session.root, session.run_id)
-        if document.get("research_session") != session.binding:
+        document = controller._session_state(root, run_id)
+        if document.get("research_session") != binding:
             refuse("BINDING_CHANGED")
         result = []
-        binding = session.binding
+        expanded_bytes = 0
         binding_id = digest(binding)
-        for event in controller._bounded_journal(controller.events_path(session.root, session.run_id))["events"]:
+        previous_ref = None
+        for event in controller._bounded_journal(controller.events_path(root, run_id))["events"]:
             data = event.get("data") or {}
             record = data.get("record", {})
             if record.get("schema_version") != JOURNAL:
                 continue
-            previous = {key: value for key, value in result[-1].items() if key != "event_ref"} if result else None
             if (set(record) != {"schema_version", "kind", "binding_id", "request_id", "sequence", "previous_record_ref", "data", "authentication"}
                     or record["binding_id"] != binding_id
                     or record["request_id"] != data.get("request_id") or record["sequence"] != len(result)
-                    or record["previous_record_ref"] != (digest_record(previous) if previous is not None else None)):
+                    or record["previous_record_ref"] != previous_ref):
+                refuse("EXECUTION_JOURNAL_INVALID")
+            from .mutation_contracts import _serialized
+            stored_bytes = _serialized(record)
+            canonical_bytes, owned_record = _canonical_owned_record(record)
+            if stored_bytes != canonical_bytes:
+                refuse("EXECUTION_JOURNAL_INVALID")
+            record = owned_record
+            expanded_bytes += expanded_size(record) + 1
+            if expanded_bytes > 16777216:
                 refuse("EXECUTION_JOURNAL_INVALID")
             self._verify(record)
             result.append({**record, "event_ref": event["event_id"]})
+            previous_ref = "sha256:" + hashlib.sha256(canonical_bytes).hexdigest()
         return result
 
     def attempt(self, document):
@@ -198,7 +270,15 @@ class ResearchExecution:
     def authenticate(self, observation, attempt):
         from .agent_execution import validate_observation
 
-        value, reason = bounded_host_call(self.executor.authenticate, (observation, attempt), self.profile.cleanup_timeout_seconds)
+        if _native_receipt_owner(self.executor, attempt, observation):
+            # The exact bundled implementation checks inert receipt bytes and
+            # frozen attempt/profile correlation without waiting on a host.
+            try:
+                value, reason = _NATIVE_AUTHENTICATE(self.executor, observation, attempt), None
+            except BaseException:
+                value, reason = None, "host_observation_failed"
+        else:
+            value, reason = bounded_host_call(self.executor.authenticate, (observation, attempt), self.profile.cleanup_timeout_seconds)
         if reason is not None:
             refuse("EXECUTION_OBSERVATION_UNAUTHENTICATED")
         value = validate_observation(value)

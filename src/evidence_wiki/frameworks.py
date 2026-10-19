@@ -7,6 +7,7 @@ import json
 import platform
 import re
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from ._filesystem import os
@@ -14,6 +15,7 @@ from .agent_resources import resource_document
 from .errors import UsageError
 
 CALL_SCHEMA = "evidence-framework-call/v1"
+PAGED_CALL_SCHEMA = "evidence-framework-call/v2"
 RESULT_SCHEMA = "evidence-framework-result/v1"
 MAX_INPUT = 65_536
 MAX_OUTPUT = 2_097_152
@@ -52,8 +54,17 @@ def tool_schemas() -> dict:
                  result_sha256=hashed, instruction_sha256=hashed,
                  evidence_acceptance={"enum": ["not_evaluated", "eligible", "ineligible"]},
                  host_enforced={"const": False})
+    page_parameters = {"type": "object", "additionalProperties": False, "properties": {
+        "offset": {"type": "integer", "minimum": 0, "maximum": 1_000_000},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 128}}}
+    paged_call = deepcopy(call)
+    paged_call["properties"]["schema_version"] = {"const": PAGED_CALL_SCHEMA}
+    paged_call["properties"]["parameters"]["properties"].update(deepcopy(page_parameters["properties"]))
+    paged_call["allOf"] = [{"if": {"properties": {"operation": {"const": "resources"}}},
+        "then": {"properties": {"parameters": page_parameters}},
+        "else": {"properties": {"parameters": deepcopy(call["properties"]["parameters"])}}}]
     return {key: {"$schema": "https://json-schema.org/draft/2020-12/schema", **value}
-            for key, value in ((CALL_SCHEMA, call), (RESULT_SCHEMA, result))}
+            for key, value in ((CALL_SCHEMA, call), (PAGED_CALL_SCHEMA, paged_call), (RESULT_SCHEMA, result))}
 
 
 def _unique(pairs):
@@ -72,13 +83,19 @@ def decode_call(raw: bytes) -> dict:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique,
                            parse_constant=lambda _: refuse("nonfinite_json"))
         if (not isinstance(value, dict) or set(value) != {"schema_version", "request_id", "instruction_sha256", "operation", "parameters"}
-                or value["schema_version"] != CALL_SCHEMA or value["operation"] not in OPERATIONS
+                or value["schema_version"] not in (CALL_SCHEMA, PAGED_CALL_SCHEMA) or value["operation"] not in OPERATIONS
                 or not isinstance(value["request_id"], str)
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value["request_id"]) is None
                 or not isinstance(value["instruction_sha256"], str)
                 or re.fullmatch(r"[a-f0-9]{64}", value["instruction_sha256"]) is None):
             refuse("call_shape")
         params = value["parameters"]
+        if value["schema_version"] == PAGED_CALL_SCHEMA and value["operation"] == "resources":
+            if (type(params) is not dict or set(params) - {"offset", "limit"}
+                    or "offset" in params and (type(params["offset"]) is not int or not 0 <= params["offset"] <= 1_000_000)
+                    or "limit" in params and (type(params["limit"]) is not int or not 1 <= params["limit"] <= 128)):
+                refuse("call_parameters")
+            return value
         expected = {"resource_id"} if value["operation"] == "resource" else {"claim_id"} if value["operation"] == "strict_prepare_review" else set()
         optional = {"as_of"} if value["operation"].startswith("computation_") else set()
         if (not isinstance(params, dict) or not expected <= set(params) <= expected | optional
@@ -107,6 +124,10 @@ def invoke(raw: bytes, *, target: str | Path, python: str | Path | None = None) 
     params = call["parameters"]
     if call["operation"] == "resource":
         argv.extend([params["resource_id"], "--format", "json"])
+    elif call["operation"] == "resources":
+        for key in ("offset", "limit"):
+            if key in params:
+                argv.extend(["--" + key, str(params[key])])
     elif call["operation"] == "bootstrap" or call["operation"].startswith(("strict_", "computation_")):
         argv.extend(["--target", str(root)])
     for key, flag in (("claim_id", "--claim-id"), ("as_of", "--as-of")):
@@ -145,7 +166,7 @@ def invoke(raw: bytes, *, target: str | Path, python: str | Path | None = None) 
             contract = load_packaged_script(shared_assets_root(), "_strict_contract")
             try:
                 schema = owner.get("schema_version")
-                if schema not in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+                if schema not in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
                     refuse("strict_result_schema")
                 contract.validate_shape(owner, contract.schema_documents()[schema])
             except (ValueError, KeyError, TypeError):
@@ -230,6 +251,7 @@ export owner; ordinary conversation remains outside that delivery boundary.
              "skills/evidence-wiki/references/bootstrap.md": guide["content"],
              "pi/evidence-wiki.js": extension.replace("__INSTRUCTION_SHA256__", guide["sha256"]),
              "tool-call.schema.json": json.dumps(tool_schemas()[CALL_SCHEMA], sort_keys=True, indent=2) + "\n",
+             "tool-call-paged.schema.json": json.dumps(tool_schemas()[PAGED_CALL_SCHEMA], sort_keys=True, indent=2) + "\n",
              "tool-result.schema.json": json.dumps(tool_schemas()[RESULT_SCHEMA], sort_keys=True, indent=2) + "\n"}
     return {"schema_version": "evidence-framework-bundle/v1", "name": "evidence-wiki",
             "instruction_sha256": guide["sha256"], "files": files,

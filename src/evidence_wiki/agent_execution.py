@@ -27,7 +27,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from .workflow_contracts import JOB, JOB_V2, JOB_V3, JOB_V4, MAX_BYTES, validate_document, validate_job
+from ._process_groups import ProcessGroupOwnershipError, ownership_for
+from .workflow_contracts import JOB, JOB_V2, JOB_V3, JOB_V4, JOB_V5, JOB_V6, MAX_BYTES, validate_document, validate_job
 
 if TYPE_CHECKING:
     from .calibration_registry import CalibrationPlan
@@ -49,9 +50,13 @@ PROFILE_V10 = "research-execution-profile/v10"
 PROFILE_V11 = "research-execution-profile/v11"
 PROFILE_V12 = "research-execution-profile/v12"
 PROFILE_V13 = "research-execution-profile/v13"
+PROFILE_V14 = "research-execution-profile/v14"
+PROFILE_V15 = "research-execution-profile/v15"
+PROFILE_V16 = "research-execution-profile/v16"
+PROFILE_V17 = "research-execution-profile/v17"
 PROFILE_SCHEMA_VERSIONS = (
     PROFILE, PROFILE_V2, PROFILE_V3, PROFILE_V4, PROFILE_V5, PROFILE_V6,
-    PROFILE_V7, PROFILE_V8, PROFILE_V9, PROFILE_V10, PROFILE_V11, PROFILE_V12, PROFILE_V13,
+    PROFILE_V7, PROFILE_V8, PROFILE_V9, PROFILE_V10, PROFILE_V11, PROFILE_V12, PROFILE_V13, PROFILE_V14, PROFILE_V15, PROFILE_V16, PROFILE_V17,
 )
 OBSERVATION = "research-execution-observation/v1"
 _REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$")
@@ -112,6 +117,13 @@ def _now() -> str:
 
 def _json(value: Any) -> bytes:
     """Bound inert JSON without allowing recursive or nonfinite documents."""
+    from ._review_dependency_json import encoded
+    try:
+        native = encoded(value, max_bytes=MAX_BYTES)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise ExecutionError("execution_document_invalid") from None
+    if native is not None:
+        return native
     count = 0
 
     def visit(item: Any, depth: int) -> None:
@@ -273,6 +285,7 @@ class ExecutionProfile:
     readability: object | None = None
     artifact_delivery: object | None = None
     semantic_judging: object | None = None
+    review_application_lease: object | None = None
     _document_bytes: bytes = field(init=False,repr=False,compare=False)
     _document_sha256: str = field(init=False,repr=False,compare=False)
 
@@ -374,6 +387,11 @@ class ExecutionProfile:
                 raise ExecutionError("semantic_plan_invalid")
             self.semantic_judging.check_profile(self)
 
+        if self.review_application_lease is not None:
+            from .review_application_lease import ReviewApplicationLease
+            if type(self.review_application_lease) is not ReviewApplicationLease or self.role_scopes is None or self.review_services is not None or self.semantic_judging is not None:
+                raise ExecutionError("review_application_profile_invalid")
+
         # Exact frozen owner types above validate scalar fields, tuple-owned
         # collections and byte-owned selections before this detached snapshot.
         # Live configuration, source checks and authentication remain in their
@@ -429,6 +447,14 @@ class ExecutionProfile:
                 assessments.setdefault(reference, assessment)
                 selection["reference_assessment_ref"] = reference
             compact["reference_assessments"] = assessments
+        if self.review_delivery is not None and self.review_delivery.context_version == "complete":
+            result["schema_version"] = PROFILE_V14
+        elif self.review_delivery is not None and self.review_delivery.context_version == "dependencies":
+            result["schema_version"] = PROFILE_V15
+        if self.review_application_lease is not None:
+            from .review_application_lease import LEASE_V1
+            version = PROFILE_V16 if self.review_application_lease.schema_version == LEASE_V1 else PROFILE_V17
+            result.update(schema_version=version, review_application_lease=self.review_application_lease.document())
         return result
 
     @property
@@ -446,11 +472,14 @@ class ExecutionProfile:
         """Bind an explicit job purpose and immutable input to its frozen scope."""
         if type(job) is not dict or type(input_document) is not dict:
             raise ExecutionError("execution_attempt_invalid")
+        if job.get("schema_version") in {JOB_V5, JOB_V6}:
+            from .review_application_lease import check_job
+            check_job(self, job, input_document)
         if self.role_scopes is None:
-            if job["schema_version"] in {JOB_V3, JOB_V4}:
+            if job["schema_version"] in {JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
                 raise ExecutionError("execution_role_scope_unavailable")
             return
-        if job["schema_version"] not in {JOB_V3, JOB_V4}:
+        if job["schema_version"] not in {JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
             raise ExecutionError("execution_role_scope_required")
         self.role_scopes.scope(config_ref).check_job(job)
         if job["packet_sha256"] != _digest(input_document):
@@ -488,8 +517,24 @@ class ExecutionProfile:
                     if row["case_id"] == case_id and row["input_sha256"] == "sha256:" + _digest(input_document)]
                 if len(matches) != 1:
                     raise ExecutionError("execution_context_mismatch")
-        if type(packet) is dict and packet.get("schema_version") in {"research-review-context/v1", "research-review-context/v2"}:
+        review_packet = (type(packet) is dict and input_document.get("purpose") not in {"readability", "readability_calibration"}
+            and (job.get("task_role") in {"evaluator", "critic", "adjudicator"}
+                or str(packet.get("schema_version", "")).startswith("research-review-context/")))
+        if review_packet:
+            version = packet.get("schema_version")
+            if version not in {"research-review-context/v1", "research-review-context/v2", "research-review-context/v3", "research-review-context/v4"}:
+                raise ExecutionError("execution_context_schema_invalid")
+            complete = self.review_delivery is not None and self.review_delivery.context_version == "complete"
+            dependencies = self.review_delivery is not None and self.review_delivery.context_version == "dependencies"
+            reference_case = "calibration_case_id" in job.get("payload", {})
+            if (version == "research-review-context/v3" and not complete
+                    or version == "research-review-context/v4" and not dependencies
+                    or complete and version != "research-review-context/v3" and not reference_case
+                    or dependencies and version != "research-review-context/v4" and not reference_case):
+                raise ExecutionError("execution_context_schema_invalid")
             if packet.get("context_id") != job["context_id"] or packet.get("task_role") != job["task_role"]:
+                raise ExecutionError("execution_context_mismatch")
+            if (job["schema_version"] == JOB_V4 or job["schema_version"] in {JOB_V5, JOB_V6} and packet.get("computation") is not None) != (packet.get("computation") is not None):
                 raise ExecutionError("execution_context_mismatch")
 
 
@@ -520,7 +565,7 @@ class ExecutionAttempt:
         try:
             raw_job = json.loads(self._job_bytes)
             version = raw_job.get("schema_version") if type(raw_job) is dict else None
-            if version not in {JOB, JOB_V2, JOB_V3, JOB_V4}:
+            if version not in {JOB, JOB_V2, JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
                 raise ExecutionError("execution_job_version_unsupported")
             job = validate_document(version, raw_job)
             supplied = json.loads(self._input_bytes)
@@ -540,7 +585,7 @@ class ExecutionAttempt:
                input_document: dict[str, Any] | None = None) -> ExecutionAttempt:
         profile.role(config_ref)
         version = job.get("schema_version") if type(job) is dict else None
-        if version not in {JOB, JOB_V2, JOB_V3, JOB_V4}:
+        if version not in {JOB, JOB_V2, JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
             raise ExecutionError("execution_job_version_unsupported")
         selected_input = {} if input_document is None else input_document
         job = validate_document(version, job)
@@ -571,7 +616,7 @@ class ExecutionAttempt:
         establishes filesystem, network or host conversation isolation.
         """
         job = self.job
-        if job["schema_version"] not in {JOB_V3, JOB_V4}:
+        if job["schema_version"] not in {JOB_V3, JOB_V4, JOB_V5, JOB_V6}:
             return self.document()
         fields = ("operation", "role", "task_role", "required_capabilities", "context_id", "prompt_version",
                   "issued_utc", "deadline_utc", "timeout_seconds", "budgets", "expected_result_schema")
@@ -886,6 +931,10 @@ class BoundedSubprocessExecutor:
     def _kill(self, running: _Running) -> None:
         if running.process is None:
             return
+        guard = ownership_for(running.process)
+        if guard is not None:
+            guard.signal_if_owned(signal.SIGKILL)
+            return
         try:
             os.killpg(running.process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -982,7 +1031,10 @@ class BoundedSubprocessExecutor:
                                     "cancellation_confirmed": state == "cancelled"}
         except Exception:
             with running.lock:
-                self._kill(running)
+                try:
+                    self._kill(running)
+                except ProcessGroupOwnershipError:
+                    pass
                 running.snapshot = {"state": "unknown", "reason": "executor_observation_unknown",
                                     "completed_utc": None, "output": None,
                                     "observed_usage": {"seconds": None, "model_calls": None, "tool_calls": None,

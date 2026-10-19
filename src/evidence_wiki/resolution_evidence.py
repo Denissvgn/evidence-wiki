@@ -92,11 +92,53 @@ def _local_rejection(session, current, question, facts):
     return bool(decisions and all(row["operation"] == "reject" for row in decisions))
 
 
+def _retained_pass(session, publication, claim, question, attempt, application, review, prepared):
+    """Ask the actual native owner to authenticate this completed original's reuse."""
+    from ._review_dependency_json import digest
+
+    envelope = application["envelope"]
+    payload = envelope["payload"]["body"]["review"]
+    basis = claim["claim_basis_id"]
+    if (payload.get("schema_version") != "evidence-strict-review/v3"
+            or payload.get("basis_id") != basis or application.get("strict_basis_id") != basis
+            or application.get("attempt_id") != attempt.attempt_id
+            or application.get("original_id") != question["original_id"]
+            or review.get("original_id") != question["original_id"]
+            or application.get("profile_ref") != attempt.config_ref
+            or payload.get("claim_schema_version") != publication["claim_schema_version"]
+            or payload.get("delivery", {}).get("attempt_id") != attempt.attempt_id
+            or payload.get("delivery", {}).get("attempt_content_sha256") != digest(attempt.document())
+            or prepared.get("claim_basis_id") != basis
+            or prepared.get("observed_workspace_basis_id") != publication["basis_id"]):
+        return False
+    strict = owner("_strict_evidence")
+    review_id = owner("_strict_contract").artifact_id(payload)
+    observed = strict.retained_review_eligibility(session.root, envelope,
+        claim_id=claim["id"], expected_review_id=review_id)
+    current = observed["current"]
+    custody = observed.get("custody") or {}
+    if (observed["state"] != "eligible" or observed.get("original_authenticated") is not True
+            or observed.get("original_controller_ref") != session.execution.profile.role(attempt.config_ref).controller_ref
+            or observed.get("original_generator_controller_ref") != session.execution.review_signer.generator.controller_ref
+            or current.get("basis_id") != basis or current.get("workspace_basis_id") != publication["basis_id"]
+            or current.get("review_producer_id") != publication["review_producer_id"]
+            or custody.get("review_id") != review_id or custody.get("basis_id") != basis
+            or custody.get("semantic_material_id") != payload["dependency_basis"]["semantic_material_id"]
+            or custody.get("delivery_binding_id") != payload["delivery"]["binding_sha256"]
+            or custody.get("original_verified") is not True):
+        return False
+    rows = [row for row in observed["strict"]["claims"] if row["claim"]["id"] == claim["id"]]
+    return bool(len(rows) == 1 and rows[0]["accepted"] is True and rows[0]["claim_basis_id"] == basis
+        and rows[0]["claim"] == prepared["snapshot"]["claim"]
+        and rows[0]["observed_workspace_basis_id"] == claim["observed_workspace_basis_id"])
+
+
 def questions(session, current, records, *, usage_view=None, facts):
     """Never infer a mandatory vote from the native latest generic review alone."""
     publication = current["canonical_release"]["publication"]
     if publication is None:
         return {}
+    selective = publication.get("schema_version") == "evidence-strict-publication/v3"
     attempts = native._attempt_rows(records)
     applications = {row["data"]["attempt_id"]: row["data"] for row in records if row["kind"] == "execution_application"
         and row["data"].get("operation") == "evaluate"}
@@ -128,7 +170,8 @@ def questions(session, current, records, *, usage_view=None, facts):
                 except ExecutionError:
                     reasons.append("claim_continuation_unknown")
             for wanted in required:
-                review = applied.get((claim["id"], wanted["profile_ref"], publication["basis_id"]))
+                basis = claim["claim_basis_id"] if selective else publication["basis_id"]
+                review = applied.get((claim["id"], wanted["profile_ref"], basis))
                 if review is None or review.get("passed") is not True:
                     reasons.append("mandatory_first_pass_missing_or_failed")
                     continue
@@ -170,11 +213,16 @@ def questions(session, current, records, *, usage_view=None, facts):
                 policy = facts.policy
                 age = (datetime.now(timezone.utc) - owner("_evidence_authority").timestamp(payload["reviewed_at"])).total_seconds()
                 if (application.get("claim_id") != claim["id"] or payload["claim_id"] != claim["id"]
-                        or application.get("strict_basis_id") != publication["basis_id"]
-                        or payload["basis_id"] != publication["basis_id"] or not 0 <= age <= policy["max_review_age_seconds"]):
+                        or application.get("strict_basis_id") != basis
+                        or payload["basis_id"] != basis or not 0 <= age <= policy["max_review_age_seconds"]):
                     reasons.append("mandatory_current_review_binding_or_age_invalid")
                     continue
-                owner("_strict_evidence").validate_review(session.root, config, application["envelope"], usage_view)
+                if selective:
+                    if not _retained_pass(session, publication, claim, question, attempt, application, review, prepared):
+                        reasons.append("mandatory_retained_review_not_current")
+                        continue
+                else:
+                    owner("_strict_evidence").validate_review(session.root, config, application["envelope"], usage_view)
                 rubric = application["envelope"]["payload"]["body"]["review"]["verdicts"]
                 if (observed["output"].get("verdicts") != rubric or not rubric
                         or any(value != "pass" for value in rubric.values())):
@@ -184,16 +232,17 @@ def questions(session, current, records, *, usage_view=None, facts):
                 if prepared["result"]["basis_id"] != publication["basis_id"] or "review_context" not in row:
                     reasons.append("mandatory_current_context_unknown")
                     continue
-                if "review_assembly_request_id" in row:
-                    from .review_packet_execution import require_current
-                    require_current(session, attempt, row)
-                context = ReviewContext.restore(attempt.input_document["packet"], row["review_context"])
-                packets = facts.packets()
-                source_ids = set(row["review_context"]["aliases"]["sources"])
-                context.check(prepared["snapshot"], prepared["rubric"], [packet for packet in packets if packet["source_id"] in source_ids])
-                if not context.document()["manifest"]["context_complete"]:
-                    reasons.append("mandatory_current_context_incomplete")
-                    continue
+                if not selective:
+                    if "review_assembly_request_id" in row:
+                        from .review_packet_execution import require_current
+                        require_current(session, attempt, row)
+                    context = ReviewContext.restore(attempt.input_document["packet"], row["review_context"])
+                    packets = facts.packets()
+                    source_ids = set(row["review_context"]["aliases"]["sources"])
+                    context.check(prepared["snapshot"], prepared["rubric"], [packet for packet in packets if packet["source_id"] in source_ids])
+                    if not context.document()["manifest"]["context_complete"]:
+                        reasons.append("mandatory_current_context_incomplete")
+                        continue
                 if session.execution.profile.review_services is not None:
                     from evidence_wiki.review_service_routing import review_current
                     valid = review_current(session, review, current, wanted)

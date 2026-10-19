@@ -144,6 +144,48 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def resource_inventory(host, first_page=None):
+    """Collect bounded pages against one stable advertised inventory size."""
+    page = host.resources() if first_page is None else first_page
+    total = page["bounds"]["total"]
+    require(type(total) is int and total >= 0, "Invalid public resource total")
+    rows, seen = [], set()
+    while True:
+        selected, bounds = page["resources"], page["bounds"]
+        require(type(bounds["total"]) is int and bounds["total"] == total and type(bounds["returned"]) is int
+                and bounds["returned"] == len(selected) and len(rows) + len(selected) <= total,
+                "Public resource page bounds differ")
+        for row in selected:
+            require(row["id"] not in seen, "Duplicate public resource identity")
+            seen.add(row["id"])
+            rows.append(row)
+        if len(rows) == total:
+            return rows
+        require(bool(selected), "Public resource pagination made no progress")
+        page = host.resources(offset=len(rows))
+
+
+def checked_resource_documents(host, expected):
+    """Read every frozen installed resource, including schemas beyond page one."""
+    rows = resource_inventory(host)
+    require({row["id"] for row in rows} == set(expected["resource_documents"]),
+            "Installed resource inventory differs")
+    schemas = set()
+    for row in rows:
+        resource_id = row["id"]
+        resource = host.resource(resource_id)
+        require(digest(resource) == expected["resource_documents"][resource_id],
+                "Installed resource document differs: " + resource_id)
+        if row["media_type"] == "application/schema+json":
+            document = json.loads(resource["content"])
+            require(isinstance(document, dict) and bool(document), "Empty installed schema document")
+            require(resource_id in expected["schema_documents"]
+                    and digest(document) == expected["schema_documents"][resource_id],
+                    "Installed schema document differs: " + resource_id)
+            schemas.add(resource_id)
+    require(schemas == set(expected["schema_documents"]), "Installed schema inventory differs")
+
+
 def public_expectations():
     """Freeze source-owned declarations before either installed artifact is executed."""
     from evidence_wiki.agent_execution import PROFILE_SCHEMA_VERSIONS
@@ -153,9 +195,10 @@ def public_expectations():
             "Execution profile advertisement differs from public owner")
     with Onboarding.open() as host:
         index = host.resources()
-        documents = {row["id"]: digest(host.resource(row["id"])) for row in index["resources"]}
+        rows = resource_inventory(host, index)
+        documents = {row["id"]: digest(host.resource(row["id"])) for row in rows}
         schemas = {row["id"]: digest(json.loads(host.resource(row["id"])["content"]))
-                   for row in index["resources"] if row["media_type"] == "application/schema+json"}
+                   for row in rows if row["media_type"] == "application/schema+json"}
         declarations = host.contracts()
         metadata = host.bootstrap()["payload"]["installation"]
         matrix = json.loads(host.resource("framework/compatibility/v1")["content"])
@@ -424,10 +467,7 @@ def probe(root, expected, cli, checkout, runner, stage):
     with Onboarding.open() as host:
         catalog = command([str(cli), "agent", "resources", "--format", "json"], "public-cli-resources")
         require(catalog["payload"] == {key: value for key, value in expected["resource_index"].items() if key != "schema_version"}, "CLI resource catalog differs")
-        for row in expected["resource_index"]["resources"]:
-            if row["media_type"] == "application/schema+json":
-                document = json.loads(host.resource(row["id"])["content"])
-                require(isinstance(document, dict) and bool(document), "Empty installed schema document")
+        checked_resource_documents(host, expected)
         extract_bundle(host, "example/unattended-host/v1", root / "direct-app")
         extract_bundle(host, "example/agent-host/v1", root / "adapter-app")
     messages = [

@@ -11,10 +11,16 @@ from _workspace_module_loader import load_workspace_module
 
 _DIR = Path(__file__).resolve().parent
 VERSION = 1
+_VALIDATION_MODULES = {}
 
 
 def sibling(name):
     return load_workspace_module(_DIR, name)
+
+
+def _validation_sibling(name):
+    """Reuse code for stored checks; loader still verifies root and generation."""
+    return load_workspace_module(_DIR, name, cache=_VALIDATION_MODULES)
 
 
 def source_profile(record):
@@ -70,9 +76,9 @@ def requires_refresh(record, frontmatter):
     return False
 
 
-def _shell(text):
+def _shell(text, *, _sibling=sibling):
     """Recognize only text wholly composed of finite known error/auth notices."""
-    normalizer = sibling("normalize_sources")
+    normalizer = _sibling("normalize_sources")
     notices = normalizer.HTML_AUTHENTICATION_MESSAGES | normalizer.HTML_SHELL_NOTICES | {
         "access denied", "permission denied", "unauthorized", "403 forbidden", "401 unauthorized", "invalid credentials"}
     notices = {" ".join(item.strip().casefold().split()).strip(" .!:;?") for item in notices}
@@ -94,19 +100,19 @@ def _shell(text):
     return seen and not normalized[end:].strip(" .!:;?")
 
 
-def _error_document(value):
+def _error_document(value, *, _sibling=sibling):
     """Recognize closed error-only rows or a chain of exact single wrappers."""
     fields = {"error", "message", "detail", "status", "status_code", "code"}
     wrappers = {"response", "result", "data", "payload"}
     if type(value) is list:
-        return bool(value) and all(_error_document(item) for item in value)
+        return bool(value) and all(_error_document(item, _sibling=_sibling) for item in value)
     if type(value) is not dict or not value:
         return False
     if len(value) == 1 and next(iter(value)) in wrappers:
-        return _error_document(next(iter(value.values())))
+        return _error_document(next(iter(value.values())), _sibling=_sibling)
     if not set(value) <= fields:
         return False
-    return (any(type(value.get(key)) is str and _shell(value[key]) for key in ("error","message","detail"))
+    return (any(type(value.get(key)) is str and _shell(value[key], _sibling=_sibling) for key in ("error","message","detail"))
         or type(value.get("status_code")) in {int,str} and str(value["status_code"]) in {"401","403","404","500","503"})
 
 
@@ -126,10 +132,13 @@ def _measurement_gaps(value):
     return ["structured_measurement_units_missing"] if missing else []
 
 
-def normalize(root, record, *, pdf_extractor=None):
+def normalize(root, record, *, pdf_extractor=None, _read_only=False):
+    sibling = _validation_sibling if _read_only else globals()["sibling"]
     normalizer, capture = sibling("normalize_sources"), sibling("_host_capture")
     inspected = capture.inspect_record(root, record, **({"read_input": normalizer._capture_input_reader} if normalizer._bounded_bytes_available() else {}))
     profile = inspected["profile"]
+    if _read_only and profile["content_format"] == "pdf":
+        raise ValueError("capture_read_only_pdf_extraction_unavailable")
     metadata = record.setdefault("metadata", {})
     metadata["host_capture"] = profile
     reasons = [item for item in inspected["unusable_reasons"] if item != "host_capture_format_normalization_not_run"]
@@ -142,7 +151,7 @@ def normalize(root, record, *, pdf_extractor=None):
         bibliography_files=[], included_paths=[], warnings=warnings)
     if format in {"plain_text", "markdown"}:
         source.extracted_text = inspected["content"]
-        if _shell(source.extracted_text):
+        if _shell(source.extracted_text, _sibling=sibling):
             reasons.append("host_capture_authentication_or_error_shell")
     elif format == "csv":
         source = normalizer.normalize_table_record(root, record)
@@ -150,7 +159,7 @@ def normalize(root, record, *, pdf_extractor=None):
             reasons.append("host_capture_structured_view_unavailable")
         else:
             reasons.extend(_measurement_gaps(source.structured["rows"]))
-            if _error_document(source.structured["rows"]):
+            if _error_document(source.structured["rows"], _sibling=sibling):
                 reasons.append("host_capture_authentication_or_error_shell")
     elif format == "json":
         raw = capture.read(root, path, maximum=1048576, **({"read_input": normalizer._capture_input_reader} if normalizer._bounded_bytes_available() else {}))
@@ -162,7 +171,7 @@ def normalize(root, record, *, pdf_extractor=None):
         source.extracted_text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
         source.outline = [(2, "Structured original")]
         reasons.extend(_measurement_gaps(value))
-        if _error_document(value):
+        if _error_document(value, _sibling=sibling):
             reasons.append("host_capture_authentication_or_error_shell")
     elif format == "pdf":
         extractor = pdf_extractor or normalizer.resolve_pdf_extractor("pypdf")
@@ -181,7 +190,7 @@ def normalize(root, record, *, pdf_extractor=None):
             reasons.append("capture_pdf_page_accounting_incomplete")
         if source.needs_ocr:
             reasons.append("capture_pdf_text_incomplete_requires_ocr")
-        if _shell(source.extracted_text):
+        if _shell(source.extracted_text, _sibling=sibling):
             reasons.append("host_capture_authentication_or_error_shell")
     else:
         raise ValueError("capture_format_normalization_unsupported")
@@ -212,6 +221,7 @@ def normalize(root, record, *, pdf_extractor=None):
 
 def issues(root, record, frontmatter, body):
     """Recheck stored consistency without executing a PDF extractor."""
+    sibling = _validation_sibling
     capture, normalizer, contract = sibling("_host_capture"), sibling("normalize_sources"), sibling("_normalized_contract")
     try:
         inspected = capture.inspect_record(root, record)
@@ -231,13 +241,13 @@ def issues(root, record, frontmatter, body):
             retained = body.partition("## Extracted Text\n\n")[2].rpartition("\n\n## Figures and Tables")[0]
             capture.require(retained == (text or "None extracted."), "capture_pdf_page_body_mismatch")
             capture.require(frontmatter.get("extraction_method") == "pdf_text" and result.document.get("qualification")=="mechanical_stored_consistency", "capture_pdf_method_mismatch")
-            if _shell(text):
+            if _shell(text, _sibling=sibling):
                 capture.require(frontmatter.get("evidence_usable") is False and frontmatter.get("status") in {"partial","failed"}
                     and "host_capture_authentication_or_error_shell" in (frontmatter.get("unusable_evidence_reasons") or []), "capture_pdf_error_shell_overstated")
             if len(text) < normalizer.PDF_MIN_CHARS_PER_PAGE * len(pages):
                 capture.require(frontmatter.get("needs_ocr") is True and frontmatter.get("evidence_usable") is False and frontmatter.get("status") in {"partial", "failed"}, "capture_pdf_empty_or_sparse_overstated")
         else:
-            source = normalize(root, copy.deepcopy(record))
+            source = normalize(root, copy.deepcopy(record), _read_only=True)
             if source.record.get("evidence_usable") is False or source.record.get("metadata", {}).get("evidence_usable") is False:
                 capture.require(frontmatter.get("evidence_usable") is False, "capture_unusable_claim")
             capture.require(frontmatter.get("extraction_method") == source.extraction_method and frontmatter.get("status") == source.capture_status, "capture_normalized_method_or_status_mismatch")

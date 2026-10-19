@@ -195,6 +195,8 @@ def fixture(tmp_path, monkeypatch, request=None):
         "evidence_path": "official_guidance", "source_policy": "primary_or_official", "freshness_policy": "no_staleness_check",
         "identity_policy": "none", "min_sources": 1}]}
     owner("coverage_manifest").run_init_inline(root, slug="q", template=template)
+    if options.get("partial"):
+        owner("coverage_manifest").run_init_inline(root, slug="unavailable", template=template)
     if options.get("derived_partial"):
         owner("coverage_manifest").run_init_inline(root, slug="refinement", template=template)
     if options.get("coverage_examination"):
