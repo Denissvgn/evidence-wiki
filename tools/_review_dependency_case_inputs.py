@@ -183,6 +183,31 @@ class NativeCaseInputs:
         self.originals.append((request_id + "-actual-usage", {"envelope": envelope, "receipt": receipt}))
         return receipt
 
+    def _refresh_expiry_reviews(self):
+        """Refresh other claims through the native signed application path."""
+        self.drive(CLAIM_IDS - {"independent-note"}, cycle="review-age-refresh")
+
+    def _review_expiry_observation(self, maximum, actual_now, last_observed):
+        """Select a forward-only instant inside the isolated expiry interval."""
+        _require(maximum == 600, "native_review_age_fixture_not_selected")
+        old, fresh, issued = [], [], []
+        for claim in sorted(CLAIM_IDS):
+            cycle = "baseline" if claim == "independent-note" else "review-age-refresh"
+            for config_ref in ("evidence", "critic"):
+                application = self.applications[(cycle, claim, config_ref)]
+                envelope = application["envelope"]
+                review = envelope["payload"]["body"]["review"]
+                reviewed = datetime.fromisoformat(review["reviewed_at"].replace("Z", "+00:00"))
+                authenticated = datetime.fromisoformat(envelope["authentication"]["issued_at"].replace("Z", "+00:00"))
+                _require(reviewed <= authenticated, "native_review_timestamp_after_signature")
+                (old if claim == "independent-note" else fresh).append(reviewed)
+                issued.append(authenticated)
+        target = max(actual_now, last_observed, *issued,
+                     max(old) + timedelta(seconds=maximum, microseconds=1))
+        _require(target <= min(fresh) + timedelta(seconds=maximum),
+                 "native_isolated_review_expiry_interval_unavailable")
+        return target
+
     def _time_case(self, case_id):
         application = self.applications[("baseline", "observed-capacity", "critic")]
         if case_id == "unused-source-permission-revoked":
@@ -209,6 +234,8 @@ class NativeCaseInputs:
                 "evidence": [receipt, refused],
                 "unavailable_branches": ["native_per_claim_rows_after_earlier_global_source_gate"],
             }
+        if case_id == "review-max-age-expired":
+            self._refresh_expiry_reviews()
         with self.session(application["run_id"]) as (workspace, _session):
             config = owner("_strict_evidence").configuration(self.root)
             with owner("_evidence_usage").current_view(self.root, config) as view:
@@ -219,8 +246,7 @@ class NativeCaseInputs:
                 expected = {"host_state_clock_regressed"}
             elif case_id == "review-max-age-expired":
                 maximum = config["strict_evidence"]["max_review_age_seconds"]
-                _require(maximum <= 600, "native_review_age_fixture_not_selected")
-                target = actual_now + timedelta(seconds=maximum + 1)
+                target = self._review_expiry_observation(maximum, actual_now, last_observed)
                 expected = None
             elif case_id == "unused-source-expired":
                 expiry = self.sources["unused"]["descriptor"]["temporal"]["expires_at"]["value"]
@@ -251,13 +277,19 @@ class NativeCaseInputs:
                     opening = self.guard()
                     strict = workspace.strict.check()
                     _require(
-                        not _accepted(strict) and _basis(strict) == _basis(self.baseline["strict"]),
+                        _basis(strict) == _basis(self.baseline["strict"]),
                         "expired_reviews_reused_or_basis_changed",
                     )
-                    _require(
-                        all("strict_review_expired" in row["reasons"] for row in strict["claims"]),
-                        "review_expiry_branch_not_exercised",
-                    )
+                    expired = {row["claim"]["id"] for row in strict["claims"]
+                               if "strict_review_expired" in row["reasons"]}
+                    _require(expired == {"independent-note"}, "review_expiry_branch_not_isolated")
+                    affected = _dependants(self.manifest, "independent-note")
+                    _require(_accepted(strict) == CLAIM_IDS - affected,
+                             "review_expiry_acceptance_vector_mismatch")
+                    _require(all("strict_premise_not_accepted" in row["reasons"]
+                                 for row in strict["claims"]
+                                 if row["claim"]["id"] in affected - {"independent-note"}),
+                             "review_expiry_premise_effect_missing")
                     publication = workspace.strict.export()
                     _require(
                         publication["verdict"] != "ship" and self.guard() == opening,

@@ -136,6 +136,28 @@ def _pin(path):
     return {"path": str(path), "raw_sha256": legacy.digest_bytes(path.read_bytes())}
 
 
+def _control_original_pin(control_pin, original_pins):
+    """Join the retained control by exact identity and its producer label."""
+    fields = {"path", "raw_sha256", "size_bytes"}
+    label = "selective-control-no-dispatch"
+    if (type(control_pin) is not dict or set(control_pin) not in (fields, fields | {"label"})
+            or ("label" in control_pin and control_pin["label"] != label)
+            or type(control_pin.get("path")) is not str
+            or type(control_pin.get("raw_sha256")) is not str
+            or type(control_pin.get("size_bytes")) is not int or control_pin["size_bytes"] < 0
+            or type(original_pins) is not list):
+        raise ValueError("selective_pilot_control_custody_invalid")
+    identity = {key: control_pin[key] for key in fields}
+    matches = [row for row in original_pins if type(row) is dict
+               and all(type(row.get(key)) is type(value) and row.get(key) == value
+                       for key, value in identity.items())]
+    labeled = [row for row in original_pins if type(row) is dict and row.get("label") == label]
+    if (len(matches) != 1 or len(labeled) != 1 or matches[0] is not labeled[0]
+            or set(matches[0]) != fields | {"label"}):
+        raise ValueError("selective_pilot_control_custody_invalid")
+    return control_pin
+
+
 def _originals(plan_pin, report_pin, candidate_sha256):
     plan, _ = legacy.read_pinned_artifact(plan_pin)
     report, _ = legacy.read_pinned_artifact(report_pin)
@@ -150,9 +172,10 @@ def _originals(plan_pin, report_pin, candidate_sha256):
         raise ValueError("selective_pilot_report_binding_invalid")
     native_report, _ = legacy.read_pinned_artifact(report["native_report_pin"])
     control_pin = native_report.get("control", {}).get("dispatch_original_pin")
-    if control_pin not in native_report.get("original_response_pins", []):
+    _control_original_pin(control_pin, native_report.get("original_response_pins"))
+    control, control_raw = legacy.read_pinned_artifact(control_pin)
+    if len(control_raw) != control_pin["size_bytes"]:
         raise ValueError("selective_pilot_control_custody_invalid")
-    control, _ = legacy.read_pinned_artifact(control_pin)
     if (control.get("attempt_id") != native_report["control"]["attempt_id"]
             or type(control.get("before")) is not list or control["before"] != control.get("after")):
         raise ValueError("selective_pilot_control_dispatched")

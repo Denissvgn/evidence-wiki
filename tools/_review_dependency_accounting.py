@@ -655,6 +655,9 @@ for _name, _old, _version in (("LongPlan", "CollectionPlan", LONG_PLAN), ("LongR
 _SCHEMA["$defs"]["LongPlan"]["properties"]["phase_caps"] = {"$ref": "#/$defs/LongPhaseCaps"}
 
 _PRE_OWNER_SCHEMA_DEFS = copy.deepcopy(_SCHEMA["$defs"])
+for _key, _value in (("profile", "forty-eight-hour"), ("authority_seconds", 172800),
+                     ("credential_lifetime_seconds", 172800)):
+    _SCHEMA["$defs"]["ExtendedExecutionPolicy"]["properties"][_key]["enum"].append(_value)
 # Extended observer policy belongs to the current owner contract only.
 _SCHEMA["$defs"]["ObservationPolicy"] = {"anyOf": [
     copy.deepcopy(_SCHEMA["$defs"]["ObservationPolicy"]),
@@ -673,6 +676,10 @@ for _name, _old, _version in (("OwnerPlan", "LongPlan", OWNER_PLAN), ("OwnerRepo
     _SCHEMA["$defs"][_name]["properties"].update(schema_version={"const": _version},
         phase_ceiling_policy={"$ref": "#/$defs/OwnerControlPhaseCeilingPolicy"},
         phase_ceiling_policy_sha256={"const": ceiling_policy.binding(ceiling_policy.OWNER_PROFILE)["phase_ceiling_policy_sha256"]})
+
+_SCHEMA["$defs"]["OwnerPlan"]["properties"]["elapsed_cap_seconds"]["maximum"] = 172800
+_SCHEMA["$defs"]["OwnerReport"]["properties"]["cost"] = copy.deepcopy(_SCHEMA["$defs"]["ExtendedCost"])
+_SCHEMA["$defs"]["OwnerReport"]["properties"]["cost"]["properties"]["elapsed_seconds"]["anyOf"][0]["maximum"] = 172800
 
 REPORT = "review-dependency-workload-observation/v5"
 PAIR = "review-dependency-differential-pair-spec/v1"
@@ -828,6 +835,9 @@ def validate(name, value):
                 require(math.isfinite(item), "accounting_number_invalid")
     if name in {"Plan", "PairPlan", "ExtendedPlan", "CollectionPlan", "LongPlan"} and type(value) is dict:
         _shape(value.get("observation_policy"), _PRE_OWNER_SCHEMA_DEFS["ObservationPolicy"])
+    if name in {"Plan", "PairPlan", "ExtendedPlan", "CollectionPlan", "LongPlan"} and type(value) is dict:
+        _shape(value.get("execution_policy"), _PRE_OWNER_SCHEMA_DEFS["ExtendedExecutionPolicy"]
+               if name in {"ExtendedPlan", "CollectionPlan", "LongPlan"} else _SCHEMA["$defs"]["ExecutionPolicy"])
     _shape(value, _SCHEMA["$defs"][name])
     if name == "NormalizedClaimDocument":
         fields = NORMALIZATION_CONTRACT["claim_v1_fields" if value["claim_schema_version"] == "evidence-strict-claims/v1" else "claim_v2_fields"]

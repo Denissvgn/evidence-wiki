@@ -109,7 +109,7 @@ class ReviewServicePlan:
         expected = {row["profile_ref"]: row for row in frozen_policy["required_evaluators"]}
         if set(expected) != {row.slot_ref for row in self.routes}:
             raise ExecutionError("service_required_slots_changed")
-        if (frozen_policy.get("schema_version") != SERVICE_POLICY
+        if (frozen_policy.get("schema_version") not in {SERVICE_POLICY, "research-run-policy/v4"}
                 or frozen_policy.get("review_services") != self.document()):
             raise ExecutionError("service_immutable_policy_required")
         caps = frozen_policy["budgets"]

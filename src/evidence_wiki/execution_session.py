@@ -30,7 +30,7 @@ from .research_observation import ResearchObservation
 from .research_observation import reason as owner_reason
 from .research_session_contracts import CURRENT_V2, NEXT_V2, NEXT_V3, NEXT_V4, STEP_V2, checked, refuse
 from .review_context import ReviewContext, create_review_context
-from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, POLICY_V3, validate_document
+from .run_policy import DECISION, OBSERVATION, OBSERVATION_V2, POLICY_V2, POLICY_V3, POLICY_V4, validate_document
 from .workflow_contracts import (
     EXECUTION_OBSERVATION,
     JOB_V2,
@@ -576,7 +576,7 @@ def policy_observation(session, view):
     flags = {key: bool(selected) and all(row[key] for row in selected) for key in
         ("source_current", "source_present", "mechanical_pass", "review_pass", "qualified", "context_complete")}
     count = len(view["accounting"]["original_ids"])
-    result = {"schema_version": OBSERVATION_V2 if session.policy.to_dict()["schema_version"] in {POLICY_V2, POLICY_V3} else OBSERVATION,
+    result = {"schema_version": OBSERVATION_V2 if session.policy.to_dict()["schema_version"] in {POLICY_V2, POLICY_V3, POLICY_V4} else OBSERVATION,
         "policy_id": session.policy.policy_id, "basis_id": view["basis_id"], "expected_basis_id": view["basis_id"],
         "observation_kind": "canonical_owner", "owner_ref": "current-strict-publication",
         "receipt_ref": digest(view["canonical_release"]), "policy_compatible": view["policy_compatible"],

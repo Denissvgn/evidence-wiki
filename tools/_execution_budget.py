@@ -7,7 +7,7 @@ from tools import _review_control_ceiling as ceiling_policy
 
 def execution_policy(profile):
     choices = {"two-hour": 7200, "four-hour": 14400, "six-hour": 21600,
-               "eight-hour": 28800, "sixteen-hour": 57600, "twenty-four-hour": 86400}
+               "eight-hour": 28800, "sixteen-hour": 57600, "twenty-four-hour": 86400, "forty-eight-hour": 172800}
     if type(profile) is not str or profile not in choices:
         raise ValueError("execution_policy_invalid")
     seconds = choices[profile]
@@ -33,10 +33,21 @@ def validate_execution_binding(policy, binding):
             or binding.get("execution_policy_sha256") != digest(policy)):
         raise ValueError("execution_policy_binding_invalid")
     observer = validate_observation_policy(binding.get("observation_policy"))
+    validate_execution_scope(policy, binding, observer)
     if (not is_batch_policy(observer)
             or binding.get("observation_policy_sha256") != digest(observer)):
         raise ValueError("execution_observation_profile_invalid")
     return policy
+
+
+def validate_execution_scope(policy, binding, observation):
+    """Long authority requires the current owner and extended original window."""
+    validate_execution_policy(policy)
+    if policy["profile"] == "forty-eight-hour":
+        ceiling_policy.validate(binding, required=True)
+        if (not ceiling_policy.owner(binding) or type(observation) is not dict
+                or observation.get("profile") != "batch-extended"):
+            raise ValueError("execution_runtime_binding_invalid")
 
 
 def validate_execution_window(policy, frozen_at, expires_at, *, instant=None):

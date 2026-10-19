@@ -527,7 +527,7 @@ def contract() -> dict:
             "protected_host_method": "strict_host.qualification", "protected_host_schema": "research-protected-host-qualification/v1",
             "limits": {"attempts": 64, "report_bytes": 262144}, "provider_execution": "not_probed"},
         "review_services": {"status_schema": "research-review-service-status/v1", "plan_schema": "research-review-service-plan/v1",
-            "policy": "research-run-policy/v3 explicit approved alternatives", "profile": "research-execution-profile/v8",
+            "policy": "research-run-policy/v3 or v4 explicit approved alternatives", "profile": "research-execution-profile/v8",
             "credentials": "provisioned parent key/native role usability only; no enrollment, discovery or service-health assertion",
             "execution": "retained owned execution and current actual-target qualification are separate",
             "budget": "shared immutable role-slot ceiling; unknown occupied work and semantic failure never fail over",

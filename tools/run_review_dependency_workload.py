@@ -184,6 +184,8 @@ def formal_phase_ceilings(observation, execution, *, ceiling_binding=None):
     from tools._execution_budget import validate_execution_policy
     if validate_execution_policy(execution)["schema_version"] != "review-execution-budget-policy/v2":
         raise ValueError("workload_application_policy_invalid")
+    from tools._execution_budget import validate_execution_scope
+    validate_execution_scope(execution, ceiling_binding, observation)
     if ceiling_policy.validate(ceiling_binding):
         if not is_batch_policy(observation):
             raise ValueError("workload_phase_ceiling_policy_invalid")
@@ -244,6 +246,9 @@ def validate_long_discovery_shape(plan):
 def runtime_hard_limits(policy, execution_policy=None, *, phase_caps=None, ceiling_binding=None):
     policy = validate_observation_policy(policy)
     selected_ceiling = ceiling_policy.validate(ceiling_binding)
+    if execution_policy is not None:
+        from tools._execution_budget import validate_execution_scope
+        validate_execution_scope(execution_policy, ceiling_binding, policy)
     if selected_ceiling:
         from tools._execution_budget import validate_execution_policy
         if execution_policy is None or validate_execution_policy(execution_policy)["schema_version"] != "review-execution-budget-policy/v2" or not is_batch_policy(policy):
@@ -1262,7 +1267,7 @@ def main(argv=None):
     parser.add_argument("--study", choices=("pilot", "full"), default="pilot")
     parser.add_argument("--measured-recipe", type=Path)
     parser.add_argument("--observation-profile", choices=("interactive", "batch", "batch-extended"), default="batch")
-    parser.add_argument("--execution-profile", choices=("two-hour", "four-hour", "six-hour", "eight-hour", "sixteen-hour", "twenty-four-hour"))
+    parser.add_argument("--execution-profile", choices=("two-hour", "four-hour", "six-hour", "eight-hour", "sixteen-hour", "twenty-four-hour", "forty-eight-hour"))
     parser.add_argument("--pair-closing", action="store_true")
     parser.add_argument("--journal-collection", action="store_true")
     parser.add_argument("--mode", choices=("legacy", "selective", "legacy_full", "selective_reuse"), default="legacy")

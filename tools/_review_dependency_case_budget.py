@@ -100,7 +100,7 @@ def validate_selection(value, *, current=False):
     _require(type(value) is dict and set(value) == keys and value["schema_version"] in {SELECTION, COLLECTION_SELECTION, LONG_SELECTION, OWNER_SELECTION}
         and collection_selected(value) == collection)
     execution = validate_execution_binding(value["execution_policy"], value)
-    _require(execution["profile"] in {"eight-hour", "sixteen-hour", "twenty-four-hour"})
+    _require(execution["profile"] in {"eight-hour", "sixteen-hour", "twenty-four-hour", "forty-eight-hour"})
     cases = value["selected_case_ids"]
     _require(type(cases) is list and cases and len(cases) == len(set(cases))
         and set(cases) <= set(CASE_IDS) and value["mode"] in {"selective_reuse", "legacy_full"}
@@ -151,7 +151,9 @@ def watchdog(selection, cases):
     fixtures = len(cases) + sum(case in negative for case in cases)
     seconds = fixtures * (budget["fixture_run_seconds"] + budget["fixture_overhead_seconds"]
         + budget["cleanup_seconds"]) + (len(cases) + 1) * budget["outer_overhead_seconds"]
-    _require(0 < seconds <= 112 * 86400 + 100 * 10800)
+    authority_cap = (172800 if ceiling_policy.owner(selection)
+        and selection["execution_policy"]["profile"] == "forty-eight-hour" else 86400)
+    _require(0 < seconds <= 112 * authority_cap + 100 * 10800)
     return dict(budget, schema_version=WATCHDOG, fixture_reservations=fixtures,
         watchdog_seconds=seconds, shard_count=len(cases) if len(cases) > 1 else 0,
         authority_renewal="forbidden", run_budget_extension="forbidden")

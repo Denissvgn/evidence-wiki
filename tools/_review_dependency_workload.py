@@ -513,6 +513,8 @@ def _run_policy_document(policy_factory, root, objective, run_seconds, *, execut
         provisioning_window(execution_policy, allocation_binding, run_seconds)
         document = policy_factory(root, objective).to_dict()
         document["budgets"]["seconds"] = run_seconds
+        if execution_policy["profile"] == "forty-eight-hour":
+            document.update(schema_version="research-run-policy/v4", execution_lifetime=copy.deepcopy(execution_policy))
     else:
         document = policy_factory(root, objective, run_seconds=run_seconds).to_dict()
     document["policy_id"] = None

@@ -21,6 +21,7 @@ from .workflow_contracts import WorkflowContractError
 POLICY = "research-run-policy/v1"
 POLICY_V2 = "research-run-policy/v2"
 POLICY_V3 = "research-run-policy/v3"
+POLICY_V4 = "research-run-policy/v4"
 OBSERVATION = "research-policy-observation/v1"
 OBSERVATION_V2 = "research-policy-observation/v2"
 DECISION = "research-policy-decision/v1"
@@ -148,6 +149,15 @@ def _build_schemas() -> dict[str, dict[str, Any]]:
     from .review_service_policy import schema_document as service_schema
     policy_v3["properties"]["review_services"] = service_schema()
     policy_v3["required"].append("review_services")
+    policy_v4 = json.loads(json.dumps(policy_v2))
+    policy_v4["properties"]["schema_version"] = {"const": POLICY_V4}
+    policy_v4["properties"]["budgets"]["properties"]["seconds"]["maximum"] = 172_800
+    policy_v4["properties"]["review_services"] = service_schema()
+    policy_v4["properties"]["execution_lifetime"] = _object(**{key: {"const": value} for key, value in {
+        "schema_version": "review-execution-budget-policy/v2", "profile": "forty-eight-hour",
+        "authority_seconds": 172800, "credential_lifetime_seconds": 172800,
+        "deadline_basis": "frozen_plan_expiry", "renewal": "forbidden"}.items()})
+    policy_v4["required"].append("execution_lifetime")
     observation_v2 = json.loads(json.dumps(observation))
     observation_v2["properties"]["schema_version"] = {"const": OBSERVATION_V2}
     observation_v2["properties"]["spent"]["properties"]["cost_limit"] = _nullable({"type": "string", "maxLength": 26,
@@ -156,7 +166,7 @@ def _build_schemas() -> dict[str, dict[str, Any]]:
         _object(source_id=ident, extent_ref=_string(4096), closure_id=policy_id), 64)
     observation_v2["required"].append("source_bindings")
     return {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **shape}
-            for name, shape in ((POLICY, policy), (POLICY_V2, policy_v2), (POLICY_V3, policy_v3), (OBSERVATION, observation),
+            for name, shape in ((POLICY, policy), (POLICY_V2, policy_v2), (POLICY_V3, policy_v3), (POLICY_V4, policy_v4), (OBSERVATION, observation),
                                 (OBSERVATION_V2, observation_v2), (DECISION, decision))}
 
 
@@ -289,7 +299,7 @@ def validate_document(name: str, value: Any) -> dict[str, Any]:
     if type(value) is dict and value.get("schema_version", name) != name:
         _refuse("VERSION_UNSUPPORTED", "/schema_version")
     _matches(value, shape)
-    if name in {POLICY, POLICY_V2, POLICY_V3}:
+    if name in {POLICY, POLICY_V2, POLICY_V3, POLICY_V4}:
         if len(value["scope"]["question_ids"]) > value["budgets"]["questions"]:
             _refuse("INVALID", "/scope/question_ids")
         thresholds = value["thresholds"]
@@ -299,12 +309,12 @@ def validate_document(name: str, value: Any) -> dict[str, Any]:
         keys = [(row["role"], row["profile_ref"]) for row in required]
         if len(keys) != len(set(keys)) or not any(row["role"] == "evaluator" for row in required):
             _refuse("INVALID", "/required_evaluators")
-        if name in {POLICY_V2, POLICY_V3} and value["scope"]["source_scope_kind"] == "native_extent":
+        if name in {POLICY_V2, POLICY_V3, POLICY_V4} and value["scope"]["source_scope_kind"] == "native_extent":
             from pathlib import Path
 
             if any(not Path(item).is_absolute() or ".." in Path(item).parts for item in value["scope"]["source_scope"]):
                 _refuse("INVALID", "/scope/source_scope")
-        if name == POLICY_V3:
+        if name == POLICY_V3 or name == POLICY_V4 and "review_services" in value:
             from .review_service_policy import ReviewServicePlan
             plan = ReviewServicePlan.restore(value["review_services"])
             slots = {row["profile_ref"]: row for row in required}
@@ -387,7 +397,7 @@ class RunPolicy:
 
     def __init__(self, document: Any) -> None:
         version = document.get("schema_version") if type(document) is dict else POLICY
-        if type(version) is not str or version not in {POLICY, POLICY_V2, POLICY_V3}:
+        if type(version) is not str or version not in {POLICY, POLICY_V2, POLICY_V3, POLICY_V4}:
             _refuse("VERSION_UNSUPPORTED", "/schema_version")
         object.__setattr__(self, "_raw", encode_document(version, document))
 
@@ -405,7 +415,7 @@ class RunPolicy:
             version = json.loads(raw, object_pairs_hook=_unique, parse_constant=_constant).get("schema_version")
         except (ValueError, UnicodeError, RecursionError, AttributeError):
             _refuse("INVALID")
-        if type(version) is not str or version not in {POLICY, POLICY_V2, POLICY_V3}:
+        if type(version) is not str or version not in {POLICY, POLICY_V2, POLICY_V3, POLICY_V4}:
             _refuse("VERSION_UNSUPPORTED", "/schema_version")
         return cls(decode_document(version, raw))
 
@@ -433,7 +443,7 @@ def _profiles_qualified(policy: dict[str, Any], observed: dict[str, Any]) -> boo
     if len(keys) != len(set(keys)):
         return False
     lookup = dict(zip(keys, profiles, strict=True))
-    if policy["schema_version"] == POLICY_V3:
+    if policy["schema_version"] == POLICY_V3 or policy["schema_version"] == POLICY_V4 and "review_services" in policy:
         from .review_service_policy import ReviewServicePlan
         plan = ReviewServicePlan.restore(policy["review_services"])
         allowed = {(route.task_role, config) for route in plan.routes for config in route.config_refs}
@@ -473,7 +483,7 @@ def _profiles_qualified(policy: dict[str, Any], observed: dict[str, Any]) -> boo
 def _owner_observation(frozen, observed):
     """Validate the existing closed owner shape; this does not authenticate it."""
     try:
-        version = OBSERVATION_V2 if frozen["schema_version"] in {POLICY_V2, POLICY_V3} else OBSERVATION
+        version = OBSERVATION_V2 if frozen["schema_version"] in {POLICY_V2, POLICY_V3, POLICY_V4} else OBSERVATION
         return validate_document(version, observed)
     except WorkflowContractError:
         return None

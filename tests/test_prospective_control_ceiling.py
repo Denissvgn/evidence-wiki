@@ -255,7 +255,8 @@ def retained_complete_costs(plan, tmp_path):
     report["journal_receipts"].append({"schema_version": RECEIPT, "run_id": native["control_run_id"],
         "head_ref": None, "source_sha256": "a" * 64, "state_sha256": "b" * 64, "original_pin": control_pin,
         **{key: metadata[key] for key in ("records_sha256", "records_bytes", "record_count", "physical_nodes", "expanded_bytes", "artifact_kind", "page_pins")}})
-    report["control"].update(attempt_id="control", dispatch_original_pin=save("control", {"attempt_id": "control", "before": [], "after": []}))
+    report["control"].update(attempt_id="control", dispatch_original_pin=originals.append(
+        ("selective-control-no-dispatch", {"attempt_id": "control", "before": [], "after": []})))
     closing_pins = []
     rounds = [*report["owner_reads"], copy.deepcopy(report["owner_reads"][-1])]
     for index, observed in enumerate(rounds):
@@ -601,7 +602,8 @@ def owner_retained_complete_costs(plan, tmp_path):
     report["journal_receipts"].append({"schema_version": RECEIPT, "run_id": native["control_run_id"],
         "head_ref": None, "source_sha256": "a" * 64, "state_sha256": "b" * 64, "original_pin": control_pin,
         **{key: metadata[key] for key in ("records_sha256", "records_bytes", "record_count", "physical_nodes", "expanded_bytes", "artifact_kind", "page_pins")}})
-    report["control"].update(attempt_id="control", dispatch_original_pin=save("control", {"attempt_id": "control", "before": [], "after": []}))
+    report["control"].update(attempt_id="control", dispatch_original_pin=originals.append(
+        ("selective-control-no-dispatch", {"attempt_id": "control", "before": [], "after": []})))
     closing_pins = []
     rounds = [*report["owner_reads"], copy.deepcopy(report["owner_reads"][-1])]
     for index, observed in enumerate(rounds):

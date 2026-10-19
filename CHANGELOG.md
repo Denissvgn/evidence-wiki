@@ -4,6 +4,9 @@
 
 ### Added
 
+- Add an explicit 48-hour execution profile and RunPolicy v4 for larger total
+  run budgets.
+
 - Offer an explicit two-hour batch observation window with fresh native closing
   validation, while retaining existing observation profiles and authority limits.
 

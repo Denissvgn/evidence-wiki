@@ -408,6 +408,14 @@ current evidence, explicit selected claim references, qualified review and
 resource limits are checked separately. Human-required policies return
 `policy_incompatible`.
 
+RunPolicy v4 supports total budgets up to 172,800 seconds with an explicit
+`execution_lifetime` declaring the fixed `forty-eight-hour` profile and forbidden
+renewal. Read its complete shape through
+`run_policy.schema_document("research-run-policy/v4")`. Versions v1–v3 keep their
+86,400-second ceiling. Optional `review_services` in v4 retains the declared
+service, approved-profile, controller and scope checks from v3. Worker and
+application allowances remain separately bounded.
+
 These modules neither dispatch work nor grant access, sign receipts or accept
 evidence. Their `authorized` and `evidence_accepted` fields remain false even
 when the policy outcome is `accepted`. Hosts must authenticate observations

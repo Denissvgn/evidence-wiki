@@ -23,6 +23,7 @@ from evidence_wiki.run_policy import (
     POLICY,
     POLICY_V2,
     POLICY_V3,
+    POLICY_V4,
     TERMINAL_OUTCOMES,
     RunPolicy,
     decide,
@@ -118,7 +119,7 @@ def test_policy_identity_immutable_nested_views_and_exact_roundtrip():
 
 
 def test_schema_catalog_detached_and_supplied_identity_cannot_relabel_policy():
-    assert set(schemas()) == {POLICY, POLICY_V2, POLICY_V3, OBSERVATION, OBSERVATION_V2, DECISION}
+    assert set(schemas()) == {POLICY, POLICY_V2, POLICY_V3, POLICY_V4, OBSERVATION, OBSERVATION_V2, DECISION}
     shape = schema_document(POLICY)
     shape["properties"]["schema_version"]["const"] = "invented"
     assert schema_document(POLICY)["properties"]["schema_version"]["const"] == POLICY
