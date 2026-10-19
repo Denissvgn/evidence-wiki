@@ -33,6 +33,7 @@ from tools._review_dependency_case_contracts import (
     _require,
     case_manifest,
     case_plan,
+    review_fixture_max_age,
 )
 from tools._review_dependency_case_contracts import validate_case_plan as validate_case_plan
 from tools._review_dependency_case_inputs import NativeCaseInputs
@@ -536,7 +537,8 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
         raise AssertionError("native_case_dispatch_incomplete")
 
 
-def _fixture_inputs(fixture, case_id=None, *, temporal_margin_seconds=None, frozen_at=None):
+def _fixture_inputs(fixture, case_id=None, *, temporal_margin_seconds=None, frozen_at=None, execution_profile=None):
+    maximum = review_fixture_max_age(execution_profile)
     fixture = copy.deepcopy(fixture)
     if case_id == "source-addition":
         fixture["source_material"]["added"] = {"raw": "# Additional retained note\nA separate retained observation.\n"}
@@ -546,7 +548,7 @@ def _fixture_inputs(fixture, case_id=None, *, temporal_margin_seconds=None, froz
                 "raw": "# Additional retained observation\nDistinct observation " + str(index) + ".\n"
             }
     if case_id == "review-max-age-expired":
-        fixture["global_inputs"]["policy"]["max_review_age_seconds"] = 600
+        fixture["global_inputs"]["policy"]["max_review_age_seconds"] = maximum
     if case_id in {"unused-source-expired", "source-effective-interval-ended", "source-effective-interval-not-started"}:
         now = datetime.now(timezone.utc) if frozen_at is None else frozen_at
         before, after = (now - timedelta(days=1)).isoformat(), (now + timedelta(seconds=1800 if temporal_margin_seconds is None else temporal_margin_seconds)).isoformat()
@@ -937,7 +939,8 @@ def run_cases(directory, fixture, *, mode="selective_reuse", cases=INITIAL_CASES
     def inputs(case_id=None):
         frozen = datetime.now(timezone.utc)
         selected = _fixture_inputs(fixture, case_id, frozen_at=frozen,
-            temporal_margin_seconds=extended["temporal_margin_seconds"] if extended is not None else None)
+            temporal_margin_seconds=extended["temporal_margin_seconds"] if extended is not None else None,
+            execution_profile=extended["execution_policy"]["profile"] if extended is not None else None)
         prepared_inputs[digest(selected)] = (case_id, frozen.isoformat())
         return selected
 

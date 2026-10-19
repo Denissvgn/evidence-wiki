@@ -299,3 +299,87 @@ def test_watchdog_preserves_conservative_bound_outside_owner_long_selection(monk
     monkeypatch.setattr(budget,"validate_selection",lambda _:dict(fixture_run_seconds=158159,
         fixture_overhead_seconds=10900,cleanup_seconds=60,outer_overhead_seconds=10800))
     with pytest.raises(ValueError):budget.watchdog(selected,CASE_IDS)
+
+
+@pytest.mark.parametrize("mode", ["selective_reuse", "legacy_full"])
+def test_day_expiry_uses_current_owner_selection_allocation_and_original_window(tmp_path, monkeypatch, mode):
+    from types import SimpleNamespace
+
+    from evidence_wiki import _review_producer
+    from tools._review_dependency_case_contracts import REVIEW_TEMPORAL_FIXTURE, case_manifest, case_plan
+    from tools._review_dependency_cases import _fixture_inputs
+
+    recipe, _ = pinned_recipe(tmp_path, "batch-extended")
+    source = evidence.source_identity()
+    original, _ = native.read_pinned_artifact(recipe["pilot_plan_pin"])
+    original["native_plan"]["candidate_sha256"] = source["candidate_sha256"]
+    original["candidate_sha256"] = source["candidate_sha256"]
+    original["native_plan_sha256"] = workload.digest(original["native_plan"])
+    recipe.update(ceiling.binding(ceiling.OWNER_PROFILE), schema_version=pilot.OWNER_RECIPE,
+        candidate_sha256=source["candidate_sha256"],
+        pilot_plan_pin=workload.retain(tmp_path / "day-pilot-policy.json", original),
+        journal_collection_policy=copy.deepcopy(native.JOURNAL_COLLECTION_POLICY),
+        formal_execution_policy=execution_policy("forty-eight-hour"))
+    recipe["phase_caps"].update(owner_read=3600, global_close=10800, mutation=4500)
+    # Isolate original completed-reader and installed producer admission only.
+    # Source identity, policy, selection, derived fixture and window validation stay real.
+    monkeypatch.setattr(pilot, "completed_extended_pilot_measurements", lambda *_: None)
+    generation = SimpleNamespace(producer_id=recipe["review_producer_id"])
+    monkeypatch.setattr(_review_producer, "capture", lambda: generation)
+    monkeypatch.setattr(_review_producer, "assert_current", lambda *_: None)
+    recipe_pin = workload.retain(tmp_path / "day-recipe.json", recipe)
+    selected = budget.select(recipe_pin, "forty-eight-hour", fixture_document(), mode,
+        ["review-max-age-expired"], False, journal_collection=True)
+    assert selected["schema_version"] == budget.OWNER_SELECTION
+    assert selected["source"] == source
+    assert source["case_manifest_sha256"] == workload.digest(case_manifest())
+    expiry = next(row for row in case_manifest() if row["case_id"] == "review-max-age-expired")
+    assert expiry["temporal_fixture"] == REVIEW_TEMPORAL_FIXTURE
+    prepared = datetime.now(timezone.utc)
+    fixture = _fixture_inputs(selected["fixture_input"], "review-max-age-expired", frozen_at=prepared,
+        temporal_margin_seconds=selected["temporal_margin_seconds"],
+        execution_profile=selected["execution_policy"]["profile"])
+    allocation = budget.allocation(selected, fixture, mode, ["review-max-age-expired"],
+        fixture_case_id="review-max-age-expired", fixture_prepared_at=prepared.isoformat())
+    assert fixture["global_inputs"]["policy"]["max_review_age_seconds"] == 86400
+    assert _fixture_inputs(selected["fixture_input"], "review-max-age-expired")["global_inputs"]["policy"]["max_review_age_seconds"] == 600
+    assert allocation["fixture_sha256"] == workload.digest(fixture)
+    assert allocation["native_case_selection"] == selected
+    seconds = allocation["fixture_budget"]["fixture_run_seconds"]
+    policy = selected["execution_policy"]
+    budget.validate_allocation(policy, allocation, seconds, fixture=fixture, mode=mode, worker_plan=case_plan())
+    begin, end = provisioning_window(policy, allocation, seconds)
+    frozen = datetime.fromisoformat(allocation["authority_frozen_at"])
+    expires = datetime.fromisoformat(end)
+    assert frozen <= datetime.fromisoformat(begin) < expires
+    assert end == allocation["authority_expires_at"]
+    assert (expires - frozen).total_seconds() == 172800
+    assert frozen + timedelta(seconds=86401) < expires
+    assert policy["renewal"] == "forbidden"
+
+    changed_fixture = copy.deepcopy(fixture)
+    changed_fixture["global_inputs"]["policy"]["max_review_age_seconds"] = 600
+    changed_allocation = copy.deepcopy(allocation)
+    changed_allocation["fixture_sha256"] = workload.digest(changed_fixture)
+    with pytest.raises(ValueError, match="native_case_extended_binding_invalid"):
+        budget.validate_allocation(policy, changed_allocation, seconds,
+            fixture=changed_fixture, mode=mode, worker_plan=case_plan())
+
+    downgraded = copy.deepcopy(selected)
+    downgraded["execution_policy"] = execution_policy("twenty-four-hour")
+    downgraded["execution_policy_sha256"] = workload.digest(downgraded["execution_policy"])
+    with pytest.raises(ValueError):
+        budget.validate_selection(downgraded, current=True)
+    changed_allocation = copy.deepcopy(allocation)
+    changed_allocation["native_case_selection"] = downgraded
+    for key in ("execution_policy", "execution_policy_sha256"):
+        changed_allocation[key] = downgraded[key]
+    changed_allocation["authority_expires_at"] = (frozen + timedelta(seconds=86400)).isoformat()
+    with pytest.raises(ValueError):
+        provisioning_window(downgraded["execution_policy"], changed_allocation, seconds)
+
+    changed_allocation = copy.deepcopy(allocation)
+    changed_allocation["native_case_selection"]["source"]["case_manifest_sha256"] = "0" * 64
+    with pytest.raises(ValueError):
+        budget.validate_allocation(policy, changed_allocation, seconds,
+            fixture=fixture, mode=mode, worker_plan=case_plan())

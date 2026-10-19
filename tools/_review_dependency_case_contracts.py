@@ -104,6 +104,33 @@ def _require(condition, reason):
         raise AssertionError(reason)
 
 
+REVIEW_TEMPORAL_FIXTURE = {
+    "schema_version": "native-review-temporal-fixture/v1",
+    "default_max_review_age_seconds": 600,
+    "execution_profile_max_review_age_seconds": {"forty-eight-hour": 86400},
+    "clock_direction": "forward_only",
+    "signed_times": "preserved",
+    "authority_renewal": "forbidden",
+}
+
+
+def review_fixture_max_age(execution_profile=None):
+    """Select review age before provisioning; other execution bounds stay distinct."""
+    profiles = {"two-hour", "four-hour", "six-hour", "eight-hour", "sixteen-hour",
+                "twenty-four-hour", "forty-eight-hour"}
+    _require(execution_profile is None or type(execution_profile) is str
+        and execution_profile in profiles, "native_temporal_fixture_profile_invalid")
+    return REVIEW_TEMPORAL_FIXTURE["execution_profile_max_review_age_seconds"].get(
+        execution_profile, REVIEW_TEMPORAL_FIXTURE["default_max_review_age_seconds"])
+
+
+def validate_review_fixture_age(maximum):
+    _require(type(maximum) is int and maximum in {
+        REVIEW_TEMPORAL_FIXTURE["default_max_review_age_seconds"],
+        *REVIEW_TEMPORAL_FIXTURE["execution_profile_max_review_age_seconds"].values(),
+    }, "native_review_age_fixture_not_selected")
+
+
 def case_plan():
     """Freeze synthetic context-coordinate decisions before any worker output."""
     return {
@@ -140,6 +167,8 @@ def case_manifest():
         rows.append(
             {
                 "case_id": case_id,
+                **({"temporal_fixture": copy.deepcopy(REVIEW_TEMPORAL_FIXTURE)}
+                   if case_id == "review-max-age-expired" else {}),
                 "family": family,
                 "native_assertion_scope": scope,
                 "status": "not_executed",

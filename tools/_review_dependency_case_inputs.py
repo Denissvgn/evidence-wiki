@@ -18,7 +18,15 @@ import yaml
 
 from evidence_wiki import Workspace
 from evidence_wiki.pack_discovery import owner
-from tools._review_dependency_case_contracts import CLAIM_IDS, _accepted, _basis, _dependants, _reason, _require
+from tools._review_dependency_case_contracts import (
+    CLAIM_IDS,
+    _accepted,
+    _basis,
+    _dependants,
+    _reason,
+    _require,
+    validate_review_fixture_age,
+)
 from tools._review_dependency_workload import _deposit, _example, canonical, digest, render_question_body
 
 
@@ -189,7 +197,7 @@ class NativeCaseInputs:
 
     def _review_expiry_observation(self, maximum, actual_now, last_observed):
         """Select a forward-only instant inside the isolated expiry interval."""
-        _require(maximum == 600, "native_review_age_fixture_not_selected")
+        validate_review_fixture_age(maximum)
         old, fresh, issued = [], [], []
         for claim in sorted(CLAIM_IDS):
             cycle = "baseline" if claim == "independent-note" else "review-age-refresh"
@@ -246,6 +254,8 @@ class NativeCaseInputs:
                 expected = {"host_state_clock_regressed"}
             elif case_id == "review-max-age-expired":
                 maximum = config["strict_evidence"]["max_review_age_seconds"]
+                _require(maximum == self.fixture["global_inputs"]["policy"]["max_review_age_seconds"],
+                         "native_review_age_fixture_policy_changed")
                 target = self._review_expiry_observation(maximum, actual_now, last_observed)
                 expected = None
             elif case_id == "unused-source-expired":
@@ -266,6 +276,8 @@ class NativeCaseInputs:
                         "last_committed_observation": last_observed.isoformat(),
                         "offline_fixture_now": target.isoformat(),
                         "signed_times_edited": False,
+                        **({"max_review_age_seconds": maximum}
+                           if case_id == "review-max-age-expired" else {}),
                     },
                 )
             )

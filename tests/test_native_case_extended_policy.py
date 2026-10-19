@@ -19,7 +19,12 @@ from tools import _review_dependency_workload as workload
 from tools import run_review_dependency_workload as formal
 from tools._execution_budget import execution_policy, provisioning_window
 from tools._observation_freshness import observation_policy
-from tools._review_dependency_case_contracts import case_plan
+from tools._review_dependency_case_contracts import (
+    REVIEW_TEMPORAL_FIXTURE,
+    case_manifest,
+    case_plan,
+    review_fixture_max_age,
+)
 from tools._review_dependency_case_services import _construct_profile, _constructor_inputs
 from tools._review_dependency_cases import _fixture_inputs, case_watchdog
 
@@ -71,7 +76,8 @@ def selected(tmp_path, monkeypatch):
 def allocated(selection, case="unchanged-baseline"):
     prepared = datetime.now(timezone.utc)
     fixture = _fixture_inputs(selection["fixture_input"], case, frozen_at=prepared,
-        temporal_margin_seconds=selection["temporal_margin_seconds"])
+        temporal_margin_seconds=selection["temporal_margin_seconds"],
+        execution_profile=selection["execution_policy"]["profile"])
     binding = budget.allocation(selection, fixture, "selective_reuse", [case],
         fixture_case_id=case, fixture_prepared_at=prepared.isoformat())
     return binding, fixture
@@ -144,6 +150,47 @@ def test_temporal_margin_is_prospective_and_does_not_widen_review_age(selected):
     selection["temporal_margin_seconds"] = 86400
     with pytest.raises(ValueError):
         budget.validate_selection(selection)
+
+
+@pytest.mark.parametrize("profile", [None, "two-hour", "four-hour", "six-hour", "eight-hour",
+                                     "sixteen-hour", "twenty-four-hour", "forty-eight-hour"])
+def test_review_age_fixture_is_selected_by_execution_profile(profile):
+    original = fixture_document()
+    before = copy.deepcopy(original)
+    derived = _fixture_inputs(original, "review-max-age-expired", execution_profile=profile)
+    assert derived["global_inputs"]["policy"]["max_review_age_seconds"] == (86400 if profile == "forty-eight-hour" else 600)
+    assert original == before
+    assert review_fixture_max_age(profile) == derived["global_inputs"]["policy"]["max_review_age_seconds"]
+
+
+@pytest.mark.parametrize("profile", [True, False, 48, "unknown", ""])
+def test_unknown_temporal_execution_profile_refused(profile):
+    with pytest.raises(AssertionError, match="native_temporal_fixture_profile_invalid"):
+        _fixture_inputs(fixture_document(), "review-max-age-expired", execution_profile=profile)
+
+
+def test_temporal_fixture_contract_is_part_of_exact_native_manifest_identity():
+    rows = case_manifest()
+    expiry = next(row for row in rows if row["case_id"] == "review-max-age-expired")
+    assert expiry["temporal_fixture"] == REVIEW_TEMPORAL_FIXTURE
+    assert all("temporal_fixture" not in row for row in rows if row["case_id"] != "review-max-age-expired")
+    identity = evidence.source_identity()
+    assert identity["case_manifest_sha256"] == workload.digest(rows)
+    expiry["temporal_fixture"]["default_max_review_age_seconds"] = 1
+    assert workload.digest(rows) != identity["case_manifest_sha256"]
+    assert case_manifest() != rows
+
+
+def test_allocation_refuses_day_fixture_under_shorter_selected_profile(selected):
+    selection, _recipe = selected
+    selection = copy.deepcopy(selection)
+    selection["selected_case_ids"] = ["review-max-age-expired"]
+    binding, fixture = allocated(selection, "review-max-age-expired")
+    fixture["global_inputs"]["policy"]["max_review_age_seconds"] = 86400
+    binding["fixture_sha256"] = workload.digest(fixture)
+    with pytest.raises(ValueError, match="native_case_extended_binding_invalid"):
+        budget.validate_allocation(selection["execution_policy"], binding, binding["fixture_budget"]["fixture_run_seconds"],
+            fixture=fixture, mode="selective_reuse", worker_plan=case_plan())
 
 
 def test_budget_reserves_fit_selected_authority_or_refuse(selected):

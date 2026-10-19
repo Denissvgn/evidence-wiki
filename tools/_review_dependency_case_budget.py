@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from tools import _review_control_ceiling as ceiling_policy
 from tools._execution_budget import execution_policy, validate_execution_binding, validate_execution_window
-from tools._review_dependency_case_contracts import CASE_IDS, case_plan, validate_case_plan
+from tools._review_dependency_case_contracts import CASE_IDS, case_plan, review_fixture_max_age, validate_case_plan
 from tools._review_dependency_workload import digest
 
 SELECTION = "native-review-case-extended-selection/v1"
@@ -101,6 +101,9 @@ def validate_selection(value, *, current=False):
         and collection_selected(value) == collection)
     execution = validate_execution_binding(value["execution_policy"], value)
     _require(execution["profile"] in {"eight-hour", "sixteen-hour", "twenty-four-hour", "forty-eight-hour"})
+    maximum = review_fixture_max_age(execution["profile"])
+    if maximum > review_fixture_max_age():
+        _require(execution["authority_seconds"] > maximum + 1)
     cases = value["selected_case_ids"]
     _require(type(cases) is list and cases and len(cases) == len(set(cases))
         and set(cases) <= set(CASE_IDS) and value["mode"] in {"selective_reuse", "legacy_full"}
@@ -226,7 +229,8 @@ def validate_allocation(policy, binding, run_seconds, *, fixture=None, mode=None
     prepared = datetime.fromisoformat(binding["fixture_prepared_at"])
     _require(prepared.tzinfo is not None)
     derived = _fixture_inputs(selection["fixture_input"], case_id,
-        temporal_margin_seconds=selection["temporal_margin_seconds"], frozen_at=prepared)
+        temporal_margin_seconds=selection["temporal_margin_seconds"], frozen_at=prepared,
+        execution_profile=selection["execution_policy"]["profile"])
     _require(binding["fixture_sha256"] == digest(derived))
     if case_id in {"unused-source-expired", "source-effective-interval-ended"}:
         boundary = prepared + timedelta(seconds=selection["temporal_margin_seconds"] or 1800)

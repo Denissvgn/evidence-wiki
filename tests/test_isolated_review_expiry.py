@@ -16,7 +16,14 @@ def require(value, reason):
 
 NAMES = {'_refresh_expiry_reviews', '_review_expiry_observation'}
 SELECTED = [n for n in CLASS.body if isinstance(n, ast.FunctionDef) and n.name in NAMES]
+CONTRACT_TREE = ast.parse((ROOT / 'tools/_review_dependency_case_contracts.py').read_text())
+CONTRACT_NAMES = {'review_fixture_max_age', 'validate_review_fixture_age'}
+CONTRACT_NODES = [node for node in CONTRACT_TREE.body
+                  if isinstance(node, ast.FunctionDef) and node.name in CONTRACT_NAMES
+                  or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name)
+                     and target.id == 'REVIEW_TEMPORAL_FIXTURE' for target in node.targets)]
 NAMESPACE = dict(CLAIM_IDS=CLAIMS, datetime=datetime, timedelta=timedelta, _require=require)
+exec(compile(ast.fix_missing_locations(ast.Module(body=CONTRACT_NODES, type_ignores=[])), '<pure fixture contract>', 'exec'), NAMESPACE)  # noqa: S102 - trusted local contract only.
 exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(name='Toy', bases=[], keywords=[], body=SELECTED, decorator_list=[])], type_ignores=[])), '<pure helpers>', 'exec'), NAMESPACE)  # noqa: S102 - isolate selected trusted local methods without runtime imports.
 Toy = NAMESPACE['Toy']
 
@@ -49,9 +56,30 @@ class ControlledClockTests(unittest.TestCase):
         self.assertEqual(target, self.now + timedelta(seconds=620))
 
     def test_wrong_policy_fails(self):
-        for maximum in (599, 601, 86400):
+        for maximum in (False, True, 599, 601, 86401, 600.0, "86400", None):
             with self.assertRaisesRegex(ValueError, 'fixture_not_selected'):
                 self.toy._review_expiry_observation(maximum, self.now, self.now)
+
+    def test_day_cohort_remains_fresh_after_slow_native_controls(self):
+        for (cycle, _claim, _config), application in self.toy.applications.items():
+            seconds = 10 if cycle == 'baseline' else 1300
+            at = self.now + timedelta(seconds=seconds)
+            application['envelope']['payload']['body']['review']['reviewed_at'] = at.isoformat()
+            application['envelope']['authentication']['issued_at'] = (at + timedelta(seconds=1127)).isoformat()
+        before = copy.deepcopy(self.toy.applications)
+        target = self.toy._review_expiry_observation(86400, self.now + timedelta(seconds=2500), self.now)
+        self.assertEqual(target, self.now + timedelta(seconds=86410, microseconds=1))
+        for (cycle, _, _), application in self.toy.applications.items():
+            age = (target - datetime.fromisoformat(application['envelope']['payload']['body']['review']['reviewed_at'])).total_seconds()
+            self.assertEqual(age > 86400, cycle == 'baseline')
+        self.assertEqual(before, self.toy.applications)
+
+    def test_exact_peer_age_boundary_and_one_microsecond_after(self):
+        for maximum in (600, 86400):
+            boundary = self.now + timedelta(seconds=30 + maximum)
+            self.assertEqual(self.toy._review_expiry_observation(maximum, boundary, self.now), boundary)
+            with self.assertRaisesRegex(ValueError, 'interval_unavailable'):
+                self.toy._review_expiry_observation(maximum, boundary + timedelta(microseconds=1), self.now)
 
     def test_timestamp_after_signature_fails(self):
         app = next(iter(self.toy.applications.values()))
