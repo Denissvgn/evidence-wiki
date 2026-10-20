@@ -12,6 +12,12 @@
 
 ### Fixed
 
+- Bound each native effect in a long research run to the supported operation
+  timeout while preserving the original run deadline and recovery allowance.
+
+- Finish finite child cleanup before delivering a pending deadline alarm,
+  preserving the original timer and reporting any cleanup overrun.
+
 - Retain more successful large-document validations within a fixed serialized
   key budget, preserving exact validation identity and detached return values.
 

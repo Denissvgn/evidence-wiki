@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import json
+import signal
 import subprocess
 import sys
 import time
@@ -729,23 +730,40 @@ def _finish_extended_cases(directory, report, children, source_before, refresh, 
             def close_owned():
                 nonlocal cleanup_invoked
                 with _defer_signals():
+                    # Other threads may receive the process alarm even while this
+                    # thread masks it. Defer its Python callback until finite
+                    # ownership cleanup finishes, without changing the timer.
+                    alarm_handler = signal.getsignal(signal.SIGALRM)
+                    pending_alarm = None
+                    def defer_alarm(signum, frame):
+                        nonlocal pending_alarm
+                        if pending_alarm is None:
+                            pending_alarm = (signum, frame)
+                    if callable(alarm_handler):
+                        signal.signal(signal.SIGALRM, defer_alarm)
                     cleanup_invoked = True
                     try:
-                        report["cleanup"] = children.close()
-                        if shards:
-                            report["cleanup"]["shards"] = [shard["cleanup"] for shard in report["shards"]]
+                        try:
+                            report["cleanup"] = children.close()
+                            if shards:
+                                report["cleanup"]["shards"] = [shard["cleanup"] for shard in report["shards"]]
+                        finally:
+                            elapsed = time.monotonic() - cleanup_started
+                            overrun = time.monotonic() >= cleanup_end
+                            report["cleanup_timing"] = {"reserved_seconds": budget["cleanup_seconds"],
+                                "elapsed_seconds": elapsed, "deadline_exceeded": overrun}
+                            if overrun:
+                                _case_failure(report, _HostDeadline(), children.originals)
+                                report["originals"] = children.originals.pins
+                                # Preserve the finite safety cleanup's actual overrun before
+                                # delivering the pending timeout; native work cannot resume.
+                                (directory / "report.json").write_bytes(
+                                    (json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
                     finally:
-                        elapsed = time.monotonic() - cleanup_started
-                        overrun = time.monotonic() >= cleanup_end
-                        report["cleanup_timing"] = {"reserved_seconds": budget["cleanup_seconds"],
-                            "elapsed_seconds": elapsed, "deadline_exceeded": overrun}
-                        if overrun:
-                            _case_failure(report, _HostDeadline(), children.originals)
-                            report["originals"] = children.originals.pins
-                            # Preserve the finite safety cleanup's actual overrun before
-                            # delivering the pending timeout; native work cannot resume.
-                            (directory / "report.json").write_bytes(
-                                (json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
+                        if callable(alarm_handler):
+                            signal.signal(signal.SIGALRM, alarm_handler)
+                            if pending_alarm is not None:
+                                alarm_handler(*pending_alarm)
 
             try:
                 with _case_phase(cleanup_end):

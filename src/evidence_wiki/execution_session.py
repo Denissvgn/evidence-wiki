@@ -1431,7 +1431,8 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
         end = deadline(session)
         if effect_deadline is not None:
             end = min(end, datetime.fromisoformat(effect_deadline))
-        seconds = (end - datetime.now(timezone.utc)).total_seconds()
+        operation_start = datetime.now(timezone.utc)
+        seconds = (end - operation_start).total_seconds()
         if not recovering and (projection["usage_unknown"] or projection["overrun"] or projection["remaining"]["tool_calls"] < 1 or seconds <= 0):
             refuse("BUDGET_EXHAUSTED")
         reservation = previous["data"]["reservation"] if recovering else {"attempt_id": identifier, "job_id": identifier, "controller_ref": "session-observer",
@@ -1445,7 +1446,8 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
             append(session, "execution_native", child_id(identifier, "intent"), {"operation": operation,
                 "arguments": arguments, "reservation": reservation})
     control = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=session.execution.profile.cleanup_timeout_seconds)
-        if recovering else end).isoformat(), timeout_seconds=max(0.001, seconds) if not recovering else session.execution.profile.cleanup_timeout_seconds)
+        if recovering else min(end, operation_start + timedelta(seconds=86400))).isoformat(),
+        timeout_seconds=min(86400, max(0.001, seconds)) if not recovering else session.execution.profile.cleanup_timeout_seconds)
     started = time.monotonic()
     result, error, invoked = None, None, False
     try:

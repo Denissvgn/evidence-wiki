@@ -540,8 +540,10 @@ def test_cleanup_reserves_existing_60_seconds_without_changing_measured_caps(sel
         budget.fixture_budget(near_limit, selection["execution_policy"])
 
 
-def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_overrun(selected, tmp_path, monkeypatch):
+@pytest.mark.parametrize("unblocked_receiver", [False, True])
+def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_overrun(selected, tmp_path, monkeypatch, unblocked_receiver):
     import signal
+    import threading
     import time
 
     from tools import _review_dependency_cases as cases
@@ -549,6 +551,9 @@ def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_
     selection, _recipe = selected
     report = {"status": "completed", "watchdog": budget.watchdog(selection, selection["selected_case_ids"])}
     completed, observed = [], []
+    original_handler = signal.getsignal(signal.SIGALRM)
+    original_timer = signal.getitimer(signal.ITIMER_REAL)
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
     def close():
         assert signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, set())
         time.sleep(0.02)
@@ -559,10 +564,25 @@ def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_
         assert completed == [True]
         observed.append(copy.deepcopy(args[1]))
     monkeypatch.setattr(cases, "_finish_case_evidence", finish)
-    now = time.monotonic()
-    with pytest.raises(_HostDeadline):
-        cases._finish_extended_cases(tmp_path, report, tracker, {}, False, {}, object(),
-            (now - 1, now + 0.01, now + 1))
+    ready, stop = threading.Event(), threading.Event()
+    def receive():
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+        ready.set()
+        stop.wait()
+    receiver = threading.Thread(target=receive) if unblocked_receiver else None
+    try:
+        if receiver is not None:
+            receiver.start()
+            assert ready.wait(1)
+        now = time.monotonic()
+        with pytest.raises(_HostDeadline):
+            cases._finish_extended_cases(tmp_path, report, tracker, {}, False, {}, object(),
+                (now - 1, now + 0.01, now + 1))
+    finally:
+        stop.set()
+        if receiver is not None:
+            receiver.join(1)
+            assert not receiver.is_alive()
     assert completed == [True] and observed[0]["status"] == "failed"
     assert report["cleanup"]["status"] == "confirmed"
     assert report["cleanup_timing"]["deadline_exceeded"] is True
@@ -570,6 +590,9 @@ def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_
     assert retained["status"] == "failed" and retained["cleanup_timing"]["deadline_exceeded"] is True
     assert not hasattr(tracker, "_native_case_completion")
     assert not workload._DEADLINES.get()
+    assert signal.getsignal(signal.SIGALRM) is original_handler
+    assert signal.getitimer(signal.ITIMER_REAL) == original_timer
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == original_mask
 
 
 def test_already_expired_terminal_phase_still_closes_owned_children_once(selected, tmp_path, monkeypatch):
