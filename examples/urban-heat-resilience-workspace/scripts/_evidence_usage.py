@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import json
 import threading
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -27,7 +28,7 @@ from _evidence_authority import (
 )
 from _evidence_revision import canonical_bytes, content_id
 from _host_context import selection_identity, state_path
-from _host_evidence_store import locked_state, read_state, write_state
+from _host_evidence_store import MAX_STATE_BYTES, locked_state, read_state, write_state
 from _publication_context import capture_active, captured_view, live_read, refuse_read_scope_write
 from _record_artifacts import artifact_path, closure_identity, json_document, validate_file_bounds
 from _strict_contract import artifact_id as strict_artifact_id
@@ -41,6 +42,7 @@ GRANT_SCHEMA = "evidence-usage-grant/v1"
 SCRUB_SCHEMA = "evidence-scrub-receipt/v1"
 SOURCE_SCHEMA = "evidence-source-revision/v1"
 MAX_EVENTS = 10000
+_MAX_STATE_VALUE_NODES = 250_000
 MAX_NODES = 4096
 MAX_LINEAGE_DEPTH = 64
 USES = frozenset({"retrieval", "training", "export"})
@@ -164,6 +166,105 @@ def decode_files(encoded: Any) -> dict[str, bytes]:
     return files
 
 
+
+def _bound_usage_state_value(value: Any, depth: int) -> None:
+    # Iterators keep the validation stack bounded by depth, rather than width.
+    pending = [(iter((value,)), depth)]
+    count = 0
+    while pending:
+        children, level = pending[-1]
+        try:
+            item = next(children)
+        except StopIteration:
+            pending.pop()
+            continue
+        count += 1
+        if count > _MAX_STATE_VALUE_NODES or level > 64:
+            raise EvidenceInvalid("invalid_evidence_json")
+        if isinstance(item, dict):
+            pending.append((iter(item.values()), level + 1))
+        elif isinstance(item, list):
+            pending.append((iter(item), level + 1))
+
+def _usage_state_document(data: bytes) -> dict[str, Any]:
+    """Decode bounded state without charging separate events one shared node budget."""
+    if not isinstance(data, bytes) or len(data) > MAX_STATE_BYTES:
+        raise EvidenceInvalid("invalid_evidence_json")
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise EvidenceInvalid("invalid_evidence_json")
+            result[key] = value
+        return result
+
+    def nonfinite(_value):
+        raise EvidenceInvalid("invalid_evidence_json")
+
+
+    try:
+        text = data.decode("utf-8")
+        decoder = json.JSONDecoder(object_pairs_hook=pairs, parse_constant=nonfinite)
+        position = 0
+
+        def whitespace():
+            nonlocal position
+            while position < len(text) and text[position] in " \t\r\n":
+                position += 1
+
+        def token(expected):
+            nonlocal position
+            whitespace()
+            if not text.startswith(expected, position):
+                raise EvidenceInvalid("invalid_evidence_json")
+            position += len(expected)
+
+        def value(depth):
+            nonlocal position
+            whitespace()
+            result, position = decoder.raw_decode(text, position)
+            _bound_usage_state_value(result, depth)
+            return result
+
+        token("{")
+        document = {}
+        allowed = {"schema_version", "state_id", "workspace_binding", "events"}
+        while True:
+            key = value(1)
+            if not isinstance(key, str) or key not in allowed or key in document:
+                raise EvidenceInvalid("invalid_evidence_json")
+            token(":")
+            if key == "events":
+                token("[")
+                events = []
+                whitespace()
+                if not text.startswith("]", position):
+                    while True:
+                        if len(events) >= MAX_EVENTS:
+                            raise EvidenceInvalid("invalid_evidence_json")
+                        events.append(value(2))
+                        whitespace()
+                        if text.startswith("]", position):
+                            break
+                        token(",")
+                token("]")
+                document[key] = events
+            else:
+                document[key] = value(1)
+            whitespace()
+            if text.startswith("}", position):
+                break
+            token(",")
+        token("}")
+        whitespace()
+        if position != len(text) or set(document) != allowed:
+            raise EvidenceInvalid("invalid_evidence_json")
+        return document
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise EvidenceInvalid("invalid_evidence_json") from exc
+
+
 class UsageState:
     """One locked event generation; authority is evaluated for each operation."""
 
@@ -171,7 +272,7 @@ class UsageState:
         self.root = root
         self.state_id = state_id
         self.binding = workspace_binding(root)
-        self.document = json_document(data) if data is not None else {
+        self.document = _usage_state_document(data) if data is not None else {
             "schema_version": STATE_SCHEMA, "state_id": state_id, "workspace_binding": self.binding, "events": [],
         }
         exact_object(self.document, {"schema_version", "state_id", "workspace_binding", "events"})
@@ -299,6 +400,7 @@ class UsageState:
                  "accepted_at": now.isoformat(), "authority": authority_basis(trust),
                  "artifacts": {path: base64.b64encode(data).decode("ascii") for path, data in sorted(files.items())}}
         event["event_id"] = content_id("evidence-usage-event/v1", event)
+        _bound_usage_state_value(event, 2)
         self._accept(event, len(self.events) + 1)
         self.events.append(event)
         return self.receipt(event)

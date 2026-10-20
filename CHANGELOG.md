@@ -12,6 +12,10 @@
 
 ### Fixed
 
+- Read bounded host evidence histories with a separate JSON budget for each
+  event, preserving state size, nesting, authentication and individual evidence
+  limits as reviews accumulate.
+
 - Bound each native effect in a long research run to the supported operation
   timeout while preserving the original run deadline and recovery allowance.
 
