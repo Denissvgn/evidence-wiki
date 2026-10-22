@@ -221,6 +221,8 @@ def workspace_projection(tmp_path, monkeypatch):
             required_review_role="evaluator", computation_mode="none")
         return material, basis["basis_id"]
 
+    project.inputs = {"manifest": manifest, "config": config, "policy": policy, "capture": capture,
+                      "tmp_path": tmp_path, "native": native}
     return capture.files, project
 
 
@@ -264,3 +266,79 @@ def test_unrelated_declared_question_edit_preserves_claim_basis(workspace_projec
     changed, changed_basis = project()
     assert changed["global_material"] == before["global_material"]
     assert changed_basis != before_basis
+
+
+@pytest.mark.parametrize("materialized", [False, True])
+def test_same_question_sibling_edit_preserves_target_basis(workspace_projection, materialized):
+    import json
+
+    import yaml
+
+    files, project = workspace_projection
+    held = project.inputs
+    manifest = held["manifest"]
+    sibling = {**copy.deepcopy(manifest["claims"][0]), "id": "sibling", "text": "An independent retained observation.",
+               "premises": [], "evidence": _manifest()["claims"][0]["evidence"]}
+    manifest["claims"].append(sibling)
+    files["claims.json"] = json.dumps(manifest).encode()
+    if materialized:
+        questions = owner("_question_dependencies")
+        row = questions.project(held["tmp_path"], held["config"], held["policy"], held["capture"], manifest,
+                                "question", coverage_summary={"policy_results": []})
+        front, body = questions.parse_page(files[row["path"]])
+        front.update(row["canonical_mirrors"], status="answered", answered_by="worker")
+        files[row["path"]] = ("---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body).encode()
+    before, original_basis = project()
+    sibling["text"] = "The independent retained observation changed."
+    files["claims.json"] = json.dumps(manifest).encode()
+    after, current_basis = project()
+    assert before == after
+    assert original_basis == current_basis
+    assert [row["id"] for row in after["claims"]] == ["claim"]
+    assert after["questions"][0]["canonical_mirrors"]["grounding"] == []
+    assert owner("_review_dependencies").dependency_items(before) == owner("_review_dependencies").dependency_items(after)
+    manifest["claims"][0]["text"] = "The target observation changed."
+    files["claims.json"] = json.dumps(manifest).encode()
+    target_changed, target_basis = project()
+    assert target_basis != current_basis
+    assert target_changed["global_material"] == after["global_material"]
+
+
+def test_original_custody_reconstructs_closure_local_question_rows(workspace_projection, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from evidence_wiki import host_context
+
+    files, project = workspace_projection
+    held = project.inputs
+    manifest = held["manifest"]
+    sibling = {**copy.deepcopy(manifest["claims"][0]), "id": "sibling", "text": "An independent retained observation.",
+               "premises": [], "evidence": _manifest()["claims"][0]["evidence"]}
+    manifest["claims"].append(sibling)
+    files["claims.json"] = json.dumps(manifest).encode()
+    coverage = {row["slug"]: {"manifest": {}, "summary": {"policy_results": []}} for row in manifest["questions"]}
+    monkeypatch.setattr(held["native"], "_coverage", lambda *_: (coverage,
+        {slug: row["summary"] for slug, row in coverage.items()}))
+    original, original_basis = project()
+    core = owner("_strict_evidence")
+    snapshot = core._dependency_snapshot(held["tmp_path"], held["config"], held["policy"], held["capture"], manifest,
+        original, {"selected": {}}, None)
+    original_inputs = {path: files[path] for path in ["claims.json", *[row["path"] for row in original["questions"]]]}
+    closed = []
+    proof = SimpleNamespace(original_inputs=lambda: original_inputs, original_snapshot=lambda: snapshot,
+                            assert_current=lambda: closed.append(True))
+    monkeypatch.setattr(host_context, "review_custody", lambda *_args, **_kwargs: proof)
+    sibling["text"] = "The independent retained observation changed."
+    files["claims.json"] = json.dumps(manifest).encode()
+    current, current_basis = project()
+    assert current_basis == original_basis
+    payload = {"claim_id": "claim", "claim_schema_version": manifest["schema_version"], "snapshot": snapshot}
+    reproduced = core._dependency_original(held["tmp_path"], held["config"], held["policy"], payload,
+        {"material": current, "snapshot": snapshot}, purpose="reuse")
+    assert reproduced is proof and closed == [True]
+    original_inputs["unexpected.md"] = b"unexpected"
+    with pytest.raises(core.ScriptRefusal) as caught:
+        core._dependency_original(held["tmp_path"], held["config"], held["policy"], payload,
+            {"material": current, "snapshot": snapshot}, purpose="reuse")
+    assert caught.value.details["reason"] == "selective_original_custody_scope_changed"

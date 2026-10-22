@@ -31,12 +31,15 @@ def _frontmatter():
             "question": "What was measured?", "metadata": {"instructions": {"preserve": [True, 1, "1"]}}}
 
 
-def _project(projection, frontmatter, *, manifest=None, body="\n# Question\n\nWhole body.\n", newline="\n"):
+def _project(projection, frontmatter, *, manifest=None, dependency_target=None, body="\n# Question\n\nWhole body.\n", newline="\n"):
     document = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
     raw = ("---\n" + document + "---\n" + body).replace("\n", newline).encode()
     capture = SimpleNamespace(files={"wiki/questions/question.md": raw})
-    return projection.project(Path("/workspace"), {"wiki": {"root": "wiki"}}, {"human_review": False},
-                              capture, manifest or _manifest(), "question", coverage_summary={"policy_results": []})
+    arguments = (Path("/workspace"), {"wiki": {"root": "wiki"}}, {"human_review": False},
+                 capture, manifest or _manifest(), "question")
+    if dependency_target is not None:
+        return projection.project_dependencies(*arguments, dependency_target, coverage_summary={"policy_results": []})
+    return projection.project(*arguments, coverage_summary={"policy_results": []})
 
 
 def test_exact_body_keeps_every_original_line_ending(projection):
@@ -166,3 +169,89 @@ def test_mapping_keys_count_toward_the_shared_semantic_node_budget(projection):
     invalid = {"t": "list", "v": [*node["v"], {"t": "null"}]}
     with pytest.raises(projection.sibling("_strict_evidence").ScriptRefusal):
         projection.typed_value(invalid)
+
+
+def test_dependency_projection_rebuilds_stale_materialized_mirrors(projection):
+    manifest = _manifest()
+    canonical = _project(projection, _frontmatter(), manifest=manifest)["canonical_mirrors"]
+    answered = {**_frontmatter(), **canonical, "status": "answered", "answered_by": "worker"}
+    manifest["claims"][0]["text"] = "The current measurement is seven."
+    manifest["claims"][0]["evidence"][0]["source_id"] = "current-source"
+    actual = _project(projection, answered, manifest=manifest, dependency_target="measurement")
+    expected = _project(projection, _frontmatter(), manifest=manifest)
+    assert actual == expected
+    assert actual["canonical_mirrors"]["source_ids"] == ["current-source"]
+    with pytest.raises(projection.sibling("_strict_evidence").ScriptRefusal) as caught:
+        _project(projection, answered, manifest=manifest)
+    assert caught.value.details["reason"] == "selective_question_mirror_mismatch"
+
+
+@pytest.mark.parametrize("change", ["missing", "unknown_grounding", "grounding_type", "source_type", "duplicate_source",
+                                    "coverage_path", "coverage_flag", "answer_path", "human_policy"])
+def test_dependency_projection_preserves_materialized_shape_and_policy_checks(projection, change):
+    canonical = _project(projection, _frontmatter())["canonical_mirrors"]
+    answered = {**_frontmatter(), **canonical, "status": "answered", "answered_by": "worker"}
+    if change == "missing":
+        answered.pop("grounding")
+    elif change == "unknown_grounding":
+        answered["grounding"][0]["extension"] = "unsupported"
+    elif change == "grounding_type":
+        answered["grounding"] = "unsupported"
+    elif change == "source_type":
+        answered["source_ids"] = "source"
+    elif change == "duplicate_source":
+        answered["source_ids"] = ["source", "source"]
+    elif change == "coverage_path":
+        answered["coverage_manifest"] = "sources/coverage/elsewhere.yml"
+    elif change == "coverage_flag":
+        answered["coverage_required"] = False
+    elif change == "answer_path":
+        answered["answer_page"] = "elsewhere.md"
+    else:
+        answered["human_review_required"] = True
+    with pytest.raises(projection.sibling("_strict_evidence").ScriptRefusal) as caught:
+        _project(projection, answered, dependency_target="measurement")
+    assert caught.value.details["reason"] in {"selective_question_mirrors_missing",
+        "selective_question_grounding_invalid", "selective_question_mirror_invalid", "selective_question_mirror_mismatch"}
+
+
+def test_dependency_projection_derives_transitive_closure_instead_of_sibling_mirrors(projection):
+    manifest = _manifest()
+    base = manifest["claims"][0]
+    premise = {**copy.deepcopy(base), "id": "premise", "text": "The retained premise is seven."}
+    target = {**copy.deepcopy(base), "id": "derived", "qualification": "inference", "premises": ["premise"],
+              "derivation": "Use the retained premise.", "text": "The derived value is seven."}
+    unrelated = {**copy.deepcopy(base), "id": "unrelated", "text": "Another observation.",
+                 "evidence": [{**base["evidence"][0], "source_id": "other-source"}]}
+    manifest["claims"] = [premise, target, unrelated]
+    actual = _project(projection, _frontmatter(), manifest=manifest, dependency_target="derived")
+    mirrors = actual["canonical_mirrors"]
+    assert [row["claim"] for row in mirrors["grounding"]] == [target["text"], premise["text"]]
+    assert mirrors["source_ids"] == ["source"]
+    assert len(_project(projection, _frontmatter(), manifest=manifest)["canonical_mirrors"]["grounding"]) == 3
+    with pytest.raises(projection.sibling("_review_dependencies").sibling("_strict_evidence").ScriptRefusal) as caught:
+        _project(projection, _frontmatter(), manifest=manifest, dependency_target="missing")
+    assert caught.value.details["reason"] == "selective_claim_unknown"
+
+
+@pytest.mark.parametrize("field", ["source_count", "source_length", "claim", "grounding_source", "quote",
+                                   "location_hint", "anchor_pointer", "anchor_expected"])
+def test_dependency_projection_refuses_oversized_stale_mirrors(projection, field):
+    canonical = _project(projection, _frontmatter())["canonical_mirrors"]
+    answered = {**_frontmatter(), **canonical, "status": "answered", "answered_by": "worker"}
+    if field == "source_count":
+        answered["source_ids"] = ["source-" + str(index) for index in range(65)]
+    elif field == "source_length":
+        answered["source_ids"] = ["s" * 257]
+    elif field in {"anchor_pointer", "anchor_expected"}:
+        answered["grounding"][0] = {"claim": "Retained claim.", "source_id": "source",
+            "anchor": {"pointer": "/value", "expected": "7"}}
+        key, length = ("pointer", 513) if field == "anchor_pointer" else ("expected", 4097)
+        answered["grounding"][0]["anchor"][key] = "x" * length
+    else:
+        key, length = {"claim": ("claim", 4097), "grounding_source": ("source_id", 257),
+                       "quote": ("quote", 4097), "location_hint": ("location_hint", 513)}[field]
+        answered["grounding"][0][key] = "x" * length
+    with pytest.raises(projection.sibling("_strict_evidence").ScriptRefusal) as caught:
+        _project(projection, answered, dependency_target="measurement")
+    assert caught.value.details["reason"] in {"selective_question_grounding_invalid", "selective_question_mirror_invalid"}

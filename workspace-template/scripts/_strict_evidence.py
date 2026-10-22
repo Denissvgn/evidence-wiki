@@ -831,7 +831,7 @@ def _dependency_original(root, config, policy, payload, current, *, purpose):
     for row in current["material"]["questions"]:
         slug = row["manifest_question"]["slug"]
         paths.add(row["path"])
-        projected = questions.project(root, config, policy, capture, manifest, slug,
+        projected = questions.project_dependencies(root, config, policy, capture, manifest, slug, payload["claim_id"],
             coverage_summary=coverage[slug]["summary"])
         require(projected == row, "selective_original_question_projection_changed")
     require(set(original_inputs) == paths, "selective_original_custody_scope_changed")

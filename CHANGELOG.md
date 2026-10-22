@@ -12,6 +12,10 @@
 
 ### Fixed
 
+- Keep dependency review material scoped to each claim and its premises after
+  question resolution, so edits to sibling claims do not invalidate unrelated
+  reviews. Current grounding and publication checks remain required.
+
 - Read bounded host evidence histories with a separate JSON budget for each
   event, preserving state size, nesting, authentication and individual evidence
   limits as reviews accumulate.

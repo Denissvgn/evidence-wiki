@@ -537,7 +537,7 @@ def project(root, claim_id, *, config, policy, capture, manifest, view):
     requirements = _requirements(root, capture)
     coverage, summaries = _coverage(root, config, capture, manifest, view)
     question_owner = sibling("_question_dependencies")
-    all_questions = [question_owner.project(root, config, policy, capture, manifest, question["slug"], coverage_summary=summaries[question["slug"]])
+    all_questions = [question_owner.project_dependencies(root, config, policy, capture, manifest, question["slug"], claim_id, coverage_summary=summaries[question["slug"]])
                      for question in sorted(manifest["questions"], key=lambda row: row["slug"].encode("utf-8"))]
     projected_question_paths = {row["path"] for row in all_questions}
     question_dir = sibling("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"

@@ -203,7 +203,7 @@ def canonical_mirrors(root, config, policy, manifest, slug, coverage_summary):
             "human_review_policies": policies}, coverage_human
 
 
-def _validate_mirrors(frontmatter, canonical, coverage_human):
+def _validate_mirrors(frontmatter, canonical, coverage_human, *, allow_stale_derived=False):
     pending = frontmatter["status"] in {"open", "in_progress"}
     materialized = frontmatter["status"] in {"answered", "human_review"}
     required = {"grounding", "source_ids", "answer_page", "coverage_required", "grounding_required", "coverage_manifest"}
@@ -215,20 +215,47 @@ def _validate_mirrors(frontmatter, canonical, coverage_human):
         value = frontmatter[key]
         if key == "grounding":
             validate_grounding(value)
+            if allow_stale_derived:
+                for entry in value:
+                    require(len(entry["claim"]) <= 4096 and len(entry["source_id"]) <= 256,
+                            "selective_question_grounding_invalid")
+                    if "anchor" in entry:
+                        require(len(entry["anchor"]["pointer"]) <= 512 and len(entry["anchor"]["expected"]) <= 4096,
+                                "selective_question_grounding_invalid")
+                    else:
+                        require(len(entry["quote"]) <= 4096 and len(entry.get("location_hint", "")) <= 512,
+                                "selective_question_grounding_invalid")
         elif key in {"source_ids", "human_review_policies"}:
             require(type(value) is list and all(_nonempty(item) for item in value) and len(set(value)) == len(value),
                     "selective_question_mirror_invalid")
+            if allow_stale_derived and key == "source_ids":
+                require(len(value) <= 64 and all(len(item) <= 256 for item in value), "selective_question_mirror_invalid")
         elif key in {"coverage_required", "grounding_required", "human_review_required"}:
             require(type(value) is bool, "selective_question_mirror_invalid")
         else:
             require(_nonempty(value), "selective_question_mirror_invalid")
-        if pending and key in {"grounding", "source_ids"} and value == []:
+        if key in {"grounding", "source_ids"} and (allow_stale_derived or pending and value == []):
             continue
         require(value == canonical[key], "selective_question_mirror_mismatch")
 
 
 def project(root, config, policy, capture, manifest, slug, *, coverage_summary):
     """Project a current captured question, independently of acceptance/history."""
+    return _project(root, config, policy, capture, manifest, slug, coverage_summary=coverage_summary)
+
+
+def project_dependencies(root, config, policy, capture, manifest, slug, target_claim_id, *, coverage_summary):
+    """Derive review mirrors from the validated target and transitive premises.
+
+    Materialized grounding and source IDs are derived display state. Their
+    structure remains checked here; current publication verifies their evidence.
+    """
+    claims = sibling("_review_dependencies").closure(manifest, target_claim_id)
+    return _project(root, config, policy, capture, manifest, slug,
+                    coverage_summary=coverage_summary, dependency_claims=claims)
+
+
+def _project(root, config, policy, capture, manifest, slug, *, coverage_summary, dependency_claims=None):
     root = Path(root)
     sibling("_strict_contract").claims_document(manifest)
     question = next((item for item in manifest["questions"] if item["slug"] == slug), None)
@@ -245,8 +272,9 @@ def project(root, config, policy, capture, manifest, slug, *, coverage_summary):
     if "evidence_strength" in frontmatter:
         require(type(frontmatter["evidence_strength"]) is str and frontmatter["evidence_strength"] in {"corroborated", "single_source", "contested"},
                 "selective_question_evidence_strength_invalid")
-    canonical, coverage_human = canonical_mirrors(root, config, policy, manifest, slug, coverage_summary)
-    _validate_mirrors(frontmatter, canonical, coverage_human)
+    selected_manifest = manifest if dependency_claims is None else {**manifest, "claims": dependency_claims}
+    canonical, coverage_human = canonical_mirrors(root, config, policy, selected_manifest, slug, coverage_summary)
+    _validate_mirrors(frontmatter, canonical, coverage_human, allow_stale_derived=dependency_claims is not None)
     semantic = {key: value for key, value in frontmatter.items() if key not in COORDINATION | MIRRORS}
     return {"manifest_question": question, "path": path, "semantic_frontmatter": typed_node(semantic),
             "body": body, "canonical_mirrors": canonical}
