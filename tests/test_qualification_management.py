@@ -590,7 +590,10 @@ def installation_reports(tmp_path):
             archive.addfile(item,io.BytesIO(data))
     runtime = runtime_identity()
     resolved={}
-    for name in ('evidence-wiki','pypdf','pyyaml','ruamel-yaml','tzdata'):
+    dependencies = ('evidence-wiki','pypdf','pyyaml','ruamel-yaml','tzdata')
+    if sys.version_info < (3, 11):
+        dependencies += ('typing-extensions',)
+    for name in dependencies:
         item=distribution(name)
         resolved[name]={'version':item.version,'requires_python':item.metadata.get('Requires-Python'),
                         'requires_dist':sorted(item.requires or []),'entry_points':{e.name:e.value for e in item.entry_points if e.group=='console_scripts'}}
@@ -598,10 +601,12 @@ def installation_reports(tmp_path):
     import importlib
     from pathlib import Path
     modules={'pypdf':'pypdf','pyyaml':'yaml','ruamel-yaml':'ruamel.yaml','tzdata':'tzdata'}
+    if sys.version_info < (3, 11):
+        modules['typing-extensions'] = 'typing_extensions'
     origins={}
     for name,module_name in modules.items():
         module=importlib.import_module(module_name); origin=Path(module.__file__).resolve(); data=origin.read_bytes()
-        origins[name]={'module':module_name,'origin':str(origin),'version':module.__version__,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+        origins[name]={'module':module_name,'origin':str(origin),'version':getattr(module,'__version__',None),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
     assert project_requirements(layout['project'])
     public_report = {'observation_class':'public_installed_fixture_mechanics','outcomes':dict.fromkeys(PUBLIC_CASES,'passed'),
         'expectations_sha256':digest(expected_public),'framework_matrix_sha256':digest(expected_public['framework_matrix']),

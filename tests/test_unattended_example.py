@@ -27,8 +27,11 @@ def installed(tmp_path_factory):
     interpreter = environment/'bin/python'
     layout = subprocess.check_output([str(interpreter),'-I','-c',"import sysconfig;print(sysconfig.get_path('purelib'))"],text=True)
     target = Path(layout.strip())
-    # Reuse only the declared runtime distributions, never the editable package or checkout finder.
-    for name in ('PyYAML','pypdf','ruamel.yaml','tzdata'):
+    # Reuse runtime dependencies, including pypdf's version-selected requirement.
+    dependencies = ('PyYAML','pypdf','ruamel.yaml','tzdata')
+    if sys.version_info < (3, 11):
+        dependencies += ('typing_extensions',)
+    for name in dependencies:
         distribution=importlib.metadata.distribution(name)
         for relative in distribution.files:
             if '..' in relative.parts or relative.suffix=='.pyc':
