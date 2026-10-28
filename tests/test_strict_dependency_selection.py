@@ -30,7 +30,8 @@ def selection(monkeypatch, records, *, reject=None, workspace=WORKSPACE):
     monkeypatch.setattr(CORE, "artifact_id", lambda payload: "sha256:" + ("5" if payload["name"] == "old" else "6") * 64)
     monkeypatch.setattr(CORE, "_dependency_authenticated", lambda *args: {"principal": "reviewer"})
 
-    def original(_root, _config, _policy, payload, _current, *, purpose):
+    def original(_root, _config, _policy, payload, _current, *, purpose, envelope):
+        assert envelope["payload"]["body"]["review"] is payload
         checked.append((payload["name"], purpose))
         if payload["name"] == reject:
             raise CORE.refusal("selective_original_custody_unavailable")
@@ -141,7 +142,7 @@ def test_fresh_admission_uses_admission_proof_without_evaluating_history(monkeyp
     current = {"snapshot": {"original": True}}
     payload = {"schema_version": "evidence-strict-review/v3", "observed_workspace_basis_id": WORKSPACE,
         "claim_schema_version": "evidence-strict-claims/v1", "claim_id": "target", "snapshot": current["snapshot"]}
-    envelope = {"payload": {"body": {"review": payload}}}
+    native_envelope = {"payload": {"body": {"review": payload}}}
     calls = []
     monkeypatch.setattr(CORE, "selection_inputs", lambda *args, **kwargs:
         (object(), {"schema_version": "evidence-strict-claims/v1"}, WORKSPACE))
@@ -150,11 +151,11 @@ def test_fresh_admission_uses_admission_proof_without_evaluating_history(monkeyp
     monkeypatch.setattr(CORE, "_dependency_authenticated", lambda *args: calls.append("authentication"))
     monkeypatch.setattr(CORE, "_dependency_closing", lambda *args: calls.append("current_closing"))
 
-    def original(_root, _config, _policy, supplied, _current, *, purpose):
-        assert supplied is payload
+    def original(_root, _config, _policy, supplied, _current, *, purpose, envelope):
+        assert supplied is payload and envelope is native_envelope
         calls.append(purpose)
-        return SimpleNamespace(assert_current=lambda: calls.append("proof_closing"),
-            assert_review_envelope=lambda supplied: calls.append("native_envelope") if supplied is envelope else pytest.fail("changed envelope"))
+        calls.append("native_envelope")
+        return SimpleNamespace(assert_current=lambda: calls.append("proof_closing"))
 
     def history(*_args, **_kwargs):
         pytest.fail("fresh admission must not evaluate review history")
@@ -162,9 +163,9 @@ def test_fresh_admission_uses_admission_proof_without_evaluating_history(monkeyp
     monkeypatch.setattr(CORE, "_dependency_original", original)
     monkeypatch.setattr(CORE, "evaluate", history)
     monkeypatch.setattr(CORE, "review_result", history)
-    CORE.validate_dependency_review(None, {}, {}, envelope, payload, object())
+    CORE.validate_dependency_review(None, {}, {}, native_envelope, payload, object())
     assert "admission" in calls and "reuse" not in calls
-    assert calls[0] == "authentication" and calls[-1] == "proof_closing"
+    assert calls == ["authentication", "admission", "native_envelope", "current_closing", "proof_closing"]
 
 
 def test_fresh_admission_cannot_claim_a_historical_workspace_basis(monkeypatch):

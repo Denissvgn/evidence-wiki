@@ -40,8 +40,14 @@ def _executor(capability):
             accounting.require(identifier == running.attempt.attempt_id and running.finished.is_set()
                                and running.snapshot is not None and running.snapshot.get("final_accounting") is True
                                and running.snapshot.get("state") != "running", "accounting_dispatch_handoff_incomplete")
-            executor.authenticate(copy.deepcopy(running.snapshot), running.attempt)
-            rows.append({"attempt": running.attempt.document(), "final": copy.deepcopy(running.snapshot)})
+            observed = executor.authenticate(executor.poll(running.attempt), running.attempt)
+            accounting.require(observed["final_accounting"] is True and observed["state"] != "running",
+                               "accounting_dispatch_handoff_incomplete")
+            # Poll signs the executor's retained completion; it does not poll a
+            # process or renew job authority. Only envelope freshness varies.
+            final = {key: value for key, value in observed.items()
+                     if key not in {"sequence", "observed_utc", "authentication"}}
+            rows.append({"attempt": running.attempt.document(), "final": final})
         return accounting.canonical(rows)
 
 

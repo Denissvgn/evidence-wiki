@@ -305,8 +305,15 @@ def extended_measurement_recipe(plan_pin, report_pin, *, execution_profile, phas
 def completed_extended_pilot_measurements(measured, candidate_sha256):
     """Reconstruct the declared recipe only from complete original evidence."""
     if (type(measured) is not dict or measured.get("schema_version") not in {EXTENDED_RECIPE, COLLECTION_EXTENDED_RECIPE, LONG_RECIPE, OWNER_RECIPE}
-            or measured.get("candidate_sha256") != candidate_sha256):
+            or type(measured.get("candidate_sha256")) is not str):
         raise ValueError("selective_pilot_measurement_invalid")
+    if measured["candidate_sha256"] != candidate_sha256:
+        from tools._review_budget_source import measurement_candidate
+
+        try:
+            candidate_sha256 = measurement_candidate(measured, candidate_sha256)
+        except ValueError:
+            raise ValueError("selective_pilot_measurement_invalid") from None
     ceiling_policy.validate(measured, required=measured["schema_version"] in {LONG_RECIPE, OWNER_RECIPE})
     try:
         expected = extended_measurement_recipe(measured["pilot_plan_pin"], measured["pilot_report_pin"],

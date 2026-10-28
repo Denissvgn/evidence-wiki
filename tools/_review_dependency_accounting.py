@@ -1136,7 +1136,7 @@ def _dispatch_members():
 def dispatch_snapshot(tracker, executor, phase, original_pins):
     """Join actual executor Running/process objects to existing child custody."""
     from evidence_wiki import BoundedSubprocessExecutor
-    from tools._review_dependency_workload import authenticated_journal
+    from tools._review_dependency_workload import _setup_dispatch_associations, authenticated_journal
     plan, runtime, root = (original_pins[key] for key in ("plan", "runtime", "root"))
     validate_plan(plan)
     require(type(executor) is BoundedSubprocessExecutor and executor is runtime.execution.executor
@@ -1162,8 +1162,15 @@ def dispatch_snapshot(tracker, executor, phase, original_pins):
                 attempt, process = running.attempt, running.process
                 require(attempt_id == attempt.attempt_id, "accounting_dispatch_attempt_changed")
                 document = attempt.document()
+                # Jobs use local claim aliases. The authenticated reservation
+                # binds the canonical artifact claim to the exact attempt.
+                reservations = [row["data"] for row in journals.get(document["run_id"], ())
+                    if row["kind"] == "execution_attempt"
+                    and row["data"].get("attempt", {}).get("attempt_id") == attempt_id]
+                claim_id = (reservations[0].get("claim_id") if len(reservations) == 1
+                            and reservations[0].get("attempt") == document else None)
                 coordinate = next((row for row in plan["obligations"] if row["native_run_id"] == document["run_id"]
-                    and row["coordinate"]["claim_id"] == attempt.job.get("payload", {}).get("claim_id")
+                    and row["coordinate"]["claim_id"] == claim_id
                     and row["coordinate"]["config_ref"] == attempt.config_ref), None)
                 if selected is executor:
                     classification = "local_review_worker" if coordinate is not None else "unclassified"
@@ -1177,9 +1184,14 @@ def dispatch_snapshot(tracker, executor, phase, original_pins):
                 require(id(process) not in associations, "accounting_dispatch_process_duplicate")
                 command = tuple(selected._commands.get(attempt.config_ref, ()))
                 require(command and tuple(process.args) == command, "accounting_dispatch_command_changed")
-                if running.snapshot is not None:
-                    selected.authenticate(copy.deepcopy(running.snapshot), attempt)
-                associations[id(process)] = (process, classification, attempt_id, coordinate, command)
+                observation = selected._dispatch_observation(attempt)
+                require(observation is not None, "accounting_dispatch_observation_missing")
+                selected.authenticate(observation, attempt)
+                manifest = {"argv": list(command), "source_sha256": hashlib.sha256(Path(command[1]).read_bytes()).hexdigest()}
+                associations[id(process)] = (process, classification, attempt_id, coordinate, manifest)
+        for process, manifest in _setup_dispatch_associations(tracker):
+            require(id(process) not in associations, "accounting_dispatch_process_duplicate")
+            associations[id(process)] = (process, "setup_or_owner_worker", None, None, manifest)
         births = []
         for ordinal, process in enumerate(tracker.owned, 1):
             spawn = tracker._spawn_pins.get(id(process))
@@ -1189,9 +1201,8 @@ def dispatch_snapshot(tracker, executor, phase, original_pins):
                 classification, attempt_id, coordinate = "unclassified", None, None
                 command = {"argv_sha256": hashlib.sha256(canonical(process.args)).hexdigest(), "association": "unclassified"}
             else:
-                actual, classification, attempt_id, coordinate, argv = associated
+                actual, classification, attempt_id, coordinate, command = associated
                 require(actual is process, "accounting_dispatch_process_changed")
-                command = {"argv": list(argv), "source_sha256": hashlib.sha256(Path(argv[1]).read_bytes()).hexdigest()}
             command_pin = tracker.originals.append(("review-dispatch-" + phase + "-command-" + str(ordinal), command))
             completion = tracker._completed.get(id(process))
             if completion is not None:

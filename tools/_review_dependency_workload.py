@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -349,11 +351,12 @@ def host_read_preflight(root, runtime, originals):
     """Exercise the native closing reader before any retained review dispatch."""
     from evidence_wiki import execution_session as native
     from evidence_wiki import host_qualification
+    from evidence_wiki._review_dependency_inputs import bind_session
 
     with runtime.context.activate(), Workspace.open(root) as workspace:
         with workspace.research.session(runtime.policy, run_id="fixture-read-preflight", execution=runtime.execution) as session:
             try:
-                with native._current_facts(session, operation="current"):
+                with bind_session(session), native._current_facts(session, operation="current"):
                     witness = host_qualification(session)
             except (Exception, SystemExit) as error:
                 originals.append(("host-read-preflight-failure", failure_document(error)))
@@ -482,15 +485,41 @@ def fixture_setup_request(base, fixture):
     return request
 
 
+@contextmanager
+def _fixture_planning_root(base):
+    """Temporarily provide missing planning parents without owning existing data."""
+    if base.resolve() != base:
+        raise ValueError("workload_planning_target_not_canonical")
+    missing, created = [], []
+    allowed = base
+    while not allowed.exists():
+        missing.append(allowed)
+        allowed = allowed.parent
+    if not allowed.is_dir():
+        raise ValueError("workload_planning_parent_invalid")
+    try:
+        for path in reversed(missing):
+            path.mkdir(mode=0o700)
+            observed = path.lstat()
+            created.append((path, observed.st_dev, observed.st_ino))
+        yield allowed if missing else base.parent
+    finally:
+        for path, device, inode in reversed(created):
+            observed = path.lstat()
+            if (not stat.S_ISDIR(observed.st_mode)
+                    or (observed.st_dev, observed.st_ino) != (device, inode)):
+                raise ValueError("workload_planning_directory_changed")
+            os.rmdir(path)
+
+
 def compile_fixture_policy(base, fixture, mode):
     """Derive protected instruction bytes from the actual read-only native plan."""
     from evidence_wiki._script_host import shared_assets_root
+    base = Path(base).absolute()
     request = fixture_setup_request(base, fixture)
-    allowed = base.parent
-    while not allowed.exists():
-        allowed = allowed.parent
-    with Onboarding.open(allowed_roots=[allowed], allow=["plan"]) as onboarding:
-        planned = onboarding.plan(request)
+    with _fixture_planning_root(base) as allowed:
+        with Onboarding.open(allowed_roots=[allowed], allow=["plan"]) as onboarding:
+            planned = onboarding.plan(request)
     raw = owner("init_research_workspace").frozen_requirements_bytes(planned["profile"]["workspace_init"])
     if raw is None:
         raise ValueError("workload_frozen_requirements_unavailable")
@@ -527,6 +556,125 @@ def _fixture_preflight_run(allocation_binding):
             or allocation_binding.get("schema_version") in {"native-review-case-extended-allocation/v1", "native-review-case-extended-allocation/v2", "native-review-case-extended-allocation/v3", "native-review-case-extended-allocation/v4"}):
         return "fixture-preflight"
     return allocation_binding["assignments"][0]["native_run_id"]
+
+
+@dataclass(frozen=True, eq=False)
+class _SetupChildCustody:
+    tracker: object
+    process: object
+    ordinal: int
+    argv: tuple
+    owner: object
+    receipt_pin: str
+
+
+@contextmanager
+def _setup_child_custody(tracker, plan):
+    """Retain exact children of the installed setup owner at its call boundary."""
+    import threading
+    import weakref
+
+    from evidence_wiki import orchestration, setup_application, setup_worker
+    from evidence_wiki._pack_io import canonical as native_canonical
+    from evidence_wiki._pack_io import json_document
+
+    original = setup_application._execute_bounded
+    if (original is not orchestration._execute_bounded or tracker.closed
+            or tracker._review_dispatch_state is not None or hasattr(tracker, "_setup_custody")):
+        raise ValueError("workload_setup_custody_owner_invalid")
+    if not hasattr(_setup_child_custody, "members"):
+        _setup_child_custody.members = weakref.WeakSet()
+    tracker._setup_custody = ()
+    thread = threading.get_ident()
+    plan_bytes = native_canonical(plan)
+    plan_pin = tracker.originals.append(("setup-custody-plan", plan))
+    worker = Path(setup_worker.__file__).resolve()
+    worker_pin = {"path": str(worker), "raw_sha256": digest_bytes(worker.read_bytes()), "size_bytes": worker.stat().st_size}
+
+    def observed(argv, **options):
+        with tracker.lock:
+            if (threading.get_ident() != thread or tracker.closed
+                    or subprocess.Popen is not tracker.launch
+                    or setup_application._execute_bounded is not observed):
+                raise ValueError("workload_setup_custody_owner_changed")
+            request = json_document(options["stdin_text"].encode())
+            operation = request.get("operation")
+            if (set(request) != {"operation", "plan", "clock"} or operation not in setup_worker.STEPS
+                    or native_canonical(request["plan"]) != plan_bytes
+                    or argv != [sys.executable, "-B", "-I", "-m", "evidence_wiki.setup_worker", operation]
+                    or options["cwd"] != Path(sys.prefix)
+                    or type(options["timeout_seconds"]) is not int or not 0 < options["timeout_seconds"] <= 600
+                    or options["capture_limit"] != 65536 or options["preserve_stdout"] is not True):
+                raise ValueError("workload_setup_custody_call_changed")
+            first = len(tracker.owned)
+            result = original(argv, **options)
+            if type(result) is not orchestration.ProcessResult or len(tracker.owned) != first + 1:
+                raise ValueError("workload_setup_custody_process_count")
+            process = tracker.owned[first]
+            if tuple(process.args) != tuple(argv) or process.returncode is None or process.returncode != result.returncode:
+                raise ValueError("workload_setup_custody_process_changed")
+            tracker.confirm_completed()
+            completion = tracker._completed.get(id(process))
+            if completion is None or completion.process is not process:
+                raise ValueError("workload_setup_custody_completion_missing")
+            receipt = {"owner": "evidence_wiki.setup_application.measured", "operation": operation,
+                "plan_pin": plan_pin, "plan_id": plan["plan_id"], "worker_pin": worker_pin,
+                "argv": list(argv), "input_sha256": digest_bytes(options["stdin_text"].encode()),
+                "timeout_seconds": options["timeout_seconds"], "pid": process.pid, "ordinal": first + 1,
+                "spawn_pin": json.loads(tracker._spawn_pins[id(process)][2]),
+                "completion_pin": json.loads(completion.completion_pin),
+                "result": {"returncode": result.returncode, "timed_out": result.timed_out,
+                    "stdout_truncated": result.stdout_truncated, "stderr_truncated": result.stderr_truncated,
+                    "stdout_sha256": digest_bytes(result.stdout.encode()), "stderr_sha256": digest_bytes(result.stderr.encode())}}
+            pin = tracker.originals.append(("setup-custody-" + operation, receipt))
+            custody = _SetupChildCustody(tracker, process, first + 1, tuple(argv), original, json.dumps(pin, sort_keys=True))
+            _setup_child_custody.members.add(custody)
+            tracker._setup_custody += (custody,)
+            return result
+
+    setup_application._execute_bounded = observed
+    try:
+        yield
+    finally:
+        changed = setup_application._execute_bounded is not observed
+        setup_application._execute_bounded = original
+        if changed and sys.exc_info()[1] is None:
+            raise ValueError("workload_setup_custody_owner_changed")
+
+
+def _setup_dispatch_associations(tracker):
+    """Resolve only live setup capabilities, never infer ownership from PIDs."""
+    from evidence_wiki import orchestration, setup_application
+    from tools._review_dependency_runner import _read
+
+    result = []
+    for custody in getattr(tracker, "_setup_custody", ()):
+        if (type(custody) is not _SetupChildCustody
+                or custody not in getattr(_setup_child_custody, "members", ())
+                or custody.tracker is not tracker or custody.owner is not orchestration._execute_bounded
+                or setup_application._execute_bounded is not custody.owner):
+            raise ValueError("workload_setup_custody_not_live")
+        process, ordinal = custody.process, custody.ordinal
+        spawn = tracker._spawn_pins.get(id(process))
+        completion = tracker._completed.get(id(process))
+        receipt_pin = json.loads(custody.receipt_pin)
+        receipt = _read(receipt_pin)
+        if (not 0 < ordinal <= len(tracker.owned) or tracker.owned[ordinal - 1] is not process
+                or spawn is None or spawn[:2] != (process, ordinal)
+                or completion is None or completion.process is not process or completion.ordinal != ordinal
+                or tuple(process.args) != custody.argv or receipt["argv"] != list(custody.argv)
+                or receipt["pid"] != process.pid or receipt["ordinal"] != ordinal
+                or receipt["spawn_pin"] != json.loads(spawn[2])
+                or receipt["completion_pin"] != json.loads(completion.completion_pin)
+                or _read(receipt["plan_pin"])["plan_id"] != receipt["plan_id"]):
+            raise ValueError("workload_setup_custody_changed")
+        worker = receipt["worker_pin"]
+        raw = Path(worker["path"]).read_bytes()
+        if len(raw) != worker["size_bytes"] or digest_bytes(raw) != worker["raw_sha256"]:
+            raise ValueError("workload_setup_custody_worker_changed")
+        result.append((process, {"argv": list(custody.argv), "source_sha256": worker["raw_sha256"],
+                                 "owner_receipt_pin": receipt_pin}))
+    return result
 
 
 def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=None, execution_policy=None, children=None, mcp=False, review_mode=None, compiled_profile=None, protected_policy=None, native_case_plan=None):
@@ -620,7 +768,8 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         if compiled_profile is not None:
             if actual_plan["profile"] != compiled_profile["profile"] or {key: value for key, value in actual_plan["bindings"].items() if key != "target"} != {key: value for key, value in compiled_profile["bindings"].items() if key != "target"}:
                 raise ValueError("workload_compiled_profile_changed")
-        setup = onboarding.apply(actual_plan)
+        with _setup_child_custody(children, actual_plan) if children is not None and review_mode is not None else nullcontext():
+            setup = onboarding.apply(actual_plan)
     originals.append(("setup", setup))
     if not setup["setup_ready"]:
         raise ValueError("fixture_setup_refused")

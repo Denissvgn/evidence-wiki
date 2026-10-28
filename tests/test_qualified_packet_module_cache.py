@@ -50,7 +50,8 @@ def test_policy_reuses_module_but_rechecks_delivery_and_policy(tmp_path, monkeyp
     (folder / "packet.json").write_bytes(b"changed original")
     assert "packet_normalized_binding_mismatch" in reasons(config, record, normalized)
     assert loaded and all(module is packet for module in loaded)
-    assert len(policies._QUALIFIED_PACKET_CACHE) == 1
+    qualified_entries = [module for key, module in policies._QUALIFIED_PACKET_CACHE.items() if "\0_qualified_packet\0" in key]
+    assert qualified_entries == [packet]
 
 
 def test_module_cache_checks_generation_roots_bridges_and_current_scope(tmp_path):

@@ -135,7 +135,9 @@ def test_native_host_failure_retains_only_its_exact_safe_current_reason(reason):
     assert failure_document(error)["reason"] is None
 
 
-def test_native_host_read_preflight_checks_real_references_and_refuses_missing_status_grant(plan, tmp_path, monkeypatch):
+@pytest.mark.parametrize("review_mode", [None, "selective_reuse"], ids=["legacy", "selective"])
+def test_native_host_read_preflight_checks_real_references_and_refuses_missing_status_grant(plan, tmp_path, monkeypatch, review_mode):
+    from contextlib import nullcontext
     from dataclasses import replace
 
     from evidence_wiki import HostRuntime
@@ -149,11 +151,24 @@ def test_native_host_read_preflight_checks_real_references_and_refuses_missing_s
 
     def checked_preflight(root, runtime, retained):
         labels = [pin["label"] for pin in retained.pins]
-        assert labels[-1] == "qualifications"
+        qualification_pins = [pin for pin in retained.pins if pin["label"] == "qualifications"]
+        assert len(qualification_pins) == 1
+        packet_pins = [pin for pin in retained.pins if pin["label"].startswith("review-packet-preflight-")]
+        assert len(packet_pins) == 12
+        if review_mode is None:
+            assert labels[-1] == "qualifications"
+            assert all(labels.index(pin["label"]) < labels.index("qualifications") for pin in packet_pins)
+        else:
+            assert all(labels.index(pin["label"]) > labels.index("qualifications") for pin in packet_pins)
+        for pin in packet_pins:
+            packet = json.loads(Path(pin["path"]).read_bytes())
+            assert packet["context_version"] == ("complete" if review_mode is None else "dependencies")
+            assert packet["review_credit"] == packet["approval_credit"] == 0
+            assert packet["worker_consumption"] == "not_observed"
         final_pins = [pin for pin in retained.pins if pin["label"].endswith("-final")]
         assert len(final_pins) == 200
         assert all(json.loads(Path(pin["path"]).read_bytes())["observation"]["state"] == "succeeded" for pin in final_pins)
-        qualifications = json.loads(Path(retained.pins[-1]["path"]).read_bytes())
+        qualifications = json.loads(Path(qualification_pins[0]["path"]).read_bytes())
         assert {row["profile_ref"] for row in qualifications} == {"evidence", "critic"}
         assert all(len(row["observation_refs"]) == 100 for row in qualifications)
         before = native.file_manifest(root)
@@ -174,7 +189,9 @@ def test_native_host_read_preflight_checks_real_references_and_refuses_missing_s
         observed.update(root=root, runtime=runtime)
 
     monkeypatch.setattr(native, "host_read_preflight", checked_preflight)
-    root, runtime, _, _, _ = native.provision(tmp_path / "fixture", fixture, originals)
+    bound = native.workload_deadline(632) if review_mode == "selective_reuse" else nullcontext()
+    with bound:
+        root, runtime, _, _, _ = native.provision(tmp_path / "fixture", fixture, originals, review_mode=review_mode)
     assert observed == {"root": root, "runtime": runtime}
     witness_pin = originals.pins[-1]
     assert witness_pin["label"] == "host-read-preflight"
@@ -990,7 +1007,7 @@ def test_owner_reads_retain_originals_before_a_later_owner_refusal(tmp_path, mon
     workspace = SimpleNamespace(
         strict=SimpleNamespace(check=lambda: strict, export=export),
         research=SimpleNamespace(session=lambda *_args, **_kwargs: nullcontext(SimpleNamespace(
-            current=current, _check=lambda *_args: None))),
+            current=current, execution=None, _check=lambda *_args: None))),
     )
     runtime = SimpleNamespace(context=SimpleNamespace(activate=nullcontext), policy=None, execution=None)
     monkeypatch.setattr(workload.Workspace, "open", lambda _root: nullcontext(workspace))
@@ -1018,7 +1035,7 @@ def test_owner_read_epoch_requires_closing_and_retains_each_actual_original(tmp_
     view = {"qualification": qualification, "canonical_release": {"publication": {"verdict": "hold"}}}
     witness = {"observed_utc": "2026-10-01T12:00:00+00:00", "authorized": False}
     operations = []
-    session = object()
+    session = SimpleNamespace(execution=None)
 
     @contextmanager
     def facts(selected, operation):

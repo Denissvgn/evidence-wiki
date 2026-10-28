@@ -59,6 +59,14 @@ def _mark_failure(report, error, originals):
     report["terminal_outcome"] = "failed"
 
 
+def _budget_producer(recipe, candidate, producer):
+    """Require exact producer custody for any unchanged-cap source repair."""
+    if recipe["candidate_sha256"] == candidate:
+        return recipe["review_producer_id"] == producer
+    from tools._review_budget_source import execution_producer
+    return execution_producer(recipe, candidate) == producer
+
+
 def reference_plan(bundle, pair_spec_pin, producer_manifest_pin, *, mode, directory, runtime_directory, measured_recipe, observation_profile="batch", execution_profile="six-hour", pair_closing=False, closing_reservation=None, journal_collection=False):
     """Freeze every service and journal before the first measured worker output."""
     from tools import run_review_dependency_workload as legacy
@@ -130,7 +138,8 @@ def reference_plan(bundle, pair_spec_pin, producer_manifest_pin, *, mode, direct
     if extended:
         plan.update(schema_version=accounting.EXTENDED_PLAN, formal_application_policy=selected["formal_application_policy"],
             pair_closing_reservation=accounting.extended_closing_reservation(selected["phase_caps"]["global_close"], closing_reservation))
-        accounting.require(recipe["review_producer_id"] == plan["review_producer_id"], "accounting_measured_producer_changed")
+        accounting.require(_budget_producer(recipe, plan["candidate_sha256"], plan["review_producer_id"]),
+            "accounting_measured_producer_changed")
     if journal_collection:
         plan.update(schema_version=accounting.COLLECTION_PLAN, journal_collection_policy=dict(accounting.JOURNAL_COLLECTION_POLICY))
     if recipe.get("schema_version") in {"selective-complete-pilot-measurement/v4", "selective-complete-pilot-measurement/v5"}:
@@ -191,7 +200,7 @@ def preflight(plan, expected_plan):
         accounting.require(ceiling_policy.exact(ceiling_policy.validate(recipe, required=plan["schema_version"] in {accounting.LONG_PLAN, accounting.OWNER_PLAN}), ceiling_policy.validate(plan)), "accounting_measured_recipe_changed")
         accounting.require(accounting.collection_selected(recipe) == accounting.collection_selected(plan), "accounting_journal_collection_policy_changed")
         accounting.require(recipe["phase_caps"] == plan["phase_caps"] and recipe["formal_execution_policy"] == plan["execution_policy"]
-            and recipe["review_producer_id"] == plan["review_producer_id"]
+            and _budget_producer(recipe, plan["candidate_sha256"], plan["review_producer_id"])
             and recipe["formal_application_policy"] == plan["formal_application_policy"]
             and recipe["group_overhead_cap_seconds"] == plan["group_overhead_cap_seconds"], "accounting_measured_recipe_changed")
     elif plan["schema_version"] == accounting.PAIR_PLAN:
@@ -574,6 +583,14 @@ def _admit_handoff(capability):
         return tracker.real_popen
 
 
+def _capture_questions(root, config, policy, capture, manifest, summaries):
+    """Derive full current mirrors while retaining captured question semantics."""
+    question_owner = owner("_question_dependencies")
+    return [question_owner._project(root, config, policy, capture, manifest, question["slug"],
+        coverage_summary=summaries[question["slug"]], dependency_claims=manifest["claims"])
+        for question in manifest["questions"]]
+
+
 def _capture_completed_mode(plan, report, runtime, root, tracker, fixture, sources, originals, snapshot, started, *, fresh=False):
     from evidence_wiki._review_dependency_inputs import bind_session
     from evidence_wiki.host_context import review_producer_binding
@@ -592,7 +609,7 @@ def _capture_completed_mode(plan, report, runtime, root, tracker, fixture, sourc
                 computation = owner("_computation_service").required(root, config, view=view)
                 _coverage, summaries = owner("_review_dependencies")._coverage(root, config, capture, fixture["inventory"], view)
                 manifest = owner("_strict_contract").claims_document(owner("_record_artifacts").json_document(capture.files[config["strict_evidence"]["claims_path"]]))
-                questions = [owner("_question_dependencies").project(root, config, config["strict_evidence"], capture, manifest, question["slug"], coverage_summary=summaries[question["slug"]]) for question in manifest["questions"]]
+                questions = _capture_questions(root, config, config["strict_evidence"], capture, manifest, summaries)
                 source_material = {}
                 records = [owner("_record_artifacts").json_document(line) for line in capture.files[config["sources"]["manifest_path"]].splitlines() if line.strip()]
                 for coordinate, selected in sources.items():

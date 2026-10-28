@@ -80,7 +80,15 @@ def test_legacy_writer_still_refuses_large_collection_and_exports_safe_cause(tmp
     assert failure["error_code"] == "MUTATION_LIMIT"
     assert failure["collection"]["records_bytes"] > 1_048_576
     assert failure["collection_stage"] == "legacy_collection_encode"
-    assert failure["frames"][-1]["function"] == "refuse"
+    from evidence_wiki import mutation_contracts
+
+    source = native_tools.ROOT / "src/evidence_wiki/mutation_contracts.py"
+    installed = Path(mutation_contracts.__file__).resolve() != source
+    expected = ("tools/_review_dependency_workload.py", "_append_records") if installed else (
+        "src/evidence_wiki/mutation_contracts.py", "refuse")
+    assert (failure["frames"][-1]["path"], failure["frames"][-1]["function"]) == expected
+    assert all(set(frame) == {"path", "function", "line"} and type(frame["line"]) is int
+               and frame["line"] > 0 for frame in failure["frames"])
     assert not originals.pins and not list(tmp_path.iterdir())
 
 

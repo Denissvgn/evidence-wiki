@@ -2054,3 +2054,106 @@ class PackPolicyRuleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_selected_source_helpers_reuse_modules_but_evaluate_every_call(monkeypatch):
+    from types import SimpleNamespace
+
+    policies = load_policy_helper()
+    module_cache, loaded, calls = {}, [], []
+    original_loader = policies.load_workspace_module
+    methods = {"_usage_gate": "normalized_issues", "_execution_evidence": "normalized_issues", "_market_evidence": "consumer_issues"}
+    refusals, wrapped = {}, set()
+
+    def loading(directory, stem, **kwargs):
+        assert kwargs.get("cache") is module_cache
+        module = original_loader(directory, stem, **kwargs)
+        loaded.append((stem, module))
+        if stem in methods and id(module) not in wrapped:
+            wrapped.add(id(module))
+            method = getattr(module, methods[stem])
+
+            def fresh(*args, _stem=stem, _method=method):
+                calls.append(_stem)
+                if refusals.get(_stem) == "raise":
+                    raise RuntimeError("fresh usage refusal")
+                actual = _method(*args)
+                return actual + list(refusals.get(_stem, []))
+
+            monkeypatch.setattr(module, methods[stem], fresh)
+        return module
+
+    monkeypatch.setattr(policies, "_QUALIFIED_PACKET_CACHE", module_cache)
+    monkeypatch.setattr(policies, "load_workspace_module", loading)
+    inputs = SimpleNamespace(project_root=None, config={},
+        manifest_records={"paper:probe": {"id": "paper:probe", "kind": "paper"}},
+        normalized_records={"paper:probe": {"source_id": "paper:probe"}},
+        normalized_record_issues={}, provenance_by_source_id={})
+    assert policies.source_unusable_evidence_reasons(inputs, "paper:probe") == []
+    inputs.normalized_records["paper:probe"]["retrieval_eligible"] = False
+    assert "usage_permission_denied" in policies.source_unusable_evidence_reasons(inputs, "paper:probe")
+    refusals.update(_execution_evidence=["fresh_execution_refusal"], _market_evidence=["fresh_market_refusal"])
+    reasons = policies.source_unusable_evidence_reasons(inputs, "paper:probe")
+    assert {"usage_permission_denied", "fresh_execution_refusal", "fresh_market_refusal"} <= set(reasons)
+    for stem in methods:
+        assert calls.count(stem) == 3
+        assert len({id(module) for name, module in loaded if name == stem}) == 1
+    refusals["_usage_gate"] = "raise"
+    try:
+        policies.source_unusable_evidence_reasons(inputs, "paper:probe")
+    except RuntimeError as error:
+        assert str(error) == "fresh usage refusal"
+    else:
+        raise AssertionError("A cached module cannot supply an old successful decision")
+    refusals.clear()
+    del inputs.normalized_records["paper:probe"]["retrieval_eligible"]
+    assert policies.source_unusable_evidence_reasons(inputs, "paper:probe") == []
+    assert calls.count("_usage_gate") == 5
+    assert calls.count("_execution_evidence") == calls.count("_market_evidence") == 4
+    assert len(module_cache) == 4
+
+
+def test_source_helper_module_cache_checks_root_bridge_and_generation(tmp_path):
+    import threading
+    from types import SimpleNamespace
+
+    policies = load_policy_helper()
+    loader = policies.load_workspace_module
+    cache, checks = {}, []
+    first, second = tmp_path / "first", tmp_path / "second"
+    for root, label in ((first, "first"), (second, "second")):
+        root.mkdir()
+        (root / "helper.py").write_text("from _host_context import marker\nLABEL = " + repr(label) +
+            "\ndef read(path):\n    return marker, LABEL, path.read_text()\n")
+        (root / "state.txt").write_text("original")
+    denied = [False]
+
+    def check(root, generation):
+        checks.append((root, generation))
+        if denied[0]:
+            raise RuntimeError("current generation refused")
+
+    bridge = SimpleNamespace(marker="bridge-one", check_generation=check, loading_lock=threading.RLock)
+    one = loader(first, "helper", cache=cache, host_context_bridge=bridge)
+    assert loader(first, "helper", cache=cache, host_context_bridge=bridge) is one
+    assert len(checks) == 2
+    assert one.read(first / "state.txt") == ("bridge-one", "first", "original")
+    (first / "state.txt").write_text("changed input")
+    assert one.read(first / "state.txt")[-1] == "changed input"
+    other = loader(second, "helper", cache=cache, host_context_bridge=bridge)
+    assert other is not one and other.read(second / "state.txt")[1] == "second"
+    new_bridge = SimpleNamespace(marker="bridge-two", check_generation=check, loading_lock=threading.RLock)
+    bridged = loader(first, "helper", cache=cache, host_context_bridge=new_bridge)
+    assert bridged is not one and bridged.read(first / "state.txt")[0] == "bridge-two"
+    (first / "helper.py").write_text((first / "helper.py").read_text().replace("'first'", "'new-generation'"))
+    revised = loader(first, "helper", cache=cache, host_context_bridge=new_bridge)
+    assert revised is not bridged and revised.read(first / "state.txt")[1] == "new-generation"
+    assert len([key for key in cache if key.startswith(str(first.resolve()) + "\0helper\0")]) == 1
+    assert len(cache) == 2
+    denied[0] = True
+    try:
+        loader(first, "helper", cache=cache, host_context_bridge=new_bridge)
+    except RuntimeError as error:
+        assert str(error) == "current generation refused"
+    else:
+        raise AssertionError("A cached helper must still pass the current generation check")

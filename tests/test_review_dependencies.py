@@ -304,7 +304,8 @@ def test_same_question_sibling_edit_preserves_target_basis(workspace_projection,
     assert target_changed["global_material"] == after["global_material"]
 
 
-def test_original_custody_reconstructs_closure_local_question_rows(workspace_projection, monkeypatch):
+@pytest.mark.parametrize("retrieval", ["separate", "legacy_envelope", "paired"])
+def test_original_custody_reconstructs_closure_local_question_rows(workspace_projection, monkeypatch, retrieval):
     import json
     from types import SimpleNamespace
 
@@ -326,8 +327,23 @@ def test_original_custody_reconstructs_closure_local_question_rows(workspace_pro
         original, {"selected": {}}, None)
     original_inputs = {path: files[path] for path in ["claims.json", *[row["path"] for row in original["questions"]]]}
     closed = []
+    reads = []
+    envelope = {"authenticated": "original"}
     proof = SimpleNamespace(original_inputs=lambda: original_inputs, original_snapshot=lambda: snapshot,
                             assert_current=lambda: closed.append(True))
+    def compare(supplied):
+        proof.assert_current()
+        core.require(supplied is envelope and supplied == {"authenticated": "original"},
+            "selective_original_envelope_changed")
+        reads.append("envelope")
+    proof.assert_review_envelope = compare
+    if retrieval == "paired":
+        def material(supplied):
+            compare(supplied)
+            return original_inputs, snapshot
+        proof.original_material = material
+        proof.original_inputs = proof.original_snapshot = lambda: pytest.fail("separate custody read")
+    selected = {} if retrieval == "separate" else {"envelope": envelope}
     monkeypatch.setattr(host_context, "review_custody", lambda *_args, **_kwargs: proof)
     sibling["text"] = "The independent retained observation changed."
     files["claims.json"] = json.dumps(manifest).encode()
@@ -335,10 +351,37 @@ def test_original_custody_reconstructs_closure_local_question_rows(workspace_pro
     assert current_basis == original_basis
     payload = {"claim_id": "claim", "claim_schema_version": manifest["schema_version"], "snapshot": snapshot}
     reproduced = core._dependency_original(held["tmp_path"], held["config"], held["policy"], payload,
-        {"material": current, "snapshot": snapshot}, purpose="reuse")
-    assert reproduced is proof and closed == [True]
+        {"material": current, "snapshot": snapshot}, purpose="reuse", **selected)
+    assert reproduced is proof and closed == [True] * (1 if retrieval == "separate" else 2)
+    assert reads == ([] if retrieval == "separate" else ["envelope", "envelope"])
     original_inputs["unexpected.md"] = b"unexpected"
     with pytest.raises(core.ScriptRefusal) as caught:
         core._dependency_original(held["tmp_path"], held["config"], held["policy"], payload,
-            {"material": current, "snapshot": snapshot}, purpose="reuse")
+            {"material": current, "snapshot": snapshot}, purpose="reuse", **selected)
     assert caught.value.details["reason"] == "selective_original_custody_scope_changed"
+    del original_inputs["unexpected.md"]
+    reproduce = core._dependency_snapshot
+    if retrieval != "separate":
+        def changed_envelope(*args, **kwargs):
+            value = reproduce(*args, **kwargs)
+            envelope["authenticated"] = "changed during reproduction"
+            return value
+        with monkeypatch.context() as changed:
+            changed.setattr(core, "_dependency_snapshot", changed_envelope)
+            with pytest.raises(core.ScriptRefusal) as caught:
+                core._dependency_original(held["tmp_path"], held["config"], held["policy"], payload,
+                    {"material": current, "snapshot": snapshot}, purpose="reuse", **selected)
+        assert caught.value.details["reason"] == "selective_original_envelope_changed"
+        envelope["authenticated"] = "original"
+    def changed():
+        raise core.refusal("selective_original_custody_changed_at_closing")
+    def changed_at_closing(*args, **kwargs):
+        value = reproduce(*args, **kwargs)
+        proof.assert_current = changed
+        return value
+    with monkeypatch.context() as closing:
+        closing.setattr(core, "_dependency_snapshot", changed_at_closing)
+        with pytest.raises(core.ScriptRefusal) as caught:
+            core._dependency_original(held["tmp_path"], held["config"], held["policy"], payload,
+                {"material": current, "snapshot": snapshot}, purpose="reuse", **selected)
+    assert caught.value.details["reason"] == "selective_original_custody_changed_at_closing"

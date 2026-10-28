@@ -801,7 +801,7 @@ def _dependency_closing(root, config, policy, view, capture, full_basis, produce
     require(capture_workspace(root).revision_id == capture.revision_id, "strict_inputs_changed")
 
 
-def _dependency_original(root, config, policy, payload, current, *, purpose):
+def _dependency_original(root, config, policy, payload, current, *, purpose, envelope=None):
     """Verify retained originals through actual protected private custody."""
     bridge = sys.modules.get("evidence_wiki.host_context")
     getter = getattr(bridge, "review_custody", None)
@@ -811,10 +811,16 @@ def _dependency_original(root, config, policy, payload, current, *, purpose):
     except Exception:
         raise refusal("selective_original_custody_unavailable") from None
     require(proof is not None, "selective_original_custody_unavailable")
-    original_inputs = proof.original_inputs()
+    material = getattr(proof, "original_material", None)
+    if envelope is not None and callable(material):
+        original_inputs, snapshot = material(envelope)
+    else:
+        original_inputs = proof.original_inputs()
+        snapshot = proof.original_snapshot()
+        if envelope is not None:
+            proof.assert_review_envelope(envelope)
     require(type(original_inputs) is dict and all(type(key) is str and type(raw) is bytes
         for key, raw in original_inputs.items()), "selective_original_custody_invalid")
-    snapshot = proof.original_snapshot()
     require(snapshot == payload["snapshot"], "selective_original_snapshot_changed")
     require(snapshot["semantic_material"] == current["material"], "selective_original_material_changed")
     path = policy["claims_path"]
@@ -838,7 +844,10 @@ def _dependency_original(root, config, policy, payload, current, *, purpose):
     reproduced = _dependency_snapshot(root, config, policy, capture, manifest, current["material"],
         {"selected": current["snapshot"]["source_revisions"]}, current["snapshot"]["computation"])
     require(reproduced == snapshot, "selective_original_snapshot_not_reproduced")
-    proof.assert_current()
+    if envelope is None:
+        proof.assert_current()
+    else:
+        proof.assert_review_envelope(envelope)
     return proof
 
 
@@ -879,9 +888,7 @@ def dependency_review_result(root, config, policy, full_basis, claim, view, curr
             review_document(payload)
             require(record["authority"]["content_hash"] == view.trust["content_hash"], "strict_review_authority_changed")
             auth = _dependency_authenticated(record["envelope"], payload, current, view, policy)
-            proof = _dependency_original(root, config, policy, payload, current, purpose="reuse")
-            proof.assert_review_envelope(record["envelope"])
-            proof.assert_current()
+            _dependency_original(root, config, policy, payload, current, purpose="reuse", envelope=record["envelope"])
         except Exception as exc:
             reason = exc.details.get("reason", "selective_original_custody_unavailable") if isinstance(exc, ScriptRefusal) else "selective_review_invalid"
             return {"passed": False, "reason": reason}, None
@@ -1028,8 +1035,7 @@ def validate_dependency_review(root, config, policy, envelope, payload, view):
     current = dependency_current(root, config, policy, view, capture, manifest, payload["claim_id"])
     _dependency_authenticated(envelope, payload, current, view, policy)
     require(payload["snapshot"] == current["snapshot"], "strict_snapshot_not_reproduced")
-    proof = _dependency_original(root, config, policy, payload, current, purpose="admission")
-    proof.assert_review_envelope(envelope)
+    proof = _dependency_original(root, config, policy, payload, current, purpose="admission", envelope=envelope)
     _dependency_closing(root, config, policy, view, capture, full_basis, producer,
         (current,), ((envelope, payload, current),))
     proof.assert_current()

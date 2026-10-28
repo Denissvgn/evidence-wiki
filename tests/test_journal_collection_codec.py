@@ -198,19 +198,62 @@ def test_actual_page_nodes_are_charged_before_hashing_or_parsing_later_pages(mon
 
 
 def test_logical_expansion_is_charged_before_retaining_or_encoding_later_children(monkeypatch):
+    from evidence_wiki import research_journal_contracts as records_codec
+
     records = [_record(index) for index in range(4)]
     monkeypatch.setattr(codec, "MAX_BYTES", len(_json(records[:2])))
     events = []
-    for name in ("detached_record", "canonical_record"):
-        original = getattr(codec, name)
-        def wrapper(value, _name=name, _original=original):
-            events.append((_name, value["sequence"]))
-            return _original(value)
-        monkeypatch.setattr(codec, name, wrapper)
+    original_owned = codec._canonical_owned_record
+    original_transport = records_codec._owned_record_transport
+
+    def owning(value, **kwargs):
+        events.append(("record", value["sequence"]))
+        return original_owned(value, **kwargs)
+
+    def encoding(value, **kwargs):
+        events.append(("encoding", value["sequence"]))
+        return original_transport(value, **kwargs)
+
+    monkeypatch.setattr(codec, "_canonical_owned_record", owning)
+    monkeypatch.setattr(records_codec, "_owned_record_transport", encoding)
     with pytest.raises(UsageError):
         codec.encode_collection(records)
-    assert events == [("detached_record", 0), ("canonical_record", 0),
-        ("detached_record", 1), ("canonical_record", 1), ("detached_record", 2)]
+    assert events == [("record", 0), ("encoding", 0), ("record", 1), ("encoding", 1), ("record", 2)]
+
+
+def test_collection_uses_one_owning_detachment_and_returns_fresh_logical_records(monkeypatch):
+    from evidence_wiki import research_journal_contracts as records_codec
+
+    records = [_record(index) for index in range(2)]
+    expected = deepcopy(records)
+    seen = []
+    original = records_codec.detached_record
+
+    def detaching(value):
+        seen.append(value["sequence"])
+        return original(value)
+
+    monkeypatch.setattr(records_codec, "detached_record", detaching)
+    encoded = codec.encode_collection(records)
+    assert seen == [0, 1]
+    assert encoded["artifact_bytes"] == _json(expected)
+    records[0]["data"]["label"] = "changed after encoding"
+    seen.clear()
+    decoded = codec.decode_collection(encoded["artifact_bytes"])
+    assert seen == [0, 1]
+    assert decoded["records"] == expected
+    decoded["records"][0]["data"]["label"] = "changed returned copy"
+    assert codec.decode_collection(encoded["artifact_bytes"])["records"] == expected
+
+
+def test_collection_expansion_refusal_applies_to_warm_codec_successes(monkeypatch):
+    records = [_record(data={"chunk": "x" * 10000})]
+    encoded = codec.encode_collection(records)
+    assert codec.decode_collection(encoded["artifact_bytes"])["records"] == records
+    monkeypatch.setattr(codec, "MAX_BYTES", encoded["summary"]["expanded_bytes"] - 1)
+    with pytest.raises(UsageError) as refused:
+        codec.encode_collection(records)
+    assert refused.value.error_code == "MUTATION_LIMIT"
 
 
 def test_manifest_inspection_preflights_without_page_io_hashes_or_record_decoding(monkeypatch):

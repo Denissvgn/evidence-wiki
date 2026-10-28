@@ -433,6 +433,13 @@ def _completed_pilot_measurements(measured, candidate_sha256, *, expected_mode):
         execution_profile=execution["profile"] if execution is not None else None,
         service_profile=prior_plan["service_policy"]["profile"] if "service_policy" in prior_plan else None,
         journal_collection=collection_selected(prior_plan))
+    if expected_prior["candidate_sha256"] != candidate_sha256:
+        from tools._review_budget_source import historical_plan_candidate
+
+        try:
+            expected_prior["candidate_sha256"] = historical_plan_candidate(candidate_sha256, expected_prior["candidate_sha256"])
+        except ValueError:
+            raise ValueError("workload_pilot_measurement_invalid") from None
     if prior_plan.get("schema_version") in {PLAN_SCHEMA_LONG, PLAN_SCHEMA_OWNER}:
         validate_long_discovery_shape(prior_plan)
         if any(not ceiling_policy.exact(prior_plan[key], expected_prior[key]) for key in expected_prior if key not in {"frozen_at", "expires_at"}):
@@ -780,6 +787,8 @@ def preflight(plan, expected_plan):
 def _owner_read(root, runtime, run_ids, originals, observation_policy=None, *, selective_run_id=None):
     if observation_policy is not None:
         validate_observation_policy(observation_policy)
+    from evidence_wiki._review_dependency_inputs import bind_session
+
     snapshots, receipts, records = [], [], {}
     # Authenticate complete histories before obtaining any short current witness.
     for run_id in run_ids:
@@ -790,7 +799,6 @@ def _owner_read(root, runtime, run_ids, originals, observation_policy=None, *, s
     with runtime.context.activate(), Workspace.open(root) as workspace:
         with ExitStack() as stack:
             if selective_run_id is not None:
-                from evidence_wiki._review_dependency_inputs import bind_session
                 selected_session = stack.enter_context(workspace.research.session(runtime.policy, run_id=selective_run_id, execution=runtime.execution))
                 stack.enter_context(bind_session(selected_session))
             strict = workspace.strict.check()
@@ -802,8 +810,7 @@ def _owner_read(root, runtime, run_ids, originals, observation_policy=None, *, s
         native_witnesses = []
         for run_id in run_ids:
             with workspace.research.session(runtime.policy, run_id=run_id, execution=runtime.execution) as session, ExitStack() as stack:
-                if selective_run_id is not None:
-                    stack.enter_context(bind_session(session))
+                stack.enter_context(bind_session(session))
                 from evidence_wiki import execution_session as native
                 from evidence_wiki import host_qualification
                 with native._current_facts(session, operation="current"):

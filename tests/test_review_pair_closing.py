@@ -130,3 +130,81 @@ def test_extended_closing_evidence_preserves_each_frozen_decomposition():
     assert evidence["reservations"]["legacy_full"]["pair_close_seconds"] == 2000
     assert closing._reservation_evidence([SimpleNamespace(plan={"schema_version": accounting.PAIR_PLAN})]) == {
         "schema_version": "review-current-pair-closing/v1", "reservation": accounting.PAIR_RESERVATION}
+
+
+def _captured_question():
+    import copy
+    from pathlib import Path
+
+    import yaml
+
+    from evidence_wiki.pack_discovery import owner
+    from tests.test_question_dependencies import _frontmatter, _manifest, _project
+
+    projection = owner("_question_dependencies")
+    manifest = _manifest()
+    sibling = copy.deepcopy(manifest["claims"][0])
+    sibling.update(id="sibling", text="A separate unresolved claim.", qualification="contested")
+    manifest["claims"].append(sibling)
+    mirrors = _project(projection, _frontmatter(), manifest=manifest)["canonical_mirrors"]
+    frontmatter = {**_frontmatter(), **mirrors, "status": "answered", "answered_by": "worker"}
+    root, config, policy = Path("/workspace"), {"wiki": {"root": "wiki"}}, {"human_review": False}
+    body = "\n# Original question\n\nPreserve every line.\n"
+
+    def capture():
+        raw = ("---\n" + yaml.safe_dump(frontmatter, sort_keys=False) + "---\n" + body).encode()
+        return SimpleNamespace(files={"wiki/questions/question.md": raw})
+
+    return SimpleNamespace(owner=projection, root=root, config=config, policy=policy,
+        manifest=manifest, frontmatter=frontmatter, capture=capture,
+        summaries={"question": {"policy_results": []}}, body=body)
+
+
+def test_completed_capture_derives_current_full_inventory_after_claim_edit():
+    import copy
+
+    fixture = _captured_question()
+    fixture.manifest["claims"][0]["text"] = "The current measurement is seven."
+    fixture.manifest["claims"][0]["evidence"][0]["source_id"] = "current-source"
+    capture = fixture.capture()
+    before = copy.deepcopy((capture.files, fixture.manifest, fixture.frontmatter))
+    with pytest.raises(fixture.owner.sibling("_strict_evidence").ScriptRefusal) as caught:
+        fixture.owner.project(fixture.root, fixture.config, fixture.policy, capture,
+            fixture.manifest, "question", coverage_summary=fixture.summaries["question"])
+    assert caught.value.details["reason"] == "selective_question_mirror_mismatch"
+    actual, = runner._capture_questions(fixture.root, fixture.config, fixture.policy,
+        capture, fixture.manifest, fixture.summaries)
+    assert [row["claim"] for row in actual["canonical_mirrors"]["grounding"]] == [
+        row["text"] for row in fixture.manifest["claims"]]
+    assert actual["canonical_mirrors"]["source_ids"] == ["current-source", "source"]
+    assert actual["body"] == fixture.body
+    assert before == (capture.files, fixture.manifest, fixture.frontmatter)
+
+
+@pytest.mark.parametrize("change", ["missing", "grounding_shape", "source_shape", "coverage_flag", "question_text"])
+def test_completed_capture_keeps_native_shape_and_policy_refusals(change):
+    fixture = _captured_question()
+    if change == "missing":
+        fixture.frontmatter.pop("grounding")
+    elif change == "grounding_shape":
+        fixture.frontmatter["grounding"][0]["unexpected"] = True
+    elif change == "source_shape":
+        fixture.frontmatter["source_ids"] = "unsupported"
+    elif change == "coverage_flag":
+        fixture.frontmatter["coverage_required"] = False
+    else:
+        fixture.frontmatter["question"] = "A different question."
+    with pytest.raises(fixture.owner.sibling("_strict_evidence").ScriptRefusal):
+        runner._capture_questions(fixture.root, fixture.config, fixture.policy,
+            fixture.capture(), fixture.manifest, fixture.summaries)
+
+
+def test_completed_capture_preserves_semantic_metadata_changes():
+    fixture = _captured_question()
+    before = runner._capture_questions(fixture.root, fixture.config, fixture.policy,
+        fixture.capture(), fixture.manifest, fixture.summaries)
+    fixture.frontmatter["metadata"]["instructions"]["preserve"].append("Current instruction.")
+    after = runner._capture_questions(fixture.root, fixture.config, fixture.policy,
+        fixture.capture(), fixture.manifest, fixture.summaries)
+    assert before[0]["semantic_frontmatter"] != after[0]["semantic_frontmatter"]
+    assert before[0]["body"] == after[0]["body"] == fixture.body

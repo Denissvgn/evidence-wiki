@@ -14,7 +14,7 @@ import json
 import re
 
 from .mutation_contracts import refuse
-from .research_journal_contracts import canonical_record, detached_record, expanded_size
+from .research_journal_contracts import _canonical_owned_record, expanded_size
 
 COLLECTION = "research-execution-journal-collection/v1"
 RECEIPT = "research-execution-journal-collection-receipt/v1"
@@ -78,11 +78,10 @@ def _prepared(records):
     total = expanded = 2
     nodes = 1
     for record in records:
-        detached = detached_record(record)
+        raw, detached = _canonical_owned_record(record, expanded_limit=max(0, MAX_BYTES - expanded - bool(encoded)))
         expanded += expanded_size(detached) + bool(encoded)
         if expanded > MAX_BYTES:
             refuse("LIMIT")
-        raw = canonical_record(detached)
         if len(raw) + 2 > PAGE_BYTES:
             refuse("LIMIT")
         item = json.loads(raw)

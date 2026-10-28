@@ -345,6 +345,13 @@ class _Original:
         self.assert_current()
         return detached(self._snapshot)
 
+    def original_material(self, envelope):
+        """Read related originals against one freshly authenticated journal."""
+        self.assert_current()
+        if envelope != self._envelope:
+            refuse("REVIEW_DEPENDENCY_APPLICATION_PROOF_REQUIRED")
+        return dict(self._inputs), detached(self._snapshot)
+
     def assert_review_envelope(self, envelope):
         """Compare an actual native record to the authenticated original application."""
         self.assert_current()

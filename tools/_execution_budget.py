@@ -172,7 +172,7 @@ def provisioning_window(policy, binding, run_seconds):
             raise ValueError("execution_runtime_binding_invalid")
     if "formal_application_policy" in binding:
         from tools._review_dependency_accounting import validate_plan
-        from tools._review_dependency_runner import _allocation_binding
+        from tools._review_dependency_runner import _allocation_binding, _budget_producer
         plan = validate_plan(binding["formal_plan"])
         if not ceiling_policy.exact(ceiling_policy.validate(binding), ceiling_policy.validate(plan)):
             raise ValueError("execution_runtime_binding_invalid")
@@ -195,7 +195,7 @@ def provisioning_window(policy, binding, run_seconds):
         completed_extended_pilot_measurements(recipe, binding["candidate_sha256"])
         if (not ceiling_policy.exact(ceiling_policy.validate(recipe), ceiling_policy.validate(binding))
                 or recipe["formal_execution_policy"] != policy or recipe["phase_caps"] != binding["phase_caps"]
-                or recipe["review_producer_id"] != plan["review_producer_id"]
+                or not _budget_producer(recipe, binding["candidate_sha256"], plan["review_producer_id"])
                 or recipe["formal_application_policy"] != binding["formal_application_policy"]
                 or recipe["group_overhead_cap_seconds"] != binding["group_overhead_cap_seconds"]):
             raise ValueError("execution_runtime_binding_invalid")
