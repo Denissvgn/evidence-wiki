@@ -125,7 +125,7 @@ def test_workspace_coordinates_allow_actual_hidden_components_without_normalizin
 @pytest.mark.parametrize("path", [
     None, 1, "", "/", "/absolute", "./file", "../file", "a/../b", "a//b", "a/./b", "a/",
     "a\\b", "a:b", "a<b", 'a"b', "a|b", "a?b", "a*b", "a.", "a ", ". ", "..", "a\x00b", "a\nb", "a\x7fb",
-    "\ud800", "é" * 2049, "a/" * 65 + "file",
+    "\ud800", pytest.param("é" * 2049, id="oversized-utf8"), "a/" * 65 + "file",
 ])
 def test_invalid_workspace_coordinates_are_refused(path):
     native = owner("_review_dependencies")

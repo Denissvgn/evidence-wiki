@@ -10,7 +10,8 @@ from evidence_wiki._review_dependency_inputs import assert_current, current_inpu
 from evidence_wiki.errors import EvidenceWikiError
 
 
-@pytest.mark.parametrize("raw", [b"", b"\x00\xff\r\nraw\n", "Exact café\r\n".encode(), b"x" * 100000])
+@pytest.mark.parametrize("raw", [b"", b"\x00\xff\r\nraw\n", "Exact café\r\n".encode(), b"x" * 100000],
+                         ids=["empty", "binary", "utf8", "chunked"])
 def test_private_original_codec_round_trips_exact_bytes_with_bounded_chunks(raw):
     encoded = _encoded(raw)
     assert _decoded(encoded) == raw

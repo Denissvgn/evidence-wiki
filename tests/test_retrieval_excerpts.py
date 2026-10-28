@@ -10,7 +10,7 @@ from evidence_wiki import retrieval_excerpts as module
     ('A' * 2000 + '\n否定\nNot supported.', 'Not'),
     ('İstanbul\nStraße\nRatio 3.', 'ratio'),
     ('No matching passage here.', 'missing'),
-])
+], ids=['whitespace', 'long-body', 'unicode', 'no-match'])
 def test_excerpt_is_exact_body_slice_not_collapsed_snippet(body, query):
     value = module.excerpt(body, query, width=128)
     assert value['text'] == body[value['start_char']:value['end_char']]
