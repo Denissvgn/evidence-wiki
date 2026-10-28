@@ -160,8 +160,7 @@ def selection_inputs(root, config, policy, *, view=None, computation=None):
     for relative, expected in policy["instructions"].items():
         require(relative in capture.files and sibling("_requirements_bridge").instruction_matches(root, relative, capture.files[relative], expected),
                 "strict_instructions_changed")
-    # Bind all retained bytes except lifecycle-only ledgers and question pages.
-    # The renderer uses reviewed question text, not editable prose from those pages.
+    # Exclude lifecycle ledgers and question pages; render reviewed question text.
     question_dir = sibling("question_status").questions_directory(root, config).relative_to(root).as_posix() + "/"
     evidence = {name: hashlib.sha256(data).hexdigest() for name, data in capture.files.items()
                 if not name.startswith(("runs/", ".locks/", question_dir + ".locks/")) and name not in {"log.md", "index.md"}
@@ -347,8 +346,7 @@ def enforce_resolution(root, config, args, frontmatter):
     args.require_coverage = True
     args.require_grounding = True
     require(getattr(args, "coverage_manifest", None) is None, "strict_coverage_override_refused")
-    # Mechanical resolution stays with the canonical resolver. Final eligibility
-    # is separately re-evaluated from the complete claim inventory and receipts.
+    # Resolve canonically; recheck eligibility against all claims and receipts.
     require(policy["assurance"] != "host_enforced" or strict_host.get() == str(root), "strict_host_required")
     usage = sibling("_evidence_usage")
     manager = usage.current_view(root, config) if usage.configured(config) else nullcontext(None)
@@ -460,7 +458,7 @@ def prepare_review_material(root, claim_id, *, expected_basis_id, expected_nativ
         require(basis == expected_basis_id, "strict_review_basis_changed")
         snapshot = review_snapshot(root, config, policy, view, claim_id, basis)
         canonical = sibling("_evidence_revision").canonical_bytes
-        # Context snapshot identities use compact JSON without the native codec's trailing newline.
+        # Snapshot IDs use compact JSON without a trailing newline.
         snapshot_bytes = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
         require(len(snapshot_bytes) <= MAX_BYTES, "strict_review_material_bound")
         require("sha256:" + hashlib.sha256(snapshot_bytes).hexdigest() == expected_native_snapshot_sha256,

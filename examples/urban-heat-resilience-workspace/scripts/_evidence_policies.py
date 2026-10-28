@@ -674,13 +674,13 @@ def source_unusable_evidence_reasons(inputs: PolicyInputs, source_id: str) -> li
         normalized, source_kind=record.get("kind") if isinstance(record.get("kind"), str) else "")
     if profile.reason:
         reasons.append(profile.reason)
-    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
+    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate", cache=_QUALIFIED_PACKET_CACHE)
     reasons.extend(usage.normalized_issues(inputs.project_root, inputs.config, record, normalized))
     packet = load_workspace_module(_SCRIPT_DIR, "_qualified_packet", cache=_QUALIFIED_PACKET_CACHE)
     reasons.extend(packet.normalized_issues(inputs.project_root, inputs.config, record, normalized))
-    execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
+    execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence", cache=_QUALIFIED_PACKET_CACHE)
     reasons.extend(execution.normalized_issues(inputs.project_root, inputs.config, record, normalized))
-    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence")
+    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence", cache=_QUALIFIED_PACKET_CACHE)
     reasons.extend(market.consumer_issues(inputs.project_root, inputs.config, record, normalized))
     for document in candidate_values(normalized, metadata, provenance, record):
         reasons.extend(explicit_unusable_reasons(document))
