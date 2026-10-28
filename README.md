@@ -41,6 +41,11 @@ You can select the interpreter explicitly without activating the environment:
 .research-env/bin/python -B -m evidence_wiki agent --format json
 ```
 
+To use a repository checkout, run `.research-env/bin/python -m pip install .`
+from its root. The published package can expose an earlier contract than this
+checkout; use `evidence-wiki contract` to discover the selected installation's
+operations and match its documentation to that version.
+
 The `evidence-wiki` console command and `-B -m evidence_wiki.cli` module form
 remain supported. Generated commands include the selected Python executable;
 retain that interpreter and its arguments. For affected installations missing
@@ -195,7 +200,7 @@ evidence immutable and continue with the [research workflow][research-run].
 | Scoped MCP host | `serve-onboarding-mcp` exposes [startup-granted research tools](workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools), with explicit runtime, native cancellation/recovery and no elicitation. |
 | Configured autonomous host | `agent run-cycle` / `refresh` share the [public library dispatcher](docs/library-api.md), with explicit private runtime selection and bounded noninteractive execution. |
 | Current caller | `agent research-guide` describes advice, claims, ingestion and controlled export without another model runner. |
-| Managed adapters | `orchestrate run` / `resume` support Codex CLI 0.138+ and Claude Code. Managed Claude is unavailable on native Windows. |
+| Managed adapters | `orchestrate run` / `resume` use the Codex CLI and Claude Code version/platform/mode rows listed by `agent frameworks`. Managed Claude is unavailable on native Windows. |
 | External host | `start` / `next` / `submit` / `status` support an operator-controlled host, including OpenCode, Pi, Aider or Gemini CLI. |
 
 For exact candidate conformance, the [unattended qualification guide](docs/unattended-qualification.md)

@@ -192,9 +192,14 @@ class ResearchExecution:
         if any(binding.get(key) != value for key, value in self._binding.items()):
             refuse("BINDING_CHANGED")
 
+    def _memoize_record_codec(self):
+        """Legacy records use full validation without selective schema-key work."""
+        delivery = getattr(getattr(self, "_profile", None), "review_delivery", None)
+        return getattr(delivery, "context_version", "legacy") != "legacy"
+
     def _signature(self, value):
         unsigned = {**value, "authentication": None}
-        raw = canonical_record(unsigned) if unsigned.get("schema_version") == JOURNAL else canonical(unsigned)
+        raw = canonical_record(unsigned, use_memo=self._memoize_record_codec()) if unsigned.get("schema_version") == JOURNAL else canonical(unsigned)
         return hmac.new(self._observer_key, raw, hashlib.sha256).hexdigest()
 
     def sign(self, value):
@@ -244,7 +249,7 @@ class ResearchExecution:
                 refuse("EXECUTION_JOURNAL_INVALID")
             from .mutation_contracts import _serialized
             stored_bytes = _serialized(record)
-            canonical_bytes, owned_record = _canonical_owned_record(record)
+            canonical_bytes, owned_record = _canonical_owned_record(record, use_memo=self._memoize_record_codec())
             if stored_bytes != canonical_bytes:
                 refuse("EXECUTION_JOURNAL_INVALID")
             record = owned_record

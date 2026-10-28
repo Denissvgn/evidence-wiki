@@ -375,11 +375,13 @@ def _record_transport(value: Any, *, physical: bool) -> dict[str, Any]:
     return _owned_record_transport(detached_record(value), physical=physical)
 
 
-def _canonical_owned_record(value: Any, *, expanded_limit: int | None = None) -> tuple[bytes, dict[str, Any]]:
+def _canonical_owned_record(value: Any, *, expanded_limit: int | None = None, use_memo: bool = True) -> tuple[bytes, dict[str, Any]]:
     """Return physical bytes and a separately owned logical record for one read."""
     if expanded_limit is not None and (type(expanded_limit) is not int or not 0 <= expanded_limit <= 16_777_216):
         refuse("INVALID")
-    selected = _record_codec_key(value)
+    if type(use_memo) is not bool:
+        refuse("INVALID")
+    selected = _record_codec_key(value) if use_memo else None
     if selected is not None:
         generation, charge, raw = selected
         saved = _RecordCodecMemo.get(generation, charge, raw)
@@ -403,9 +405,9 @@ def storage_record(value: Any) -> dict[str, Any]:
     return _record_transport(value, physical=True)
 
 
-def canonical_record(value: Any) -> bytes:
+def canonical_record(value: Any, *, use_memo: bool = True) -> bytes:
     """Encode the physical record, retaining legacy bytes below transport bounds."""
-    return _canonical_owned_record(value)[0]
+    return _canonical_owned_record(value, use_memo=use_memo)[0]
 
 
 def digest_record(value: Any) -> str:

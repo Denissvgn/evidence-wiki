@@ -16,8 +16,11 @@ from tests.test_review_native_journal_wire import _owned_data
 
 
 @pytest.mark.parametrize("large", [False, True])
-def test_scan_rechecks_owned_records_and_authentication(tmp_path, monkeypatch, large):
+@pytest.mark.parametrize("context_version", [None, "legacy", "complete", "dependencies"])
+def test_scan_rechecks_owned_records_and_authentication(tmp_path, monkeypatch, large, context_version):
     execution = observer()
+    execution._profile = SimpleNamespace(review_delivery=None if context_version is None
+        else SimpleNamespace(context_version=context_version))
     session = SimpleNamespace(root=tmp_path, run_id="scan", binding={"run_id": "scan"})
     original = _owned_data() if large else {"nested": ["original"]}
     if large:
@@ -99,6 +102,40 @@ def memo_record(data=None):
     return {"schema_version": codec.JOURNAL, "kind": "execution_native", "binding_id": "binding",
         "request_id": "record", "sequence": 0, "previous_record_ref": None,
         "data": _owned_data() if data is None else data, "authentication": None}
+
+
+def test_legacy_signing_uses_full_codec_without_selective_schema_keys(monkeypatch):
+    execution = observer()
+    execution._profile = SimpleNamespace(review_delivery=None)
+    record = memo_record()
+    expected = codec.canonical_record(record)
+    expected_signature = hmac.new(execution._observer_key, expected, "sha256").hexdigest()
+
+    def no_selective_key(_value):
+        raise AssertionError("Legacy encoding must retain the full codec path")
+
+    monkeypatch.setattr(codec, "_record_codec_key", no_selective_key)
+    signed = execution.sign(record)
+    assert signed["authentication"] == expected_signature
+    execution._verify(signed)
+    signed["data"]["result"]["claim_id"] = "changed"
+    with pytest.raises(EvidenceWikiError):
+        execution._verify(signed)
+
+
+def test_uncached_codec_preserves_transport_bounds_and_owned_values(monkeypatch):
+    record = memo_record()
+    expected = codec._canonical_owned_record(record)
+    monkeypatch.setattr(codec, "_record_codec_key", lambda _: pytest.fail("Unexpected memo lookup"))
+    actual = codec._canonical_owned_record(record, use_memo=False)
+    assert actual == expected
+    actual[1]["data"]["padding"].clear()
+    assert codec._canonical_owned_record(record, use_memo=False) == expected
+    with pytest.raises(EvidenceWikiError):
+        codec._canonical_owned_record(record, expanded_limit=1, use_memo=False)
+    malformed = {**record, "unowned": True}
+    with pytest.raises(EvidenceWikiError):
+        codec._canonical_owned_record(malformed, use_memo=False)
 
 
 def test_pure_record_codec_reuses_only_success_and_returns_fresh_values(codec_memo, monkeypatch):
