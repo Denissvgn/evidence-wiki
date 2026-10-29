@@ -26,6 +26,7 @@ from _computation_expression import (
 )
 from _evidence_revision import canonical_bytes, content_id
 from _strict_contract import validate_shape
+from _yaml_safe import compose_current
 
 SCHEMA = "evidence-computation-definition/v1"
 RESULT_SCHEMA = "evidence-computation-result/v1"
@@ -375,7 +376,7 @@ def validate_yaml(text):
     """Reject duplicate or aliased computation data before YAML construction loses it."""
     require(len(text.encode("utf-8")) <= MAX_BYTES, "computation_configuration_bound")
     try:
-        tree = yaml.compose(text, Loader=yaml.SafeLoader)
+        tree = compose_current(text)
     except yaml.YAMLError:
         raise ComputationInvalid("computation_yaml_invalid") from None
     pending, inspected, seen_inside = [(tree, False, 0, frozenset())], 0, set()

@@ -34,6 +34,17 @@ def safe_load_current(stream: str | bytes) -> Any:
         return yaml.load(stream, Loader=yaml.SafeLoader)
 
 
+def compose_current(stream: str | bytes) -> Any:
+    """Compose fresh nodes for lossless duplicate-key and alias inspection."""
+    markers = (b"\t", b"%YAML") if isinstance(stream, bytes) else ("\t", "%YAML")
+    if any(marker in stream for marker in markers):
+        return yaml.compose(stream, Loader=yaml.SafeLoader)
+    try:
+        return yaml.compose(stream, Loader=SafeLoader)
+    except yaml.YAMLError:
+        return yaml.compose(stream, Loader=yaml.SafeLoader)
+
+
 def split_frontmatter_block(text: str) -> tuple[str | None, str]:
     """Separate frontmatter at standalone delimiter lines, leaving YAML parsing to the caller."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
