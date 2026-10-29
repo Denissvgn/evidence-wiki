@@ -2,6 +2,10 @@ name: Latest Python compatibility
 
 on:
   workflow_call:
+    inputs:
+      hosted-windows-only:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,17 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            python: "3.10"
-          - os: ubuntu-latest
-            python: "3.12"
-          - os: ubuntu-latest
-            python: "3.14"
-          - os: macos-latest
-            python: "3.14"
-          - os: windows-latest
-            python: "3.14"
+        include: ${{ fromJSON(inputs.hosted-windows-only && '[{"os":"windows-latest","python":"3.14"}]' || '[{"os":"ubuntu-latest","python":"3.10"},{"os":"ubuntu-latest","python":"3.12"},{"os":"ubuntu-latest","python":"3.14"},{"os":"macos-latest","python":"3.14"},{"os":"windows-latest","python":"3.14"}]') }}
     steps:
       - name: Check out the event commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

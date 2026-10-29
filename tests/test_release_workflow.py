@@ -3,6 +3,7 @@ import io
 import itertools
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -34,6 +35,14 @@ def load_workflow(path=WORKFLOW_PATH) -> dict:
 
 def step_uses(job: dict) -> list[str]:
     return [step["uses"] for step in job.get("steps", []) if "uses" in step]
+
+
+def conditional_matrix(value, *, local=False):
+    if isinstance(value, list):
+        return value
+    choices = re.findall(r"'(\[[^']+\])'", value)
+    assert len(choices) == 2 and "fromJSON" in value
+    return json.loads(choices[0 if local else 1])
 
 
 def test_pypi_workflow_can_only_start_from_a_published_release() -> None:
@@ -162,11 +171,10 @@ def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypa
 
 def test_release_rehearsal_has_no_publishing_authority():
     workflow = load_workflow(QUALIFICATION_PATH)
-    assert set(workflow["on"]) == {"workflow_call", "workflow_dispatch", "pull_request"}
+    assert set(workflow["on"]) == {"workflow_call", "workflow_dispatch"}
     assert workflow["on"]["workflow_call"]["inputs"]["release-tag"] == {
         "description": "Exact tag supplied by the publication workflow", "required": True, "type": "string"}
-    assert "CHANGELOG.md" in workflow["on"]["pull_request"]["paths"]
-    assert ".github/workflows/**" in workflow["on"]["pull_request"]["paths"]
+    assert "pull_request" not in workflow["on"]
     assert workflow["permissions"] == {"contents": "read"}
     for job in workflow["jobs"].values():
         assert "environment" not in job and "secrets" not in job
@@ -285,12 +293,16 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert matrix["shard"] == [1, 2, 3]
     expected = {("ubuntu-latest", "3.10.21"), ("ubuntu-latest", "3.14.7"),
                 ("macos-latest", "3.12.10"), ("windows-latest", "3.12.10")}
-    assert {(cell["os"], cell["python-version"]) for cell in matrix["platform"]} == expected
-    assert len(list(itertools.product(matrix["platform"], matrix["shard"]))) == 12
+    fallback = conditional_matrix(matrix["platform"])
+    assert {(cell["os"], cell["python-version"]) for cell in fallback} == expected
+    assert len(list(itertools.product(fallback, matrix["shard"]))) == 12
+    assert {(cell["os"], cell["python-version"]) for cell in conditional_matrix(matrix["platform"], local=True)} == {
+        ("windows-latest", "3.12.10")}
     assert test["strategy"]["fail-fast"] is False
     assert test["needs"] == "compatibility"
     assert set(package["needs"]) == {"compatibility", "test", "build", "installed"}
-    assert package["if"] == "${{ !cancelled() }}"
+    assert "!cancelled()" in package["if"] and "LOCAL_CI_ENABLED != 'true'" in package["if"]
+    assert "github.event_name != 'pull_request'" in package["if"]
     assert "needs" not in build and installed["needs"] == ["installed-wheel", "installed-sdist"]
     for kind in ("wheel", "sdist"):
         assert workflow["jobs"]["installed-"+kind]["needs"] == "build" or workflow["jobs"]["installed-"+kind]["needs"] == ["build"]
@@ -321,6 +333,44 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert command[command.index("--group-size") + 1] == "48"
     assert {command[i + 1] for i, arg in enumerate(command) if arg == "--platform"} == {
         "Linux/X64/3.10", "Linux/X64/3.14", "macOS/ARM64/3.12", "Windows/X64/3.12"}
+
+
+def test_local_mode_keeps_required_windows_native_peer_and_authenticated_evidence():
+    jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
+    for name in ("linux-native", "local-evidence"):
+        assert "LOCAL_CI_ENABLED == 'true'" in jobs[name]["if"]
+        assert "github.event_name == 'pull_request'" in jobs[name]["if"]
+        assert not jobs[name].get("continue-on-error", False)
+    native = jobs["linux-native"]
+    run = next(step["run"] for step in native["steps"] if "linux_architecture_probe.py" in step.get("run", ""))
+    assert '--architecture "$PEER_ARCH"' in run
+    assert "LOCAL_CI_LINUX_ARCH" in native["runs-on"] and "ubuntu-24.04-arm" in native["runs-on"]
+    evidence = jobs["local-evidence"]
+    checkout = next(step for step in evidence["steps"] if "actions/checkout@" in step.get("uses", ""))
+    assert "pull_request.base.sha" in checkout["with"]["ref"]
+    verify = next(step["run"] for step in evidence["steps"] if "check_local_ci_status.py" in step.get("run", ""))
+    assert '--native-peer native-peer/summary.json' in verify
+    required = jobs["required"]
+    assert required["name"] == "Required CI" and required["if"] == "${{ always() }}"
+    assert set(required["needs"]) == {"compatibility", "test", "package", "local-evidence", "linux-native"}
+    command = required["steps"][0]["run"]
+    for status in ("COMPATIBILITY", "WINDOWS_AND_FALLBACK", "LOCAL_EVIDENCE", "NATIVE_PEER", "FALLBACK_PACKAGE"):
+        assert f'test "${status}" = success' in command
+
+
+def test_local_receipt_verifier_executes_only_default_branch_code_without_candidate_checkout():
+    workflow = load_workflow(CI_WORKFLOW_PATH.with_name("local-pre-pr.yml"))
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read", "statuses": "write"}
+    job = workflow["jobs"]["verify"]
+    assert job["timeout-minutes"] == 5
+    checkout = next(step for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
+    assert checkout["with"]["ref"] == "${{ github.event.repository.default_branch }}"
+    assert checkout["with"]["persist-credentials"] is False
+    verify = next(step for step in job["steps"] if "tools/verify_local_ci.py" in step.get("run", ""))
+    assert verify["env"]["LOCAL_CI_PUBLIC_KEY"] == "${{ vars.LOCAL_CI_PUBLIC_KEY }}"
+    assert '--event "$GITHUB_EVENT_PATH"' in verify["run"]
+    assert all('pull_request.head' not in step.get('run', '') for step in job['steps'])
 
 
 def test_shared_artifact_gate_carries_every_check_the_workflows_used_to_inline() -> None:
@@ -418,7 +468,7 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     assert workflow["permissions"] == {"contents": "read"}
     job = workflow["jobs"]["check"]
     assert job["timeout-minutes"] == 15 and job["strategy"]["fail-fast"] is False
-    assert {(cell["os"], cell["python"]) for cell in job["strategy"]["matrix"]["include"]} == {
+    assert {(cell["os"], cell["python"]) for cell in conditional_matrix(job["strategy"]["matrix"]["include"])} == {
         ("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.12"), ("ubuntu-latest", "3.14"),
         ("macos-latest", "3.14"), ("windows-latest", "3.14")}
     setup = next(step for step in job["steps"] if "actions/setup-python@" in step.get("uses", ""))
@@ -427,7 +477,11 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     assert all(not step.get("continue-on-error", False) for step in job["steps"])
     for caller in (CI_WORKFLOW_PATH, QUALIFICATION_PATH):
         jobs = load_workflow(caller)["jobs"]
-        assert jobs["compatibility"] == {"uses": "./.github/workflows/check-compatibility.yml"}
+        assert jobs["compatibility"]["uses"] == "./.github/workflows/check-compatibility.yml"
+        if caller == CI_WORKFLOW_PATH:
+            assert "LOCAL_CI_ENABLED" in jobs["compatibility"]["with"]["hosted-windows-only"]
+        else:
+            assert "with" not in jobs["compatibility"]
         test = jobs["test" if caller == CI_WORKFLOW_PATH else "release-tests"]
         checks = [step for step in test["steps"] if "tools/check_ci_compatibility.py" in step.get("run", "")]
         full = next(step for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", ""))
@@ -446,8 +500,7 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     assert all(f"--python-patch {platform}={version}" in verification for platform, version in (
         ("Linux/X64/3.10", "3.10.21"), ("Linux/X64/3.14", "3.14.7"),
         ("macOS/ARM64/3.12", "3.12.10"), ("Windows/X64/3.12", "3.12.10")))
-    triggers = load_workflow(QUALIFICATION_PATH)["on"]["pull_request"]["paths"]
-    assert "tools/check_ci_compatibility.py" in triggers and "tests/test_html_usability*.py" in triggers
+    assert "pull_request" not in load_workflow(QUALIFICATION_PATH)["on"]
 
 
 @pytest.mark.parametrize(

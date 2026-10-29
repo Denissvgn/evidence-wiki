@@ -14,33 +14,6 @@ on:
         required: false
         type: string
         default: ""
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - .github/workflows/**
-      - CHANGELOG.md
-      - pyproject.toml
-      - src/evidence_wiki/__init__.py
-      - workspace-template/workspace-system.yml
-      - workspace-template/docs/agent-resources/**
-      - tools/sync_agent_resources.py
-      - tools/*release*.py
-      - tools/*installed*.py
-      - tools/*qualif*.py
-      - tools/*journey*.py
-      - tools/*test*groups*.py
-      - tools/check_ci_compatibility.py
-      - tools/_suite_plugin.py
-      - workspace-template/scripts/normalize_sources.py
-      - tests/test_html_usability*.py
-      - tests/test_strict_evidence.py
-      - tests/_publication_fixture.py
-      - tests/test_test_groups.py
-      - tests/test_ci_compatibility.py
-      - tools/verify_test_shards.py
-      - tools/scale_benchmark.py
-      - tests/test_release*.py
-      - tests/test_qualification_management.py
 
 permissions:
   contents: read

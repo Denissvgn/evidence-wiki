@@ -28,9 +28,11 @@ from tools.validate_installed_artifacts import (
 )
 
 
-def verify(dist_dir, evidence, *, commit, run_id, expected_version=None, required_runtimes=None, report_sha256=None):
+def verify(dist_dir, evidence, *, commit, run_id, expected_version=None, required_runtimes=None, report_sha256=None,
+           provenance="github"):
     """Require exact artifact bindings, complete installed CLI/action groups and every frozen journey."""
-    if not commit or not run_id:
+    if (not commit or provenance not in {"github", "local"}
+            or provenance == "github" and not run_id or provenance == "local" and run_id is not None):
         raise ValueError("commit and run ID are required")
     if (not isinstance(report_sha256, list) or not report_sha256 or len(set(report_sha256)) != len(report_sha256)
             or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{64}", value) is None for value in report_sha256)):
@@ -73,7 +75,8 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None, require
         reports = runtime_reports.setdefault(runtime_key, {"runtime": runtime, "installations": {}})["installations"]
         if kind not in archives or kind in reports:
             raise ValueError("unexpected or duplicate installation report")
-        if report["workflow"]["GITHUB_SHA"] != commit or report["workflow"]["GITHUB_RUN_ID"] != run_id:
+        if (provenance == "github" and (report["workflow"]["GITHUB_SHA"] != commit or report["workflow"]["GITHUB_RUN_ID"] != run_id)
+                or provenance == "local" and report["workflow"] != dict.fromkeys(("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))):
             raise ValueError("installation report belongs to a different commit or run")
         if expected_version is not None and report.get("expected_version") != expected_version:
             raise ValueError("installation report was not qualified for the requested release version")
@@ -147,7 +150,8 @@ def verify(dist_dir, evidence, *, commit, run_id, expected_version=None, require
             "scope": "exact_observed_installed_runtimes", "candidate_source_sha256": digest(source),
             "public_expectations_sha256": digest(expectations),
             "producer_custody_sha256": sorted(observed_hashes), "custody": "external_original_report_hashes_and_retained_command_replay",
-            "workflow": {"GITHUB_SHA": commit, "GITHUB_RUN_ID": run_id}, "validation_inputs": inputs}
+            "workflow": {"GITHUB_SHA": commit, "GITHUB_RUN_ID": run_id} if provenance == "github" else None,
+            "provenance": provenance, "candidate_commit": commit, "validation_inputs": inputs}
 
 
 def main(argv=None):

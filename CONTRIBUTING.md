@@ -62,6 +62,59 @@ The commands below use the POSIX path. On Windows, replace
 - Preserve compatibility with Python 3.10+ on Windows, macOS, and Ubuntu.
 - Avoid broad refactors while implementing a focused change.
 
+## Local pre-PR gate
+
+The local gate runs clean tracked Git snapshots with pinned interpreters. Linux
+uses native ARM64 Docker on Apple Silicon; macOS runs natively with explicitly
+selected Python executables. Linux x64 and ARM64 share the full functional-suite
+obligation, while both architectures must run the same native probe selection.
+Machine identities are retained separately. Windows remains a hosted gate.
+
+Run each required profile into a new directory outside the checkout:
+
+```bash
+.venv/bin/python tools/local_ci.py run --profile linux-3.10 --output /tmp/ci-results/linux-3.10
+.venv/bin/python tools/local_ci.py run --profile linux-3.14 --output /tmp/ci-results/linux-3.14
+.venv/bin/python tools/local_ci.py run --profile linux-native --output /tmp/ci-results/linux-native
+.venv/bin/python tools/local_ci.py run --profile packages --output /tmp/ci-results/packages
+.venv/bin/python tools/local_ci.py run --profile macos-3.12 --python /absolute/path/to/python3.12 --output /tmp/ci-results/macos-3.12
+.venv/bin/python tools/local_ci.py run --profile macos-compatibility --python /absolute/path/to/python3.14 --output /tmp/ci-results/macos-compatibility
+```
+
+The interpreters must match the policy's exact patch versions. Profiles execute
+serially, retain failed attempts, and preserve the existing process and journey
+limits. A failed or partial full suite cannot be sealed. The package profile
+builds both distributions and completes each independent installed journey.
+Signing material is never mounted into a candidate container.
+
+After all profiles pass, seal the originals with an owner-held Ed25519 key
+outside both the repository and evidence tree. The repository owner enrolls its
+public key in the Actions variable `LOCAL_CI_PUBLIC_KEY`.
+
+```bash
+.venv/bin/python tools/local_ci.py seal --evidence /tmp/ci-results --repo Denissvgn/evidence-wiki --base <exact-main-commit> --producer <host-id> --key /absolute/private/key --output /tmp/local-ci-receipt.json
+.venv/bin/python tools/local_ci.py publish --repo Denissvgn/evidence-wiki --receipt /tmp/local-ci-receipt.json --signature /tmp/local-ci-receipt.json.sig
+```
+
+Publishing a receipt does not push a branch. Pushes still require owner
+authorization. The default-branch verifier authenticates the exact commit, Git
+tree, base and policy, then publishes `local-pre-pr` for that candidate. Reuse
+requires those identities to remain unchanged; a different base or policy needs
+new applicable evidence. Detailed evidence remains local under the owner's
+retention policy, and the hosted verifier retains the signed receipt summary.
+
+The migration uses `LOCAL_CI_ENABLED=true` only after the trusted verifier is
+present on the default branch and a complete signed local result has passed.
+Require `Required CI` in branch protection and keep the branch up to date with
+main. With local mode enabled, PR Actions retain Windows, a native Linux x64
+probe and the small authenticated-results verifier. The full hosted fallback
+remains active before activation and on main. Release qualification retains its
+complete release/manual checks instead of duplicating them on every PR.
+
+Manual native execution assumes the owner trusts the candidate code. Do not run
+untrusted contributions on a development workstation with access to signing
+keys or other credentials; use a disposable isolated host for those candidates.
+
 ## Packaging
 
 Before proposing a release, build and inspect both distribution formats:
