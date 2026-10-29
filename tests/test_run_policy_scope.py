@@ -284,7 +284,7 @@ def test_v2_binding_requires_same_frozen_policy_and_originals():
         invalid[field] = value
         with pytest.raises(WorkflowContractError):
             session_contracts.checked(session_contracts.BINDING_V2, invalid)
-    binding["policy"]["scope"]["source_scope"] = ["/workspace/raw/extra.txt"]
+    binding["policy"]["scope"]["source_scope"] = [str(Path(NATIVE_SOURCE).with_name("extra.txt"))]
     with pytest.raises(WorkflowContractError):
         session_contracts.checked(session_contracts.BINDING_V2, binding)
 
