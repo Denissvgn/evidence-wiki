@@ -52,6 +52,18 @@ def executor(tmp_path, script, selected=None, **changes):
                                     commands={"researcher": (sys.executable, "-c", script)}, cwd=tmp_path, **changes)
 
 
+def test_reference_executor_refuses_unsupported_platform_before_directory_access(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from evidence_wiki import agent_execution
+    selected = profile()
+    path = tmp_path / "absent"
+    monkeypatch.setattr(agent_execution, "os", SimpleNamespace(name="nt"))
+    with pytest.raises(ExecutionError, match="execution_process_boundary_unsupported"):
+        BoundedSubprocessExecutor(selected, commands={}, cwd=path)
+    assert not path.exists()
+
+
 def test_live_executor_retains_exact_first_receipt_without_regeneration(tmp_path):
     host = executor(tmp_path, "import time; time.sleep(0.05); print('{}')")
     selected = attempt(host.profile)

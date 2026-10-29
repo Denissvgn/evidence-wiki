@@ -59,6 +59,9 @@ def test_constructing_an_attempt_cannot_bypass_exact_scope_or_packet_binding(cha
 
 def test_reference_host_rechecks_scope_even_for_directly_constructed_attempt(tmp_path):
     from evidence_wiki.agent_execution import BoundedSubprocessExecutor
+    from tests._usage_fixture import require_reference_executor
+
+    require_reference_executor()
 
     selected, old, job = scoped()
     forged = job | {"task_role": "release"}

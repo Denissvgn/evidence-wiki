@@ -18,6 +18,8 @@ from tools._release_decision import canonical, digest
 
 def decision_run(tmp_path, monkeypatch, *, outcome="continue", report_change=None, receipt_change=None,
                  refusal=None, action="decide"):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     plan, _, pins, readers = fixture()
     report = gate.decide(plan, digest(plan), pins, digest(pins), readers, now=NOW)
     report["outcome"] = outcome

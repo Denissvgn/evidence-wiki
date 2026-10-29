@@ -76,6 +76,8 @@ def test_context_relabeling_and_shared_controller_are_rejected(profile):
 def test_public_unguarded_executor_cannot_send_readability_bytes(profile, monkeypatch, tmp_path):
     value = attempt(profile)
     selected = profile[1]
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     executor = BoundedSubprocessExecutor(selected, commands={}, environment={}, cwd=tmp_path, meter=None, receipt_key=b"r" * 32)
     monkeypatch.setattr(executor, "_invoke", lambda *_: pytest.fail("unguarded invocation entered"))
     with pytest.raises(ExecutionError, match="readability_guarded_handoff_required"):

@@ -128,6 +128,8 @@ def test_warm_digests_do_not_suppress_receipt_tampering_or_current_lease_refusal
 
 
 def test_warm_declared_hashes_do_not_admit_changed_scoped_input(tmp_path):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     profile,_job,_inputs,attempt = declared(JOB_V3)
     host = owner.BoundedSubprocessExecutor(profile,commands={},cwd=tmp_path,receipt_key=b'scoped-attempt-fixture-key-000000')
     receipt = host._envelope(attempt,sequence=1,started_utc=attempt.job['issued_utc'],details={

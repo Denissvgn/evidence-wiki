@@ -52,6 +52,8 @@ def test_custom_native_exception_class_names_are_not_exported():
 
 
 def frozen(tmp_path, monkeypatch, *, mode="limited", execution_profile=None):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     root = tmp_path / "study"
     root.mkdir(mode=0o700)
     reporter = tmp_path / "archival-reporter.py"
@@ -113,6 +115,8 @@ def test_current_runtime_config_mutation_is_rejected(tmp_path, monkeypatch):
 
 
 def registry_fixture(tmp_path, monkeypatch, *, changes=None, include_cleanup=True):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     plan, _, _, _ = fixture()
     root = tmp_path / "registry"
     root.mkdir(mode=0o700)

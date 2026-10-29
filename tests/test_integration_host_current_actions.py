@@ -24,6 +24,8 @@ def action_document(run_id="baseline", *, state="returned", result=True):
 
 
 def retain(path, raw):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(raw)
     path.chmod(0o600)

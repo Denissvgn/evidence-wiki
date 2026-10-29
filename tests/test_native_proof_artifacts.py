@@ -27,6 +27,8 @@ def payload():
 
 
 def retained(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     directory = tmp_path / "proof"
     value = payload()
     summary = write_artifact(value, directory)

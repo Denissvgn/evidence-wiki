@@ -15,6 +15,8 @@ from evidence_wiki.work_cycle_contracts import WorkProposal
 
 
 def test_finite_selections_reconstruct_modified_policy_without_stale_identity(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     example = Path(__file__).resolve().parents[1] / "examples/unattended-host"
     monkeypatch.syspath_prepend(str(example))
     recipe = importlib.import_module("finite_host")

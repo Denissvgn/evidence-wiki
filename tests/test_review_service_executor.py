@@ -22,6 +22,8 @@ from tests.test_workflow_contracts import job
 
 
 def configured(tmp_path, *, services=True, commands=None):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     roles = (ExecutionRole("producer", "host_worker", "producer-controller", "local", "prompt/v1"),
         ExecutionRole("review", "evaluator", "review-controller", "local", "prompt/v1"))
     registry = ExecutionRoleRegistry((ExecutionRoleScope("producer", "researcher", ("model",)),

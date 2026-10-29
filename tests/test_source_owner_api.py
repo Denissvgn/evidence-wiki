@@ -19,6 +19,8 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "workspace-template" / "scripts"
 
 @pytest.fixture
 def owners():
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     return (load_module("source_inventory_api", SCRIPTS / "source_inventory.py"),
             load_module("normalize_sources_api", SCRIPTS / "normalize_sources.py"))
 

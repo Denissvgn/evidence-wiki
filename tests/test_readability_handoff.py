@@ -26,6 +26,8 @@ from tests.test_readability_qualification import issued as issued
 
 @pytest.fixture
 def custody(issued, profile, monkeypatch, tmp_path):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     policy, selected, authority, record, configuration = issued
     brief, _packet, _binding = context()
     packet, binding = create(brief, context_id="guarded", order_seed=b"b" * 32)

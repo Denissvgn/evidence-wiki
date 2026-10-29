@@ -45,6 +45,8 @@ def large_records():
 
 
 def retained(tmp_path, records=None):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     records = large_records() if records is None else records
     originals = native_tools.OriginalResponses(tmp_path / "observations", journal_collection=True)
     pin = originals.append_records("run-authenticated", records)

@@ -20,6 +20,8 @@ from tools._release_decision import canonical, digest
 
 
 def scenario_fixture(monkeypatch, tmp_path, terminals, *, rejected=False, brief_errors=()):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     """Observe recipe continuation without native workloads or signing material."""
     monkeypatch.setattr(host, "candidate_manifest", lambda _: {"candidate": "fixed"})
     monkeypatch.setattr(cli, "candidate_manifest", host.candidate_manifest)
@@ -257,6 +259,8 @@ def test_mcp_borrowed_control_remains_usable_when_public_handler_raises(monkeypa
 
 def owner_fixture(monkeypatch, tmp_path, route="direct"):
     """Exercise adapter control flow without executing native workloads or keys."""
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     monkeypatch.setattr(cli, "candidate_manifest", lambda _: {"candidate": "fixed"})
     monkeypatch.setattr(cli, "host_identity", lambda route: {"route": route})
     plan = cli.reference_plan()

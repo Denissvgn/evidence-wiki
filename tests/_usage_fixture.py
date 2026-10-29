@@ -27,6 +27,18 @@ def require_bounded_inventory():
         raise SkipTest("this source fixture requires the bundled descriptor-based inventory producer")
 
 
+def require_reference_executor():
+    """The bundled reference executor owns POSIX process groups."""
+    if system_os.name != "posix":
+        raise SkipTest("the bundled reference executor requires POSIX process groups")
+
+
+def require_reference_storage():
+    """Reference observer artifacts retain their POSIX private-file contract."""
+    if system_os.name != "posix":
+        raise SkipTest("reference observer artifacts require POSIX private-file custody")
+
+
 class UsageFixture:
     def __init__(self, directory: Path, monkeypatch):
         require_host_storage()

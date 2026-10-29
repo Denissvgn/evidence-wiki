@@ -417,6 +417,8 @@ def test_provisioning_uses_the_same_exact_current_producer_guard(
 
 @pytest.fixture
 def completed_dispatch(tmp_path, monkeypatch, cohort, pin):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     """Real executor/child custody; journal-owner inputs are explicit stubs."""
     import subprocess
     import sys

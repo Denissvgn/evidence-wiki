@@ -127,6 +127,8 @@ def test_duplicate_console_options_and_stdio_calls_or_changed_target_refuse():
 
 @pytest.fixture
 def installed_python_binding(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     driver = tmp_path / "public_driver.py"
     literal = "print('owned driver')\n"
     driver.write_text(literal)

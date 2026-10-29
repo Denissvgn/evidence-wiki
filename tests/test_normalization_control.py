@@ -15,6 +15,8 @@ from tests.test_source_owner_api import SCRIPTS, workspace
 
 @pytest.fixture
 def owners():
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     return (load_module("inventory_control", SCRIPTS / "source_inventory.py"),
             load_module("normalization_control", SCRIPTS / "normalize_sources.py"))
 
