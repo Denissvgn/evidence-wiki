@@ -187,14 +187,14 @@ def test_owned_small_record_reuses_its_bounded_encoding_and_keeps_fresh_values(m
 
 
 def test_pure_record_codec_reuses_only_success_and_returns_fresh_values(codec_memo, monkeypatch):
-    original = codec.detached_record
+    original = codec._detached_record_bytes
     calls = []
 
     def observed(value):
         calls.append(None)
         return original(value)
 
-    monkeypatch.setattr(codec, "detached_record", observed)
+    monkeypatch.setattr(codec, "_detached_record_bytes", observed)
     record = memo_record()
     expected, first = codec._canonical_owned_record(record)
     first["data"]["result"]["claim_id"] = "caller mutation"
@@ -251,13 +251,13 @@ def test_record_memo_preserves_exact_types_cycles_and_alias_semantics(codec_memo
         record["data"]["right"] = record["data"]["left"]
         assert codec._record_codec_key(record) is None
         calls = []
-        original = codec.detached_record
+        original = codec._detached_record_bytes
 
         def observed(value):
             calls.append(None)
             return original(value)
 
-        monkeypatch.setattr(codec, "detached_record", observed)
+        monkeypatch.setattr(codec, "_detached_record_bytes", observed)
         assert codec.canonical_record(record) == expected
         assert calls == [None]
 
@@ -298,14 +298,14 @@ def test_record_memo_tracks_mutable_family_schema_contents(codec_memo, monkeypat
 
 
 def test_record_memo_does_not_store_a_result_after_midcall_generation_change(codec_memo, monkeypatch):
-    original = codec.detached_record
+    original = codec._detached_record_bytes
 
     def changing(value):
         result = original(value)
         monkeypatch.setattr(codec, "JOURNAL", "changed generation")
         return result
 
-    monkeypatch.setattr(codec, "detached_record", changing)
+    monkeypatch.setattr(codec, "_detached_record_bytes", changing)
     codec.canonical_record(memo_record())
     assert not codec_memo.entries
 
