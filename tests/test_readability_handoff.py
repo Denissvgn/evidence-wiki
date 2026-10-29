@@ -31,10 +31,10 @@ def custody(issued, profile, monkeypatch, tmp_path):
     packet, binding = create(brief, context_id="guarded", order_seed=b"b" * 32)
     supplied = {"purpose": "readability", "packet": packet}
     job = attempt(profile).job | {"id": "guarded", "context_id": "guarded", "packet_sha256": digest(supplied).removeprefix("sha256:"),
-        "issued_utc": NOW, "deadline_utc": (datetime.fromisoformat(NOW) + timedelta(seconds=30)).isoformat()}
+        "issued_utc": NOW, "deadline_utc": (datetime.fromisoformat(NOW.replace("Z", "+00:00")) + timedelta(seconds=30)).isoformat()}
     current = ExecutionAttempt.create(attempt_id="guarded", nonce="fixed", run_id="controlled", binding_id="bound",
         profile=selected, config_ref="readability", job=job, input_document=supplied)
-    clock = {"now": datetime.fromisoformat(NOW), "fault": None}
+    clock = {"now": datetime.fromisoformat(NOW.replace("Z", "+00:00")), "fault": None}
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -51,7 +51,7 @@ def custody(issued, profile, monkeypatch, tmp_path):
     session.execution = SimpleNamespace(profile=selected, executor=executor)
     monkeypatch.setattr(research_session, "ResearchSession", Session)
     monkeypatch.setattr(handoff, "datetime", Clock)
-    monkeypatch.setattr(handoff.native, "deadline", lambda *_: datetime.fromisoformat(NOW) + timedelta(seconds=60))
+    monkeypatch.setattr(handoff.native, "deadline", lambda *_: datetime.fromisoformat(NOW.replace("Z", "+00:00")) + timedelta(seconds=60))
     row = {"attempt": stored_attempt(current, selected), "purpose": "readability", "readability_parent": {
         "basis_id": job["basis_id"], "substance_sha256": binding["substance_sha256"], "binding": binding, "order_seed": (b"b" * 32).hex(), "sources": []}}
     journal = object.__new__(ResearchExecution)
@@ -77,7 +77,7 @@ def custody(issued, profile, monkeypatch, tmp_path):
         if clock["fault"] == "closing":
             raise UsageError("RESEARCH_RESOLUTION_REFUSED", "private closing", details={"reason": "resolution_readability_currency_changed"})
         if clock["fault"] == "final_clock":
-            clock["now"] = datetime.fromisoformat(job["deadline_utc"])
+            clock["now"] = datetime.fromisoformat(job["deadline_utc"].replace("Z", "+00:00"))
     monkeypatch.setattr(handoff, "_held_readability_input", held)
     from evidence_wiki.readability_reference import observe_domain
     domain = observe_domain(brief)
@@ -119,7 +119,7 @@ def test_actual_lease_captures_only_owned_failure_through_complete_manager_exit(
     if fault == "probe_expiry":
         clock["now"] += timedelta(seconds=20)
     if fault == "signed_expiry":
-        clock["now"] = datetime.fromisoformat(EXPIRY)
+        clock["now"] = datetime.fromisoformat(EXPIRY.replace("Z", "+00:00"))
         lease._wall_deadline = clock["now"] + timedelta(seconds=30)
         probe["observed_utc"] = (clock["now"] - timedelta(seconds=10)).isoformat()
         probe["expires_utc"] = (clock["now"] + timedelta(seconds=20)).isoformat()

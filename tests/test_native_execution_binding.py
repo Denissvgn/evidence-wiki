@@ -19,7 +19,7 @@ def extended_plan():
     selected = execution_policy("extended")
     plan["scope"].update(execution_policy=selected, execution_policy_sha256=digest(selected),
         native_run_seconds=14400, native_cleanup_recipe="owned-popen-groups/v2")
-    plan["expires_at"] = (datetime.fromisoformat(plan["frozen_at"]) + timedelta(seconds=21600)).isoformat()
+    plan["expires_at"] = (datetime.fromisoformat(plan["frozen_at"].replace("Z", "+00:00")) + timedelta(seconds=21600)).isoformat()
     for slot in plan["slots"]:
         slot["elapsed_cap_seconds"] = 1300
     return plan
@@ -39,7 +39,7 @@ def test_extended_study_freezes_exact_policy_and_independent_audit(tmp_path, mon
     assert plan["scope"]["native_cleanup_recipe"] == "owned-popen-groups/v2"
     assert {slot["elapsed_cap_seconds"] for slot in plan["slots"]} == {1300}
     assert len(plan["slots"]) == 9 and set(configs["audit"]["jobs"]) == {"scoped_mcp"}
-    assert datetime.fromisoformat(plan["expires_at"]) - datetime.fromisoformat(plan["frozen_at"]) == timedelta(hours=6)
+    assert datetime.fromisoformat(plan["expires_at"].replace("Z", "+00:00")) - datetime.fromisoformat(plan["frozen_at"].replace("Z", "+00:00")) == timedelta(hours=6)
 
 
 @pytest.mark.parametrize("change", [
@@ -50,7 +50,7 @@ def test_extended_study_freezes_exact_policy_and_independent_audit(tmp_path, mon
     lambda p: p["scope"].update(native_cleanup_recipe="owned-popen-groups/v1"),
     lambda p: p["slots"][0].update(elapsed_cap_seconds=1300.0),
     lambda p: p["slots"][0].update(elapsed_cap_seconds=1301),
-    lambda p: p.update(expires_at=(datetime.fromisoformat(p["expires_at"]) + timedelta(seconds=1)).isoformat()),
+    lambda p: p.update(expires_at=(datetime.fromisoformat(p["expires_at"].replace("Z", "+00:00")) + timedelta(seconds=1)).isoformat()),
     lambda p: p["scope"]["execution_policy"].update(witness_seconds=3600),
 ])
 def test_rehashed_policy_drift_is_rejected_by_plan_and_direct_readers(change):

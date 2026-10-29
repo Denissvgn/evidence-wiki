@@ -64,11 +64,14 @@ def test_isolated_loaders_share_only_digest_and_still_check_each_generation(tmp_
     instances = [loader(root, number) for number in range(5)]
     for instance in instances:
         for _ in range(10):
+            before = len(checked)
             value = instance.load_workspace_module(root, "leaf", host_context_bridge=host_context)
             assert value.VALUE == 1
+            assert len(checked) > before
+            assert all(item == checked[0] for item in checked[before:])
             value.VALUE = 99
     assert calls == [root.resolve()]
-    assert len(checked) == 50 and len({value for _, value in checked}) == 1
+    assert len({value for _, value in checked}) == 1
 
 
 def test_signature_and_digest_match_original_portable_owner(tmp_path, memo):

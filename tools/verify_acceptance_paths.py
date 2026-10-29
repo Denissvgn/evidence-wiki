@@ -105,7 +105,7 @@ def candidate_manifest(root):
         total += row["bytes"]
         if total > MAX_INPUT_BYTES or len(rows) >= MAX_FILES:
             raise ValueError("acceptance_capsule_byte_or_file_bound")
-        rows[str(path.relative_to(root))] = row
+        rows[path.relative_to(root).as_posix()] = row
     if "pyproject.toml" not in rows or not any(name.startswith("src/evidence_wiki/") for name in rows):
         raise ValueError("acceptance_candidate_inputs_missing")
     return rows

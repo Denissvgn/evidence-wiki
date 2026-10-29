@@ -116,11 +116,12 @@ def source_layout(root):
         builder.set_build_data_defaults(build_data)
         with builder.config.set_build_data(build_data):
             for member in builder.recurse_included_files():
-                safe_name(member.distribution_path)
+                distribution_path = Path(member.distribution_path).as_posix()
+                safe_name(distribution_path)
                 path = source_file(root, member.path)
-                if member.distribution_path in members:
+                if distribution_path in members:
                     raise ValueError("duplicate configured distribution target")
-                members[member.distribution_path] = path.relative_to(root).as_posix()
+                members[distribution_path] = path.relative_to(root).as_posix()
                 sources.add(path)
         if len(members) > MAX_MEMBERS:
             raise ValueError("candidate distribution file count exceeds bound")

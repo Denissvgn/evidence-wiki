@@ -120,7 +120,9 @@ def test_archive_membership_does_not_admit_same_version_stale_source(tmp_path):
 def test_frozen_runtime_matrix_requires_both_artifacts_in_every_exact_cell(tmp_path, defect):
     dist, reports = installation_reports(tmp_path)
     original = reports["wheel"]["qualification_runtime"]
-    alternate = {**original, "python_version": "3.14.7"}
+    major, minor, patch = original["python_version"].split(".")
+    alternate_version = f"{major}.{minor}.{int(patch) - 1 if int(patch) else 1}"
+    alternate = {**original, "python_version": alternate_version}
     required = [original, alternate]
     if defect != "missing_row":
         for kind in ("wheel", "sdist"):
@@ -129,7 +131,9 @@ def test_frozen_runtime_matrix_requires_both_artifacts_in_every_exact_cell(tmp_p
             other = copy.deepcopy(reports[kind])
             other["qualification_runtime"] = alternate
             other["checks"]["installed_" + kind]["public_installed"]["runtime"] = alternate
-            other["checks"]["installed_"+kind]["public_installed"]["marker_environment"].update(python_version="3.14",python_full_version="3.14.7",implementation_version="3.14.7")
+            other["checks"]["installed_"+kind]["public_installed"]["marker_environment"].update(
+                python_version=f"{major}.{minor}", python_full_version=alternate_version,
+                implementation_version=alternate_version)
             reports["other-" + kind] = other
     if defect == "duplicate":
         required.append(dict(original))

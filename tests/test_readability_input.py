@@ -97,7 +97,7 @@ def input_budget(monkeypatch):
         attempt=SimpleNamespace(attempt_id=aid, job={"deadline_utc": deadline}))
     monkeypatch.setattr(execution.native, "policy_observation", lambda *_: detached(observed))
     monkeypatch.setattr(execution.native, "execution_budget_overrun", lambda *_: False)
-    monkeypatch.setattr(execution.native, "deadline", lambda *_: datetime.fromisoformat(deadline))
+    monkeypatch.setattr(execution.native, "deadline", lambda *_: datetime.fromisoformat(deadline.replace("Z", "+00:00")))
     monkeypatch.setattr(execution, "_remaining", lambda *_: {"overrun": []})
     return session, admission, view, plan, observed
 
@@ -206,8 +206,10 @@ def test_private_owner_closes_fresh_inputs_and_never_exposes_public_resolution(c
         state["reads"] += 1
         changed = state["reads"] > 1 and drift == "source"
         yield SimpleNamespace(view=detached(fixture["current"]), records=resolution.native.retained(session),
-            packets=[{"revision": "changed" if changed else "original"}], observed=object())
+            packets=[{"revision": "changed" if changed else "original"}],
+            observed=SimpleNamespace(require=lambda *_: None))
     monkeypatch.setattr(resolution.native, "_current_facts", facts)
+    monkeypatch.setattr(resolution, "_journal_proof", lambda *_: {})
     monkeypatch.setattr(resolution.native, "policy_observation", lambda *_: fixture["policy_observation"])
     monkeypatch.setattr(resolution.native, "execution_budget_overrun", lambda *_: False)
     monkeypatch.setattr(resolution, "_InputPass", lambda *_a, **_k: object())
@@ -319,7 +321,7 @@ def test_report_qualification_uses_exact_application_probe_never_a_later_unrelat
     registry = CalibratedEvaluators([record], authority)
     brief, _packet, _binding = context()
     domain = observe_domain(brief)
-    now = datetime.fromisoformat(NOW)
+    now = datetime.fromisoformat(NOW.replace("Z", "+00:00"))
     class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -471,7 +473,7 @@ def test_private_dispatch_probe_reports_specific_domain_and_clock_refusals(custo
     if change == "domain":
         brief["limitations"].append("Changed field.")
     elif change == "expired":
-        clock["now"] = datetime.fromisoformat(lease._configuration.document()["probe"]["expires_utc"])
+        clock["now"] = datetime.fromisoformat(lease._configuration.document()["probe"]["expires_utc"].replace("Z", "+00:00"))
     else:
         clock["now"] -= timedelta(seconds=1)
     with lease._admission.custody(lease):
@@ -481,8 +483,18 @@ def test_private_dispatch_probe_reports_specific_domain_and_clock_refusals(custo
     assert lease.delivered_sha256 is None
 
 
+@pytest.fixture
+def lifecycle_scope(monkeypatch):
+    """Isolate lifecycle routing from the separately tested native input owner."""
+    from evidence_wiki import _review_dependency_inputs
+    @contextmanager
+    def scoped(_session):
+        yield
+    monkeypatch.setattr(_review_dependency_inputs, "bind_session", scoped)
+
+
 @pytest.mark.parametrize("existing", [False, True])
-def test_first_public_next_then_advance_initializes_normally_without_critic_preselection(monkeypatch, tmp_path, existing):
+def test_first_public_next_then_advance_initializes_normally_without_critic_preselection(monkeypatch, tmp_path, existing, lifecycle_scope):
     from evidence_wiki import review_packet_execution
     from evidence_wiki.research_session import ResearchSession
     session = object.__new__(ResearchSession)
@@ -527,7 +539,7 @@ def test_first_public_next_then_advance_initializes_normally_without_critic_pres
     assert not any(row["kind"] == "execution_attempt" for row in records)
 
 
-def test_stopped_initialized_run_keeps_normal_terminal_refusal(monkeypatch, tmp_path):
+def test_stopped_initialized_run_keeps_normal_terminal_refusal(monkeypatch, tmp_path, lifecycle_scope):
     from evidence_wiki import review_packet_execution
     from evidence_wiki.research_session import ResearchSession
     session = object.__new__(ResearchSession)
