@@ -270,7 +270,7 @@ def run_profile(args):
             context.mkdir()
             shutil.copyfile(bundle, context / "candidate.bundle")
             poppler = " poppler-utils" if args.profile == "linux-3.10" else ""
-            upgrade = " && .venv/bin/python -m pip install --upgrade pip" if args.profile != "packages" else ""
+            upgrade = " && .venv/bin/python -m pip install --upgrade pip"
             (context / "Dockerfile").write_text(
                 "FROM " + base + "\nRUN apt-get update && apt-get install -y --no-install-recommends git openssh-client" + poppler
                 + f" && rm -rf /var/lib/apt/lists/*\nRUN useradd -m -u {os.getuid()} runner && mkdir /candidate && chown runner /candidate\n"

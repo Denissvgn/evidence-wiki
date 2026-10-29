@@ -85,6 +85,8 @@ The interpreters must match the policy's exact patch versions. Profiles execute
 serially, retain failed attempts, and preserve the existing process and journey
 limits. A failed or partial full suite cannot be sealed. The package profile
 builds both distributions and completes each independent installed journey.
+Its build tools use upgraded pip; each installed provider is created in the
+validator's separate fresh environment, preserving the installed-code origin.
 Signing material is never mounted into a candidate container.
 
 After all profiles pass, seal the originals with an owner-held Ed25519 key

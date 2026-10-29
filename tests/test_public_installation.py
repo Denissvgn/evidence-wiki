@@ -116,6 +116,35 @@ def test_archive_membership_does_not_admit_same_version_stale_source(tmp_path):
         artifacts.check_archive_source_bytes(wheel, tmp_path / "unused.tar.gz", artifacts.source_identity())
 
 
+@pytest.mark.parametrize("damage", [None, "invented-github", "missing-sdist", "local-as-hosted", "local-run-id", "changed-source"])
+def test_local_installation_binding_keeps_both_source_bound_artifacts(tmp_path, damage):
+    dist, reports = installation_reports(tmp_path)
+    for row in reports.values():
+        row["workflow"] = dict.fromkeys(("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
+    if damage == "invented-github":
+        reports["wheel"]["workflow"]["GITHUB_SHA"] = "invented"
+    elif damage == "missing-sdist":
+        reports.pop("sdist")
+    elif damage == "changed-source":
+        reports["wheel"]["candidate_source"]["pyproject.toml"] = "0" * 64
+        reports["wheel"]["candidate_source_sha256"] = public.digest(reports["wheel"]["candidate_source"])
+    evidence = tmp_path / "reports"
+    save_reports(evidence, reports)
+    options = {"commit": "commit", "run_id": None, "provenance": "local"}
+    if damage == "local-as-hosted":
+        options.update(provenance="github", run_id="run")
+    elif damage == "local-run-id":
+        options["run_id"] = "invented"
+    if damage is None:
+        result = synthetic_verify(dist, evidence, **options)
+        assert result["status"] == "passed" and result["provenance"] == "local"
+        assert result["workflow"] is None and result["candidate_commit"] == "commit"
+        assert set(result["installations"]) == {"wheel", "sdist"}
+    else:
+        with pytest.raises(ValueError):
+            synthetic_verify(dist, evidence, **options)
+
+
 @pytest.mark.parametrize("defect", ["missing_row", "missing_sdist", "duplicate", "unexpected"])
 def test_frozen_runtime_matrix_requires_both_artifacts_in_every_exact_cell(tmp_path, defect):
     dist, reports = installation_reports(tmp_path)
