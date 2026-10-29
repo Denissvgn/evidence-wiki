@@ -9,6 +9,7 @@ from evidence_wiki import RunPolicy
 from evidence_wiki.run_policy import schemas
 from evidence_wiki.workflow_contracts import WorkflowContractError
 from tests._review_dependency_fixture import fixture_document
+from tests._script_loader import load_module
 from tests.test_extended_observer_consumers import pinned_recipe
 from tests.test_native_case_extended_policy import allocated
 from tests.test_prospective_control_ceiling import owner_completed as owner_completed
@@ -111,10 +112,8 @@ def test_long_native_selection_allocation_and_original_provisioning(tmp_path, mo
     seconds=allocation["fixture_budget"]["fixture_run_seconds"]
     assert seconds > 86400
     assert provisioning_window(selected["execution_policy"],allocation,seconds)[1] == allocation["authority_expires_at"]
-    import importlib.util
     support_path=workload.EXAMPLE/"support.py"
-    spec=importlib.util.spec_from_file_location("long_native_support",support_path)
-    support=importlib.util.module_from_spec(spec);spec.loader.exec_module(support)
+    support=load_module("long_native_support",support_path)
     for mode in ("legacy_full", "selective_reuse"):
         # Both modes share genuine authenticated allocation and exact policy budgets.
         mode_selected=copy.deepcopy(selected);mode_selected["mode"]=mode
@@ -155,11 +154,9 @@ def test_current_owner_schema_accepts_long_plan_and_old_exports_stay_closed():
 
 def test_long_run_policy_is_separate_and_closed(plan, monkeypatch):
     # Run policy construction has no native owner effects.
-    import importlib.util
     from pathlib import Path
     support_path=Path(__file__).resolve().parents[1]/"examples/unattended-host/support.py"
-    spec=importlib.util.spec_from_file_location("long_policy_support",support_path)
-    support=importlib.util.module_from_spec(spec);spec.loader.exec_module(support)
+    support=load_module("long_policy_support",support_path)
     monkeypatch.setattr("tools._execution_budget.provisioning_window",lambda *_:("start","end"))
     selected=binding()
     doc=workload._run_policy_document(support.policy,Path("/private/tmp/long-policy"),"Read sources",158159,execution_policy=selected["execution_policy"],allocation_binding=selected)

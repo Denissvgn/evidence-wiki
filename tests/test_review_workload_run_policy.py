@@ -1,12 +1,12 @@
 """Extended allocations retain the original fixture policy boundary."""
 
 import copy
-import importlib.util
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from evidence_wiki import RunPolicy
+from tests._script_loader import load_module
 from tests.test_selective_review_workload import cohort as _cohort_fixture
 from tests.test_selective_review_workload import pin as _pin_fixture
 from tools import _review_dependency_accounting as accounting
@@ -24,10 +24,7 @@ pin = _pin_fixture
 @pytest.fixture
 def real_policy():
     path = workload.EXAMPLE / "support.py"
-    spec = importlib.util.spec_from_file_location("fixture_policy_boundary", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.policy
+    return load_module("fixture_policy_boundary", path).policy
 
 
 @pytest.fixture
@@ -112,7 +109,8 @@ def test_real_formal_policy_supports_larger_exact_allocation_after_recipe_admiss
         elapsed_cap_seconds=legacy.allocation_seconds(caps, 24) + 2 * caps["global_close"])
     plan["host_identity_pin"] = workload.retain(tmp_path / "host.json", {"host_id": "direct"})
     recipe = {"formal_execution_policy": execution, "phase_caps": caps,
-        "review_producer_id": plan["review_producer_id"], "formal_application_policy": plan["formal_application_policy"],
+        "candidate_sha256": plan["candidate_sha256"], "review_producer_id": plan["review_producer_id"],
+        "formal_application_policy": plan["formal_application_policy"],
         "group_overhead_cap_seconds": 0}
     plan["measured_recipe_pin"] = workload.retain(tmp_path / "recipe.json", recipe)
     admitted = []

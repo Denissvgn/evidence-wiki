@@ -13,6 +13,23 @@ from tests._script_loader import load_isolated_module
 CORE = load_isolated_module("computation_runtime", Path(__file__).resolve().parents[1] / "workspace-template/scripts/_computation_runtime.py")
 
 
+def test_required_computation_keeps_its_initial_capture_through_closing(tmp_path, monkeypatch):
+    workspace(tmp_path, definition())
+    service = load_isolated_module("computation_service_capture", Path(__file__).resolve().parents[1]
+        / "workspace-template/scripts/_computation_service.py")
+    config = yaml.safe_load((tmp_path / "research.yml").read_bytes())
+    assert service.required(tmp_path, config)["status"] == "passed"
+    original = service.evaluate
+    def changed(root, **kwargs):
+        assert kwargs["capture"] is not None
+        (tmp_path / "unclassified.txt").write_text("Changed after the initial capture.\n")
+        return original(root, **kwargs)
+    monkeypatch.setattr(service, "evaluate", changed)
+    with pytest.raises(service.ScriptRefusal) as caught:
+        service.required(tmp_path, config)
+    assert caught.value.details["reason"] == "computation_inputs_changed"
+
+
 def test_lossless_record_aggregation_and_graph_trace(tmp_path):
     data = definition()
     data["graphs"]["worksheet"] = graph()

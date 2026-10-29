@@ -56,9 +56,11 @@ def run(project_root, operation="check", *, as_of=None, expected_result_id=None,
 
 
 def required(project_root, config, *, view=None):
+    capture = None
     if "computation" in config:
         try:
-            sibling("_computation_contract").validate_yaml(capture_workspace(Path(project_root).resolve()).files["research.yml"].decode("utf-8"))
+            capture = capture_workspace(Path(project_root).resolve())
+            sibling("_computation_contract").validate_yaml(capture.files["research.yml"].decode("utf-8"))
         except (Exception, SystemExit) as error:
             raise refusal(reason(error)) from None
     if config.get("computation") is None:
@@ -66,7 +68,7 @@ def required(project_root, config, *, view=None):
     try:
         if sibling("_computation_effects").pending(project_root):
             raise refusal("computation_recovery_required")
-        result = evaluate(project_root, config=config, view=view)
+        result = evaluate(project_root, config=config, capture=capture, view=view)
         if result["status"] != "passed":
             raise refusal("computation_invariants_failed")
         return result

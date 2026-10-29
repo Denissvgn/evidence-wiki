@@ -1316,7 +1316,7 @@ def check_qualified_packet(
             or isinstance(metadata, dict) and "codebase_intake_profile" in metadata
             or record.get("kind") == "codebase_architecture" and isinstance(settings, dict) and "intake_profile" in settings):
         return []
-    normalized_issues = load_workspace_module(_SCRIPT_DIR, "_qualified_packet").normalized_issues
+    normalized_issues = load_workspace_module(_SCRIPT_DIR, "_qualified_packet", cache=_CAPTURE_VALIDATION_MODULES).normalized_issues
     return [Violation(QUALIFIED_PACKET_INVALID, reason, field="qualified_context",
                       remediation="Redeliver an intact supported packet and re-normalize it under the current intake policy.")
             for reason in normalized_issues(project_root, config, record, frontmatter)]
@@ -1332,7 +1332,7 @@ def check_execution_evidence(
     if not (frontmatter.get("execution_evidence") is not None or record.get("kind") == "execution_evidence"
             or isinstance(metadata, dict) and "execution_profile" in metadata):
         return []
-    execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence")
+    execution = load_workspace_module(_SCRIPT_DIR, "_execution_evidence", cache=_CAPTURE_VALIDATION_MODULES)
     return [Violation(EXECUTION_EVIDENCE_INVALID, reason, field="execution_evidence",
                       remediation="Restore the complete original execution closure and normalize it again.")
             for reason in execution.normalized_issues(project_root, config, record, frontmatter)]
@@ -1348,7 +1348,7 @@ def check_market_evidence(
     if not (frontmatter.get("market_evidence") is not None or record.get("kind") == "market_evidence"
             or isinstance(metadata, dict) and "market_profile" in metadata):
         return []
-    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence")
+    market = load_workspace_module(_SCRIPT_DIR, "_market_evidence", cache=_CAPTURE_VALIDATION_MODULES)
     return [Violation(MARKET_EVIDENCE_INVALID, reason, field="market_evidence",
                       remediation="Restore the original bounded market delivery and regenerate its scalar view.")
             for reason in market.normalized_issues(project_root, config, record, frontmatter)]
@@ -1359,7 +1359,7 @@ def check_usage_evidence(
 ) -> list[Violation]:
     source_id = frontmatter.get("source_id")
     record = manifest_by_id.get(source_id, {}) if isinstance(source_id, str) else {}
-    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate")
+    usage = load_workspace_module(_SCRIPT_DIR, "_usage_gate", cache=_CAPTURE_VALIDATION_MODULES)
     return [Violation(USAGE_EVIDENCE_INVALID, reason, field="usage_revision_id",
                       remediation="Restore current host authorization and the exact approved normalized bytes.")
             for reason in usage.normalized_issues(project_root, config, record, frontmatter)]

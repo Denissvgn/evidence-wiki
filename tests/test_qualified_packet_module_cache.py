@@ -14,6 +14,54 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "workspace-template/scripts"
 
 
 @pytest.mark.parametrize("scripts", [SCRIPTS, SCRIPTS.parents[1] / "examples/urban-heat-resilience-workspace/scripts"])
+def test_normalized_module_reuse_rechecks_original_packet_and_policy(tmp_path, monkeypatch, scripts):
+    normalizer = load_isolated_module("cached_normalized_packet", scripts / "_normalized_contract.py")
+    normalizer._CAPTURE_VALIDATION_MODULES.clear()
+    loaded = []
+    original = normalizer.load_workspace_module
+    def observe(root, stem, **kwargs):
+        module = original(root, stem, **kwargs)
+        if stem == "_qualified_packet":
+            loaded.append(module)
+        return module
+    monkeypatch.setattr(normalizer, "load_workspace_module", observe)
+    config, record, folder = delivery(tmp_path, next(iter(sorted(FIXTURES.glob("*.json")))).read_bytes())
+    packet = original(scripts, "_qualified_packet", cache=normalizer._CAPTURE_VALIDATION_MODULES)
+    report = packet.inspect_packet(tmp_path, config, record)
+    normalized = {"source_id": SOURCE_ID, "qualified_context": report}
+    def reasons(selected_config, selected_record):
+        return [row.message for row in normalizer.check_qualified_packet(
+            tmp_path, selected_config, {SOURCE_ID: selected_record}, normalized)]
+    assert reasons(config, record) == []
+    changed = copy.deepcopy(record)
+    changed["metadata"]["codebase_intake_profile"] = "unsupported"
+    assert reasons(config, changed)
+    (folder / "packet.json").write_bytes(b"changed original")
+    assert "packet_normalized_binding_mismatch" in reasons(config, record)
+    assert loaded and all(module is packet for module in loaded)
+
+
+def test_normalized_usage_module_reuse_does_not_reuse_input_eligibility(monkeypatch):
+    normalizer = load_isolated_module("cached_normalized_usage", SCRIPTS / "_normalized_contract.py")
+    normalizer._CAPTURE_VALIDATION_MODULES.clear()
+    loaded = []
+    original = normalizer.load_workspace_module
+    def observe(root, stem, **kwargs):
+        module = original(root, stem, **kwargs)
+        loaded.append(module)
+        return module
+    monkeypatch.setattr(normalizer, "load_workspace_module", observe)
+    records = {SOURCE_ID: {"id": SOURCE_ID}}
+    normalized = {"source_id": SOURCE_ID}
+    assert normalizer.check_usage_evidence(None, {}, records, normalized) == []
+    changed = dict(normalized, retrieval_eligible=True)
+    refused = normalizer.check_usage_evidence(None, {}, records, changed)
+    assert refused and all(row.code == normalizer.USAGE_EVIDENCE_INVALID for row in refused)
+    assert normalizer.check_usage_evidence(None, {}, records, normalized) == []
+    assert len(loaded) == 3 and all(module is loaded[0] for module in loaded)
+
+
+@pytest.mark.parametrize("scripts", [SCRIPTS, SCRIPTS.parents[1] / "examples/urban-heat-resilience-workspace/scripts"])
 def test_policy_reuses_module_but_rechecks_delivery_and_policy(tmp_path, monkeypatch, scripts):
     policies = load_isolated_module("cached_packet_policy", scripts / "_evidence_policies.py")
     policies._QUALIFIED_PACKET_CACHE.clear()
