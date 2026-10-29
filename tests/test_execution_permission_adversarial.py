@@ -14,7 +14,7 @@ from evidence_wiki.agent_execution import ExecutionAttempt, ExecutionProfile, Ex
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.research_session_contracts import STEP_V2
 from evidence_wiki.run_policy import RunPolicy
-from tests.test_run_policy_scope import DIGEST, native_policy_document, owner_observation
+from tests.test_run_policy_scope import DIGEST, NATIVE_SOURCE, native_policy_document, owner_observation
 from tests.test_workflow_contracts import job as reference_job
 
 
@@ -41,7 +41,7 @@ def isolated_boundaries(monkeypatch, policy, *, steps_used=0, steps_limit=8):
             "canonical_release": {"publication": None}, "authority": {"terminal_grants_available": True}, "usage": {**owner_observation(policy)["spent"], "claims": 0},
             "execution": {"steps_used": steps_used, "steps_limit": steps_limit, "pending": None,
                           "accounting": {"overrun": [], "usage_unknown": False},
-                          "source_bindings": [{"source_id": "captured-source", "extent_ref": "/workspace/raw/measurements.txt", "closure_id": DIGEST}]}}
+                          "source_bindings": [{"source_id": "captured-source", "extent_ref": NATIVE_SOURCE, "closure_id": DIGEST}]}}
     session = SimpleNamespace(policy=policy, run_id="controlled-run", root="/workspace", binding={},
                               context=SimpleNamespace(require_grant=lambda _grant: None),
                               execution=SimpleNamespace(profile=SimpleNamespace(total_steps=steps_limit, review_services=None, input_handoff=None, disagreement=None, calibration=None), ledger=lambda *_args: None))

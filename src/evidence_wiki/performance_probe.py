@@ -1,9 +1,7 @@
 """Fresh-interpreter native codec measurements over synthetic bounded fixtures."""
 
 import hashlib
-import platform
 import random
-import resource
 import sys
 import time
 import tracemalloc
@@ -14,6 +12,37 @@ from .pack_discovery import owner
 from .performance_contracts import limits, partition
 from .research_session_contracts import refuse
 from .review_packet_contracts import schema_document, validate
+
+
+def _process_peak_rss_bytes():
+    if sys.platform == "win32":
+        import ctypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [("cb", ctypes.c_uint32), ("PageFaultCount", ctypes.c_uint32),
+                *[(name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize",
+                    "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                    "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]]
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.argtypes = []
+        kernel.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(ProcessMemoryCounters), ctypes.c_uint32]
+        kernel.K32GetProcessMemoryInfo.restype = ctypes.c_int
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(counters)
+        if not kernel.K32GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+            raise ctypes.WinError(ctypes.get_last_error())
+        rss = counters.PeakWorkingSetSize
+    else:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform != "darwin":
+            rss *= 1024
+    if type(rss) is not int or rss <= 0:
+        raise OSError("Process peak resident memory is unavailable")
+    return rss
 
 
 def stub(schema):
@@ -111,9 +140,9 @@ def run(row):
         samples.append({"state": state, "revision": max(0, index-1), "construction_seconds": construction,
             "validation_seconds": elapsed, "serialization_seconds": serialized, "serialized_bytes": len(raw),
             "traced_peak_bytes": peak, "input_sha256": "sha256:"+hashlib.sha256(raw).hexdigest(), "outcome": outcome, "refusal": reason})
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss = _process_peak_rss_bytes()
     return {"workload_id": row["workload_id"], "samples": samples, "complete": all(sample["outcome"] != "unknown" for sample in samples), "truncated": False,
-        "probe_wall_seconds": time.perf_counter()-started, "process_peak_rss_bytes": rss if platform.system() == "Darwin" else rss*1024,
+        "probe_wall_seconds": time.perf_counter()-started, "process_peak_rss_bytes": rss,
         "memory_scope": "per-call Python tracemalloc peak; child-process RSS high-water",
         "cache_scope": "fresh interpreter and descriptor validation before first call; same-process warm/update calls", "partition": partition(row)}
 

@@ -2098,6 +2098,7 @@ def validate_distributions(args, summary, scratch):
     wheel, sdist = find_artifacts(args.dist_dir.resolve())
     checks: dict[str, object] = {}
     layout, source_files = source_layout(REPO_ROOT)
+    expected_version = args.expected_version or layout["project"]["version"]
     check_review_producer_inventory(REPO_ROOT, layout)
     source = source_identity(source_files)
     expectations = qualification_expectations(layout)
@@ -2108,7 +2109,7 @@ def validate_distributions(args, summary, scratch):
     summary.update({
         "wheel": {"name": wheel.name, "sha256": sha256_of(wheel)},
         "sdist": {"name": sdist.name, "sha256": sha256_of(sdist)},
-        "expected_version": args.expected_version,
+        "expected_version": expected_version,
         "artifact": args.artifact,
         "validation_inputs": validation_identity(),
         "candidate_source": source,
@@ -2131,7 +2132,7 @@ def validate_distributions(args, summary, scratch):
             wheel_scratch = scratch / "wheel"
             wheel_scratch.mkdir()
             checks["installed_wheel"] = validate_installed(
-                create_venv_with_wheel(wheel_scratch, wheel), wheel_scratch, args.expected_version, "wheel"
+                create_venv_with_wheel(wheel_scratch, wheel), wheel_scratch, expected_version, "wheel"
             )
             _RUNNER.event("passed", "installed-wheel")
         if args.artifact in {"both", "sdist"}:
@@ -2151,7 +2152,7 @@ def validate_distributions(args, summary, scratch):
                 )
             check_archive_source_bytes(rebuilt, sdist, source, layout)
             checks["installed_sdist"] = validate_installed(
-                create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, args.expected_version, "sdist"
+                create_venv_with_wheel(sdist_scratch, rebuilt), sdist_scratch, expected_version, "sdist"
             )
             checks["installed_sdist"]["rebuilt_wheel_sha256"] = sha256_of(rebuilt)
             _RUNNER.event("passed", "installed-sdist")

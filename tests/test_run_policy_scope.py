@@ -2,6 +2,7 @@
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,7 @@ from evidence_wiki.workflow_contracts import WorkflowContractError
 
 FLAGS = ("source_current", "source_present", "mechanical_pass", "review_pass", "qualified", "context_complete")
 DIGEST = "sha256:" + "a" * 64
+NATIVE_SOURCE = str(Path(__file__).resolve().parent / "native-workspace" / "raw" / "measurements.txt")
 
 
 def native_policy_document():
@@ -31,7 +33,7 @@ def native_policy_document():
         "objective": "Compare the exact original local measurements.",
         "scope": {
             "question_ids": ["original-one", "original-two"],
-            "source_scope": ["/workspace/raw/measurements.txt"],
+            "source_scope": [NATIVE_SOURCE],
             "source_scope_kind": "native_extent",
         },
         "allowed_effects": list(EFFECTS),
@@ -79,7 +81,7 @@ def owner_observation(policy):
                         "critical_false_acceptances": 0, "positive_acceptance": "0.90", "meaning_preserving_flip": "0.05"}],
         "spent": {"seconds": 0.125, "model_calls": 0, "tool_calls": 1, "tokens": 0, "cost_limit": "0",
                   "claims": 1, "sources": 1, "repair_cycles": 0, "adjudication_cycles": 0, "retry_attempts": 0, "acquisition_attempts": 0},
-        "source_bindings": [{"source_id": "captured-source", "extent_ref": "/workspace/raw/measurements.txt", "closure_id": DIGEST}],
+        "source_bindings": [{"source_id": "captured-source", "extent_ref": NATIVE_SOURCE, "closure_id": DIGEST}],
     }
 
 
@@ -118,10 +120,11 @@ def test_native_mapping_preserves_partial_original_accounting_and_frozen_identit
     assert result["authorized"] is False and result["evidence_accepted"] is False
     assert observation == retained
     assert RunPolicy.from_json(policy.to_json()).to_dict() == policy.to_dict()
-    document["scope"]["source_scope"].append("/workspace/raw/extra.txt")
-    assert policy.to_dict()["scope"]["source_scope"] == ["/workspace/raw/measurements.txt"]
+    extra = str(Path(NATIVE_SOURCE).with_name("extra.txt"))
+    document["scope"]["source_scope"].append(extra)
+    assert policy.to_dict()["scope"]["source_scope"] == [NATIVE_SOURCE]
     changed = policy.to_dict()
-    changed["scope"]["source_scope"] = ["/workspace/raw/extra.txt"]
+    changed["scope"]["source_scope"] = [extra]
     with pytest.raises(WorkflowContractError) as error:
         RunPolicy(changed)
     assert error.value.error_code == "RUN_POLICY_IDENTITY_MISMATCH"
@@ -129,7 +132,8 @@ def test_native_mapping_preserves_partial_original_accounting_and_frozen_identit
     assert RunPolicy(changed).decide(observation)["reason"] == "policy_binding"
 
 
-@pytest.mark.parametrize("extent", ["measurements.txt", "file:///workspace/raw/measurements.txt", "/workspace/raw/../secret.txt"])
+@pytest.mark.parametrize("extent", ["measurements.txt", "file:///workspace/raw/measurements.txt", str(Path(NATIVE_SOURCE).parent / ".." / "secret.txt")],
+    ids=["relative", "url", "traversal"])
 def test_native_policy_requires_absolute_nontraversing_extents(extent):
     document = native_policy_document()
     document["scope"]["source_scope"] = [extent]
@@ -146,7 +150,7 @@ def test_selected_source_requires_unique_mapping_to_the_exact_frozen_extent(muta
     elif mutation == "foreign_identity":
         observation["selected_outcomes"][0]["source_refs"] = ["foreign-source"]
     elif mutation == "permission_as_identity":
-        observation["selected_outcomes"][0]["source_refs"] = ["/workspace/raw/measurements.txt"]
+        observation["selected_outcomes"][0]["source_refs"] = [NATIVE_SOURCE]
     elif mutation == "changed_extent":
         observation["source_bindings"][0]["extent_ref"] += "/child"
     else:

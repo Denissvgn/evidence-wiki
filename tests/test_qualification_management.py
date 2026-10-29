@@ -831,6 +831,39 @@ def test_single_artifact_and_timeout_options_are_explicit():
         artifacts.parse_args(["--artifact", "sdist", "--skip-sdist"])
 
 
+@pytest.mark.parametrize("requested", [None, "", "9.9.9"])
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_installation_version_binds_defaults_to_candidate_source(tmp_path, monkeypatch, requested, artifact):
+    wheel, sdist = tmp_path/'candidate.whl', tmp_path/'candidate.tar.gz'
+    layout = {"project": {"version": "1.2.3"}}
+    monkeypatch.setattr(artifacts, 'find_artifacts', lambda path: (wheel, sdist))
+    monkeypatch.setattr(artifacts, 'source_layout', lambda root: (layout, set()))
+    monkeypatch.setattr(artifacts, 'source_identity', lambda files: {})
+    monkeypatch.setattr(artifacts, 'check_review_producer_inventory', lambda *args: None)
+    monkeypatch.setattr(artifacts, 'qualification_expectations', lambda layout: {})
+    monkeypatch.setattr(artifacts, 'validation_identity', lambda: {})
+    monkeypatch.setattr(artifacts, 'sha256_of', lambda path: 'a'*64)
+    monkeypatch.setattr(artifacts, 'check_archive_membership', lambda *args: {})
+    monkeypatch.setattr(artifacts, 'check_archive_source_bytes', lambda *args: {})
+    monkeypatch.setattr(artifacts, 'run', lambda *args, **kwargs: json.dumps({'runtime': {}, 'markers': {}}))
+    monkeypatch.setattr(artifacts, 'create_venv_with_wheel', lambda *args: tmp_path/'environment')
+    monkeypatch.setattr(artifacts, 'build_wheel_from_sdist', lambda *args: wheel)
+    monkeypatch.setattr(artifacts, 'wheel_members', lambda path: ['package.py'])
+    expected = requested or layout['project']['version']
+
+    def installed(environment, scratch, version, label):
+        assert label == artifact and version == expected
+        raise RuntimeError('Version-bound installation reached')
+
+    monkeypatch.setattr(artifacts, 'validate_installed', installed)
+    args = SimpleNamespace(dist_dir=tmp_path, expected_version=requested, artifact=artifact,
+        python=sys.executable, membership_only=False)
+    summary = {}
+    with pytest.raises(RuntimeError, match='Version-bound installation reached'):
+        artifacts.validate_distributions(args, summary, tmp_path)
+    assert summary['expected_version'] == expected
+
+
 @pytest.mark.parametrize("defect", [None, "missing-version", "different-report-version", "different-requested-version"])
 def test_release_reports_promote_only_the_explicitly_qualified_version(tmp_path, monkeypatch, defect):
     dist, reports = installation_reports(tmp_path)
