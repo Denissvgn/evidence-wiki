@@ -94,6 +94,8 @@ def example(monkeypatch):
 
 @pytest.mark.parametrize("extended", [False, True])
 def test_fixture_shared_authority_covers_trust_usage_authentication_and_services(tmp_path, monkeypatch, extended):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     fixture, finite = example(monkeypatch)
     base = tmp_path / "fixture"
     root = base / "workspace"

@@ -9,6 +9,8 @@ SCRIPT = "source_inventory.py"
 
 
 def cases(workspace: Path):
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     root = local_workspace(workspace.parent / "inventory-local")
     missing = workspace.parent / "inventory-missing"
     missing.mkdir()

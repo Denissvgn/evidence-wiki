@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tree(tmp_path):
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     package = tmp_path / "evidence_wiki"
     package.mkdir()
     (package / "owner.py").write_bytes(b"value = 1\n")
@@ -167,10 +169,13 @@ def _isolated(code):
 def test_import_baseline_preserves_lazy_public_exports():
     output = _isolated("import evidence_wiki, sys; print('evidence_wiki.workspace' in sys.modules); "
                        "print(evidence_wiki._review_producer_owner._PACKAGE_BASELINE is not None)")
-    assert output.splitlines() == ["False", "True"]
+    supported = os.open in os.supports_dir_fd and os.scandir in os.supports_fd and hasattr(os, "O_NOFOLLOW")
+    assert output.splitlines() == ["False", str(supported)]
 
 
 def test_bound_producer_documents_are_detached_and_legacy_identity_agrees():
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     output = _isolated('''from evidence_wiki import host_context, _script_host
 with host_context.review_producer_binding() as generation:
     document = generation.document()
@@ -185,6 +190,8 @@ print("passed")
 
 
 def test_live_generation_refuses_replacement_of_the_actual_loader_module():
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     output = _isolated('''from evidence_wiki import _review_producer as producer, _script_host
 generation = producer.capture()
 _script_host._LOADER_MODULE_CACHE.clear()
@@ -199,6 +206,8 @@ else:
 
 
 def test_live_generation_pins_native_module_lifetime_and_refuses_cache_eviction():
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     output = _isolated('''import gc, weakref
 from evidence_wiki import _review_producer as producer, _script_host
 native = _script_host.load_packaged_script(_script_host.shared_assets_root(), "_strict_contract")
@@ -220,6 +229,8 @@ else:
 
 
 def test_actual_owned_membership_mutation_refuses_closing_capture(tmp_path):
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     copied = tmp_path / "source"
     import shutil
 
@@ -242,6 +253,8 @@ else:
 
 
 def test_complete_logical_identity_matches_source_and_installed_layouts(tmp_path):
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     import shutil
 
     source_id = _isolated("from evidence_wiki import _review_producer as p; print(p.capture().producer_id)").strip()
@@ -258,6 +271,8 @@ def test_complete_logical_identity_matches_source_and_installed_layouts(tmp_path
 
 
 def test_non_python_owned_changes_after_import_refuse_first_capture(tmp_path):
+    from tests._usage_fixture import require_bounded_inventory
+    require_bounded_inventory()
     import shutil
 
     installation = tmp_path / "installation"

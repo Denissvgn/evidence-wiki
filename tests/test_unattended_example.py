@@ -16,6 +16,8 @@ EXAMPLE = ROOT/'examples/unattended-host'
 
 @pytest.fixture(scope='module')
 def installed(tmp_path_factory):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     directory = tmp_path_factory.mktemp('unattended-wheel')
     wheels = directory/'wheels';wheels.mkdir()
     build = subprocess.run([sys.executable,'-m','build','--wheel','--no-isolation','--outdir',str(wheels)],

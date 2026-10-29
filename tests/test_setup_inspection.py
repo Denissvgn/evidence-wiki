@@ -49,7 +49,7 @@ def test_partial_existing_hierarchy_stays_unchanged_when_journal_is_absent(plan,
     path = store.root
     for name in (".evidence-wiki", "setup", "targets", store.path.name)[:levels]:
         path /= name
-        path.mkdir(mode=0o700)
+        module.os.mkdir(path, mode=0o700)
     before = {child.relative_to(store.root).as_posix() for child in store.root.rglob("*")}
     with store.inspected():
         assert store.transaction is None and store.transaction_id is None and store.transaction_path is None
@@ -95,7 +95,7 @@ def test_transaction_scan_consumes_only_first_two_entries_before_refusal(plan, m
     _checkpoint, path = seed(plan)
     parent = path.parent
     for index in range(100):
-        (parent / f"{index:032x}").mkdir(mode=0o700, exist_ok=True)
+        module.os.makedirs(parent / f"{index:032x}", mode=0o700, exist_ok=True)
     original = module.os.scandir
     observed = []
     class Bounded:
@@ -124,11 +124,11 @@ def test_linked_or_nonprivate_custody_refuses_without_effect(plan, tmp_path, art
     selected = path.parent.parent / artifact if artifact == "setup.lock" else path if artifact == "transaction" else path / artifact
     before = files(SetupStore(plan).root)
     if kind == "permission":
-        selected.chmod(0o755 if selected.is_dir() else 0o644)
+        module.os.chmod(selected, 0o755 if selected.is_dir() else 0o644)
     else:
         outside = tmp_path / "outside-marker"
         if selected.is_dir():
-            outside.mkdir(mode=0o700)
+            module.os.mkdir(outside, mode=0o700)
             selected.rename(selected.with_name(selected.name + "-retained"))
         else:
             outside.write_bytes(b"preserve-outside")
@@ -144,14 +144,14 @@ def test_hardlinked_existing_record_and_missing_existing_lock_refuse(plan, tmp_p
     _checkpoint, path = seed(plan)
     outside = tmp_path / "outside"
     outside.write_bytes((path / "plan.json").read_bytes())
-    outside.chmod(0o600)
+    module.os.chmod(outside, 0o600)
     (path / "plan.json").unlink()
     (path / "plan.json").hardlink_to(outside)
     with pytest.raises(EvidenceWikiError), SetupStore(plan).inspected():
         pass
     (path / "plan.json").unlink()
     (path / "plan.json").write_bytes(canonical(plan))
-    (path / "plan.json").chmod(0o600)
+    module.os.chmod(path / "plan.json", 0o600)
     (path.parent.parent / "setup.lock").unlink()
     with pytest.raises(EvidenceWikiError) as error, SetupStore(plan).inspected():
         pass

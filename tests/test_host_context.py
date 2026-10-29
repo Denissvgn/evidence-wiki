@@ -20,6 +20,7 @@ import pytest
 from evidence_wiki import Onboarding, Workspace, _script_host
 from evidence_wiki import host_context as bridge
 from evidence_wiki._facades._base import call_seam
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.errors import ConfigError
 from evidence_wiki.host_context import HostContext, checked_operation
 
@@ -54,9 +55,9 @@ def selections(tmp_path):
         (root / "research.yml").write_text("{}\n")
         authority = tmp_path / (name + "-authority.json")
         authority.write_bytes(name.encode())
-        authority.chmod(0o600)
+        native_os.chmod(authority, 0o600)
         state = tmp_path / (name + "-state")
-        state.mkdir(mode=0o700)
+        native_os.mkdir(state, mode=0o700)
         values.append((root, authority, state))
     return values
 

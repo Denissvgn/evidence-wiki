@@ -788,8 +788,8 @@ def test_candidate_close_rejects_source_changes(monkeypatch):
 
 
 @pytest.fixture
-def pin(tmp_path):
-    return {"path": str(tmp_path / "original.json"), "raw_sha256": "a" * 64, "size_bytes": 1}
+def pin():
+    return {"path": "/fixture/original.json", "raw_sha256": "a" * 64, "size_bytes": 1}
 
 
 @pytest.fixture
@@ -926,6 +926,8 @@ def test_legacy_cli_and_allocation_routes_keep_their_closed_versions():
 
 
 def test_offline_report_values_cannot_mint_native_comparison_credit(cohort, pin, tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     from tools._review_dependency_workload import OriginalResponses
     selective_plan, pair = cohort
     legacy_plan = copy.deepcopy(selective_plan)

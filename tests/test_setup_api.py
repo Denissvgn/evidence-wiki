@@ -6,6 +6,7 @@ import os
 import pytest
 
 from evidence_wiki import Onboarding
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
@@ -115,11 +116,11 @@ def test_incomplete_prepare_terminal_and_process_exit_or_closed_handle_contained
 def test_protected_selection_refuses_before_journal_and_workspace_effect(tmp_path, selection):
     selected, protected = tmp_path / "selected", tmp_path / "protected"
     selected.mkdir()
-    protected.mkdir(mode=0o700)
+    native_os.mkdir(protected, mode=0o700)
     value = protected / "authority.json" if selection == "authority_file" else protected
     if selection == "authority_file":
         value.write_text("{}")
-        value.chmod(0o600)
+        native_os.chmod(value, 0o600)
     with context(selected, **{selection: value}).activate(), Onboarding.open(allowed_roots=[selected], allow=["apply"]) as handle:
         plan = prepare(handle, selected)
         before = files(tmp_path)

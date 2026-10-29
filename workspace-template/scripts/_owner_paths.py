@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import stat
 from pathlib import Path
 
@@ -77,7 +78,9 @@ def checked_path(project_root: str | Path, value: str | Path, *, field: str = "p
             if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                 _refuse("workspace_path_changed", field)
         return path
-    except (OSError, ValueError, RuntimeError, TypeError):
+    except OSError as error:
+        _refuse("workspace_path_link" if error.errno == errno.ELOOP else "workspace_path_unavailable", field)
+    except (ValueError, RuntimeError, TypeError):
         _refuse("workspace_path_unavailable", field)
     finally:
         for descriptor in reversed(descriptors):

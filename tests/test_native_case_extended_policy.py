@@ -232,6 +232,8 @@ def test_provision_rejects_fixture_mismatch_before_any_owner_side_effect(selecte
 
 
 def test_new_index_shard_binding_and_legacy_bytes_stay_separate(selected, tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     selection, _recipe = selected
     report, source = case_evidence_report()
     legacy_pin = evidence.write_index(tmp_path / "legacy", report, source_before=source, source_after=source, refresh=False)
@@ -344,6 +346,8 @@ def test_actual_preflight_selector_keeps_native_and_formal_journals_separate(sel
 
 @pytest.mark.parametrize("expire_at", [None, "index"])
 def test_parent_uses_one_run_timer_through_shard_reads_and_reserved_terminal_phases(selected, tmp_path, monkeypatch, expire_at):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     from tools import _review_dependency_cases as cases
     from tools.decide_release import _HostDeadline
     selection, _recipe = selected
@@ -417,6 +421,8 @@ def test_parent_uses_one_run_timer_through_shard_reads_and_reserved_terminal_pha
 
 
 def test_single_fixture_late_timer_exit_marks_failed_before_finalization(selected, tmp_path, monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     from contextlib import contextmanager
 
     from tools import _review_dependency_cases as cases
@@ -467,6 +473,8 @@ def test_single_fixture_late_timer_exit_marks_failed_before_finalization(selecte
 
 
 def test_expired_run_cannot_restart_and_terminal_timeout_drops_live_completion(selected, tmp_path, monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     from tools import _review_dependency_cases as cases
     from tools.decide_release import _HostDeadline
     selection, _recipe = selected
@@ -542,6 +550,8 @@ def test_cleanup_reserves_existing_60_seconds_without_changing_measured_caps(sel
 
 @pytest.mark.parametrize("unblocked_receiver", [False, True])
 def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_overrun(selected, tmp_path, monkeypatch, unblocked_receiver):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     import signal
     import threading
     import time
@@ -596,6 +606,8 @@ def test_pending_timeout_finishes_finite_owned_cleanup_then_retains_unqualified_
 
 
 def test_already_expired_terminal_phase_still_closes_owned_children_once(selected, tmp_path, monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     import signal
     import time
 
@@ -622,6 +634,8 @@ def test_already_expired_terminal_phase_still_closes_owned_children_once(selecte
 
 
 def test_finalization_timeout_unpublishes_completed_summary_and_preserves_originals(selected, tmp_path, monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     from tools import _review_dependency_cases as cases
     from tools.decide_release import _HostDeadline
     selection, _recipe = selected
@@ -654,6 +668,8 @@ def test_finalization_timeout_unpublishes_completed_summary_and_preserves_origin
 
 
 def test_oversized_terminal_report_uses_bounded_failed_summary_after_unpublishing(selected, tmp_path):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     from tools import _review_dependency_cases as cases
     selection, _recipe = selected
     index = tmp_path / "case-evidence/index.json"

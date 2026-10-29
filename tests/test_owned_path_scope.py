@@ -1,10 +1,32 @@
 """Workspace configuration and actual descendant paths stay within owner scope."""
 
+import errno
+
 import pytest
 
 from evidence_wiki import Workspace
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
+
+
+@pytest.mark.parametrize("native_error,reason", [(errno.ELOOP, "workspace_path_link"), (errno.EACCES, "workspace_path_unavailable")])
+def test_native_component_refusal_preserves_link_classification(tmp_path, monkeypatch, native_error, reason):
+    from evidence_wiki._script_host import load_packaged_script, shared_assets_root
+
+    helper = load_packaged_script(shared_assets_root(), "_owner_paths")
+    original = helper.os.stat
+
+    def observe(path, *, dir_fd=None, **kwargs):
+        if path == "custom" and dir_fd is not None:
+            raise OSError(native_error, "Native component refusal")
+        return original(path, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(helper.os, "stat", observe)
+    with pytest.raises(Exception) as refused:
+        helper.checked_path(tmp_path, "custom/input.json", kind="file")
+    assert refused.value.error_code == "WORKSPACE_PATH_REFUSED"
+    assert refused.value.details["reason"] == reason
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("operation", ["request", "coverage"])

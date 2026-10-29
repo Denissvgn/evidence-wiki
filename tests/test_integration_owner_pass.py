@@ -35,6 +35,8 @@ def encoded_group(request, natives):
 
 def fake_launch(monkeypatch, commands):
     """Spawn bounded Python emitters; never invoke a native host or factory."""
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     processes = []
     def launch(request):
         code = commands[request["host_id"]]
@@ -335,6 +337,8 @@ def test_default_generic_reading_remains_serial_without_callback():
 
 
 def test_actual_launch_uses_fixed_argv_and_private_bounded_input(monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     request = {"small": "selection"}
     seen = {}
     class Output:
@@ -417,6 +421,8 @@ def test_nonzero_worker_cannot_qualify_its_positive_frames(monkeypatch):
 
 
 def test_signal_during_spawn_is_delivered_only_after_owned_tracking(monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     plan, _, _, _ = fixture()
     request = request_for(plan, "direct")
     processes = fake_launch(monkeypatch, {"direct": "import time;time.sleep(10)"})
@@ -441,6 +447,8 @@ def test_signal_during_spawn_is_delivered_only_after_owned_tracking(monkeypatch)
 
 
 def test_post_spawn_setup_failure_cleans_before_returning_error(monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     real_popen = subprocess.Popen
     processes = []
     def popen(*_, **kwargs):
@@ -506,12 +514,16 @@ def original_at(directory):
 
 
 def test_distinct_canonical_fixture_roots_can_be_scheduled(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     originals = {"one": original_at(tmp_path / "one"), "two": original_at(tmp_path / "two")}
     owners._isolated_roots(originals)
 
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_shared_or_nested_host_roots_are_rejected_before_concurrency(tmp_path, nested):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     original = original_at(tmp_path / "outer")
     other = original_at(tmp_path / "outer/inner") if nested else original
     with pytest.raises(ValueError, match="integration_owner_binding"):
@@ -519,6 +531,8 @@ def test_shared_or_nested_host_roots_are_rejected_before_concurrency(tmp_path, n
 
 
 def test_symlinked_workspace_alias_is_rejected(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     original = original_at(tmp_path / "one")
     workspace = tmp_path / "one/fixture/workspace"
     workspace.rmdir()
@@ -530,6 +544,8 @@ def test_symlinked_workspace_alias_is_rejected(tmp_path):
 
 
 def test_report_selected_for_isolation_must_match_original_pin(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     original = original_at(tmp_path / "one")
     original["raw_sha256"] = "0" * 64
     with pytest.raises(ValueError, match="integration_original_head_changed"):
@@ -571,6 +587,8 @@ def test_first_restored_owner_control_guard_precedes_records_and_native_replay(m
 
 
 def test_process_group_cleanup_confirms_ordinary_descendant(tmp_path):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     child_pid = tmp_path / "child.pid"
     # The leader reaps its child on TERM. This verifies group signalling and
     # termination confirmation without leaving an orphan or native process.

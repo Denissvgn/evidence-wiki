@@ -22,6 +22,8 @@ def binding(tmp_path):
 
 
 def tracker(tmp_path):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     path = tmp_path / "registry.jsonl"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     return registry.ChildTracker(descriptor, binding(tmp_path)), path

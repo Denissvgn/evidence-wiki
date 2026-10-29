@@ -16,6 +16,8 @@ KEY = b"acceptance-host-custody-key-000000"
 
 
 def candidate(tmp_path, body):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     root = tmp_path / "candidate"
     (root / "src/evidence_wiki").mkdir(parents=True)
     (root / "src/evidence_wiki/__init__.py").write_text("__version__ = 'fixture'\n")

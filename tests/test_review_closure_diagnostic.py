@@ -15,6 +15,8 @@ from tools.decide_release import _HostDeadline
 
 @pytest.fixture
 def harness(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     fixture = bundle / "fresh-fixture-input.json"

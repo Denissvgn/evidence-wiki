@@ -19,6 +19,8 @@ def forbidden(*args, **kwargs):
 
 
 def process(*, pid=12345, returncode=0):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     actual = object.__new__(subprocess.Popen)
     actual._child_created = False
     actual.pid = pid

@@ -435,6 +435,8 @@ def test_postproof_change_cannot_return_owner_evidence(monkeypatch, tmp_path, mu
 
 @pytest.mark.parametrize("mutation", ["source", "authority", "journal"])
 def test_native_static_closing_checks_reject_postproof_bytes(monkeypatch, tmp_path, mutation):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     from tools.replay_qualification_native import verify_journal_closing
 
     data = owner_fixture(monkeypatch, tmp_path)
@@ -994,6 +996,8 @@ def test_closing_brief_refusal_cannot_renew_exhausted_control(monkeypatch, tmp_p
 
 @pytest.mark.parametrize("refused", [False, True])
 def test_native_envelope_retained_before_post_call_timeout(tmp_path, refused):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     route = object.__new__(host.Routes)
     route.root, route.route, route.calls = tmp_path, "scoped_mcp", []
     route.observations = tmp_path

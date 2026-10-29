@@ -148,6 +148,8 @@ def registry_fixture(tmp_path, monkeypatch, *, changes=None, include_cleanup=Tru
 
 
 def test_archived_child_registry_proves_complete_inventory_without_signalling(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, path = registry_fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(runner.os, "killpg", lambda *_: pytest.fail("archived custody must never signal"))
     result = runner.verify_child_registry(path, plan=plan, stage="decide", worker_pid=10001)
@@ -158,12 +160,16 @@ def test_archived_child_registry_proves_complete_inventory_without_signalling(tm
                                      {"controller_sha256": "c" * 64}, {"sequence": 4},
                                      {"previous_sha256": "c" * 64}, {"data": {"authenticated": True}}])
 def test_child_registry_cannot_replace_source_or_actual_owned_group(tmp_path, monkeypatch, changes):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, path = registry_fixture(tmp_path, monkeypatch, changes=changes)
     with pytest.raises(ValueError):
         runner.verify_child_registry(path, plan=plan, stage="decide", worker_pid=10001)
 
 
 def test_missing_child_cleanup_and_live_residual_group_are_fail_closed(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, path = registry_fixture(tmp_path, monkeypatch, include_cleanup=False)
     with pytest.raises(ValueError, match="native_child_registry_seal"):
         runner.verify_child_registry(path, plan=plan, stage="decide", worker_pid=10001)
@@ -172,6 +178,8 @@ def test_missing_child_cleanup_and_live_residual_group_are_fail_closed(tmp_path,
 
 
 def test_sealed_registry_still_requires_current_group_absence(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, path = registry_fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(runner, "_group_alive", lambda _: True)
     with pytest.raises(ValueError, match="native_child_group_still_live"):
@@ -228,6 +236,8 @@ def test_unconfirmed_cleanup_preserves_inventory_and_raw_failure(tmp_path, monke
 
 @pytest.mark.parametrize("reaped,residual", [(False, False), (True, False), (True, True)])
 def test_cleanup_signals_only_actual_live_owned_objects(tmp_path, monkeypatch, reaped, residual):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, _, _, _ = fixture()
     root = tmp_path / "cleanup"
     root.mkdir(mode=0o700)
@@ -260,6 +270,8 @@ def test_cleanup_signals_only_actual_live_owned_objects(tmp_path, monkeypatch, r
 
 
 def test_original_provisioning_exception_still_closes_owned_children(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, _, _, _ = fixture()
     root = tmp_path / "failed-provision"
     root.mkdir(mode=0o700)
@@ -325,6 +337,8 @@ def test_production_cleanup_closes_before_final_decision_clock(tmp_path, monkeyp
 
 @pytest.mark.parametrize("action", ["run", "decide", "decide-stdout", "replay"])
 def test_cleanup_binding_rejects_changed_actual_argv(tmp_path, monkeypatch, action):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     stdout_only = action == "decide-stdout"
     if stdout_only:
         action = "decide"
@@ -358,6 +372,8 @@ def test_cleanup_binding_rejects_changed_actual_argv(tmp_path, monkeypatch, acti
 
 
 def test_background_launch_transaction_finishes_before_interrupted_cleanup(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     plan, _, _, _ = fixture()
     (tmp_path / "children").mkdir(mode=0o700)
     plan["scope"]["native_child_control_directory"] = str(tmp_path)
@@ -419,6 +435,8 @@ def test_production_cleanup_failure_emits_one_fixed_token_without_traceback(tmp_
 
 
 def test_owned_signal_holds_actual_wait_lock_through_identity_and_signal(monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     process = SimpleNamespace(pid=10002, returncode=None, _waitpid_lock=threading.Lock())
     signals = []
     def group(pid):
@@ -439,6 +457,8 @@ def test_owned_signal_holds_actual_wait_lock_through_identity_and_signal(monkeyp
 
 @pytest.mark.parametrize("state", ["already_reaped", "reaped_after_term", "live_until_kill"])
 def test_safe_stopper_cannot_signal_a_reaped_leader_residual_group(monkeypatch, state):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     process = SimpleNamespace(pid=10002, returncode=2 if state == "already_reaped" else None,
                               _waitpid_lock=threading.Lock())
     signals, waits = [], []
@@ -470,6 +490,8 @@ def test_safe_stopper_cannot_signal_a_reaped_leader_residual_group(monkeypatch, 
 
 
 def test_changed_group_identity_is_rejected_without_signal(monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     process = SimpleNamespace(pid=10002, returncode=None, _waitpid_lock=threading.Lock())
     monkeypatch.setattr(runner.os, "getpgid", lambda pid: pid + 1)
     monkeypatch.setattr(runner.os, "killpg", lambda *args: pytest.fail("changed group must never receive a signal"))

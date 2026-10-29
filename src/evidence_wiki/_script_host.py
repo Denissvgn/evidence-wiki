@@ -80,7 +80,7 @@ def _script_tree_signature(root: Path) -> tuple:
             if not child.name.endswith(".py"):
                 continue
             try:
-                observed = child.stat(follow_symlinks=True)
+                observed = os.stat(child.path, follow_symlinks=True) if os.name == "nt" else child.stat(follow_symlinks=True)
             except OSError:
                 continue
             if not stat.S_ISREG(observed.st_mode):

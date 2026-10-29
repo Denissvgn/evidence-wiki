@@ -215,6 +215,8 @@ def test_final_raw_read_crossing_common_deadline_refuses_obligations(monkeypatch
 
 
 def test_final_publication_crossing_common_deadline_is_not_qualified(monkeypatch, tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     instant = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     class Clock:

@@ -129,15 +129,16 @@ class _Inputs:
         return (str(self._root), info.st_dev, info.st_ino)
 
     def _configuration(self):
+        from ._filesystem import metadata_stat
         from ._pack_io import read_file, signature
         from .host_context import _root_descriptor
 
         path = self._root / "research.yml"
         self._context.require_path(path)
-        observed = path.lstat()
+        observed = metadata_stat(path, follow_symlinks=False)
         with _root_descriptor(self._root) as descriptor:
             raw = read_file(descriptor, "research.yml", expected=signature(observed))
-        if signature(path.lstat()) != signature(observed):
+        if signature(metadata_stat(path, follow_symlinks=False)) != signature(observed):
             refuse("REVIEW_DEPENDENCY_INPUTS_CHANGED")
         return raw
 

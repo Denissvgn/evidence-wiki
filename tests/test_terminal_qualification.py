@@ -33,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def setup(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     candidate = tmp_path/'candidate'
     (candidate/'src/evidence_wiki').mkdir(parents=True)
     (candidate/'src/evidence_wiki/__init__.py').write_text("__version__='fixture'\n")

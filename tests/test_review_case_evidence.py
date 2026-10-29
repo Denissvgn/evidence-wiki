@@ -16,6 +16,8 @@ from tools._review_dependency_workload import OriginalResponses, OwnedChildren, 
 
 
 def _index(tmp_path, selected=("unchanged-baseline",)):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report(selected)
     pin = evidence.write_index(tmp_path / "index", report, source_before=source,
         source_after=source, refresh=False)
@@ -46,6 +48,8 @@ def test_full_inventory_does_not_grant_qualification(tmp_path):
 
 
 def test_unrelated_real_process_cannot_mint_authored_native_completion(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report()
     tracker = OwnedChildren(OriginalResponses(tmp_path / "originals"), "3" * 64)
     process = subprocess.Popen([sys.executable, "-I", "-c", "pass"],  # noqa: S603 - fixed interpreter and inert program
@@ -110,6 +114,8 @@ def test_strict_json_and_tree_limits(tmp_path):
 
 
 def test_original_manifest_pages_once_without_inline_dtos(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report()
     original = retain(tmp_path / "native.json", {"unchanged": "native bytes"})
     report["originals"] = [dict(original, label="retained")] * 129
@@ -122,6 +128,8 @@ def test_original_manifest_pages_once_without_inline_dtos(tmp_path):
 
 
 def test_many_shard_cleanup_stays_separately_bounded_byte_evidence(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report(CASE_IDS)
     report["shards"] = []
     cleanups = []
@@ -156,6 +164,8 @@ def test_many_shard_cleanup_stays_separately_bounded_byte_evidence(tmp_path):
 
 @pytest.mark.parametrize("field", ["status", "leader_reaped", "group_absent"])
 def test_retained_native_cleanup_refuses_unconfirmed_children(tmp_path, field):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report()
     report["cleanup"]["children"] = [{"pid": 1, "leader_reaped": True, "group_absent": True}]
     if field == "status":
@@ -181,6 +191,8 @@ def test_watchdog_reserves_each_isolated_fixture_without_extending_run_budget():
 
 
 def test_failed_native_outcome_remains_visible_without_live_credit(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report()
     report.update(status="failed", failure={"kind": "ValueError", "reason": "actual_owner_refused", "error_code": None})
     report["cases"][0].update(status="failed", assertions=[], native_reason="actual_owner_refused")
@@ -204,6 +216,8 @@ def test_source_and_original_binding_change_refused(tmp_path):
 
 
 def test_earlier_native_owner_scope_does_not_expand_frozen_scope(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     report, source = case_evidence_report(("dependency-basis-byte-bound",))
     row = next(item for item in report["cases"] if item["case_id"] == "dependency-basis-byte-bound")
     row.update(status="passed_limited_scope", native_assertion_scope="physical_workspace_earlier_native_owner_refusal",

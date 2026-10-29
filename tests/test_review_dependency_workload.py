@@ -710,6 +710,8 @@ def test_original_execution_owner_authenticates_journal_chain(monkeypatch):
 
 @pytest.fixture
 def deadline_signals(monkeypatch):
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     from types import SimpleNamespace
 
     from tools import _review_dependency_workload as native
@@ -812,6 +814,8 @@ def test_previously_handled_deadline_does_not_suppress_new_expiry(deadline_signa
 
 
 def test_nested_deadlines_cannot_extend_outer_cap_in_isolated_native_process():
+    from tests._usage_fixture import require_posix_signals
+    require_posix_signals()
     import subprocess
 
     program = """
@@ -911,6 +915,8 @@ def test_workload_preserves_first_failure_and_retains_cleanup_and_closing_failur
 
 
 def test_owned_children_close_actual_process_groups_and_block_late_launch(tmp_path, monkeypatch):
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     import subprocess
 
     from tools._review_dependency_workload import OriginalResponses, OwnedChildren
@@ -941,6 +947,8 @@ def test_owner_two_pass_identity_rejects_journal_or_basis_change():
 
 
 def test_role_timing_preserves_failed_unknown_and_unstarted_slots(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     from tools._review_dependency_workload import OriginalResponses, review_job_timing
     originals = OriginalResponses(tmp_path / "timings")
     rows = []

@@ -24,6 +24,8 @@ def run_cli(*args, timeout=15):
 
 
 def configured_host(tmp_path, *, status="pass", noise=False, stall=False):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     key = b"s" * 32
     key_path = tmp_path / "host.key"
     key_path.write_bytes(key)

@@ -9,6 +9,7 @@ from decimal import ROUND_UP, Inexact, localcontext
 import pytest
 
 from evidence_wiki import telemetry
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
@@ -60,7 +61,7 @@ def selected(tmp_path):
     root = tmp_path / "workspace"
     root.mkdir()
     control = tmp_path / "control"
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     grants = {"telemetry.record", "telemetry.report", "run_controller.run_telemetry_record", "run_controller.run_telemetry_events",
         "telemetry_delivery.deliver", "telemetry_delivery.inspect", "telemetry_delivery.retry"}
     return root, HostContext([root], grants, "caller", [root], mutation_control_directory=control)

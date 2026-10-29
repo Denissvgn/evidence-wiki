@@ -39,6 +39,15 @@ def require_reference_storage():
         raise SkipTest("reference observer artifacts require POSIX private-file custody")
 
 
+def require_posix_signals():
+    """The reference deadline owner requires native interval timers and masks."""
+    import signal
+
+    if any(not hasattr(signal, name) for name in
+            ("getitimer", "setitimer", "pthread_sigmask", "SIGALRM", "ITIMER_REAL")):
+        raise SkipTest("reference deadlines require POSIX interval timers and signal masks")
+
+
 class UsageFixture:
     def __init__(self, directory: Path, monkeypatch):
         require_host_storage()

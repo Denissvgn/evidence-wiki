@@ -30,6 +30,8 @@ class Lease:
 
 
 def pipe():
+    from tests._usage_fixture import require_reference_executor
+    require_reference_executor()
     reader, writer = os.pipe()
     return reader, os.fdopen(writer, "wb")
 

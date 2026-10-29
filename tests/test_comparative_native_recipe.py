@@ -106,6 +106,8 @@ def test_native_recipe_refuses_substitution_and_nonprivate_repository_targets(tm
 
 
 def test_native_output_custody_retains_exact_private_bytes_without_overwriting(tmp_path):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     rendered = canonical({"operation_receipts": [{"result_sha256": digest("returned public owner document")}],
                           "answer": None})
     _retain_output(tmp_path, rendered)
@@ -119,6 +121,8 @@ def test_native_output_custody_retains_exact_private_bytes_without_overwriting(t
 
 @pytest.mark.parametrize("arm", ["low_level", "core_library"])
 def test_fixture_byte_drift_is_retained_and_refused_before_native_activation(tmp_path, monkeypatch, arm):
+    from tests._usage_fixture import require_reference_storage
+    require_reference_storage()
     activations = []
 
     def unexpected_activation():
