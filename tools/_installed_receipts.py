@@ -128,7 +128,7 @@ def replay_installation(report, root, expected):
             public.digest(parsed(top[kind + "/evidence-wiki contract"]["stdout"])) == expected["contract"], "native CLI contract differs")
     for mode in ("fresh", "upgrade", "revision"):
         require(parsed(top[kind + "/html-" + mode]["stdout"]) == installed["html_usability"][mode], "HTML observations differ from actual stdout")
-    observations = parsed(bounded_file(root, kind + "/journeys/observations.json").read_text())
+    observations = parsed(bounded_file(root, kind + "/journeys/observations.json").read_text(encoding="utf-8"))
     require(observations == installed["journeys"], "native journey observations differ from retained execution")
     public_report = parsed(top[kind + "/public-installed-journeys"]["stdout"])
     require(public_report == installed["public_installed"], "public outcomes differ from actual probe stdout")

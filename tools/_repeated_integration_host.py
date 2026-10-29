@@ -152,11 +152,11 @@ def _refresh_for_brief(runtime, root, row, observations, cycle, control):
 
 
 def _closure(root):
-    rows = [json.loads(line) for line in (root / "sources/manifest.jsonl").read_text().splitlines()]
+    rows = [json.loads(line) for line in (root / "sources/manifest.jsonl").read_text(encoding="utf-8").splitlines()]
     if len(rows) != 1:
         raise ValueError("integration_reference_inventory")
     source_id = rows[0]["id"]
-    normalized = next(p for p in (root / "sources/normalized").glob("*.md") if source_id in p.read_text())
+    normalized = next(p for p in (root / "sources/normalized").glob("*.md") if source_id in p.read_text(encoding="utf-8"))
     descriptor = {"schema_version": "evidence-source-revision/v1", "source_id": source_id,
                   "parents": [], "normalized_path": normalized.relative_to(root).as_posix(),
                   "evidence_root": "evidence", "temporal": {}}

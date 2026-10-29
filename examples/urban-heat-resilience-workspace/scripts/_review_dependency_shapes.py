@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Closed shapes for dependency-bound review and publication."""
 
 import json

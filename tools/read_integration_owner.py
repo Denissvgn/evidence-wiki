@@ -80,7 +80,7 @@ def main():
             output.flush()
         # Factory printing and unexpected runtime diagnostics are private to
         # this worker; only the closed per-slot grammar crosses its stdout.
-        with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        with open(os.devnull, "w", encoding="utf-8") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
             read_group(request, emit)
         return 0
     except Exception as error:

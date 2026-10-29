@@ -55,7 +55,7 @@ def provision(base, objective, *, scenario='repair', observation_sink=None, fini
         until = None
         execution_authority = None
     else:
-        from evidence_wiki._native_owner_execution import fixture_authority
+        from evidence_wiki.fixture_execution import fixture_authority
         execution_authority = fixture_authority(execution_policy, study_frozen_at, study_expires_at)
         until, run_seconds = execution_authority['expires_at'], execution_authority['run_seconds']
     if child_tracker is not None:

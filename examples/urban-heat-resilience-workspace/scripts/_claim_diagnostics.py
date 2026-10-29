@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Read-only mechanical diagnostics over an exact unaccepted draft proposal."""
 
 from __future__ import annotations

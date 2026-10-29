@@ -58,7 +58,7 @@ def test_fixture_mcp_grant_reaches_real_public_dispatch_without_broadening_other
 
     def session_binding(self, project_root, policy, *, run_id, execution):
         dispatched.append((project_root, run_id, execution, current_context()))
-        self._root, self._execution, self._closed = project_root, execution, False
+        self._root, self._execution, self._closed = project_root, None, False
         self._owner_workspace = None
 
     def assemble(session, **arguments):
@@ -66,8 +66,9 @@ def test_fixture_mcp_grant_reaches_real_public_dispatch_without_broadening_other
         return {"fixture_dispatch_reached": True}
 
     # Keep real Workspace, command validation/dispatch, session owner boundary,
-    # assembly owner boundary and HostContext checks. Stub only the downstream
-    # session binding and review storage; no completed review is asserted here.
+    # assembly dispatch and HostContext checks. The downstream storage stub has
+    # no native execution custody; the supplied service is recorded at dispatch.
+    # No completed review or native input observation is asserted here.
     monkeypatch.setattr(research_session.ResearchSession, "__init__", session_binding)
     monkeypatch.setattr(research_session.ResearchSession, "_check", lambda *args, **kwargs: None)
     monkeypatch.setattr(review_page_session, "assembled", assemble)

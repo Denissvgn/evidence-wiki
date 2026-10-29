@@ -66,7 +66,7 @@ def qualify(output, installed, checkout, native):
         require(not path.is_absolute() and ".." not in path.parts, "Recipe path is not bounded")
         target = recipe_root / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="\n")
     sys.path.insert(0, str(recipe_root))
     fixture = load(recipe_root / "fixture_host.py", "source_native_host_recipe")
     require(Path(fixture.Workspace.__module__.replace(".", "/")).parts[0] == "evidence_wiki", "Recipe uses an unexpected package")

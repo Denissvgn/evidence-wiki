@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Bounded closed contracts for dependency-bound reviews."""
 
 from __future__ import annotations

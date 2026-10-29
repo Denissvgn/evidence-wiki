@@ -237,7 +237,7 @@ class NativeCaseServices:
         authority_path = Path(self.runtime.context.authority_file)
         authority = json.loads(authority_path.read_bytes())
         authority["strict_workspaces"][owner("_evidence_usage").workspace_binding(self.root)] = copy.deepcopy(policy)
-        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
         replacement = authority_path.with_name("mode-authority.json")
         with replacement.open("xb") as stream:
             stream.write(canonical(authority))

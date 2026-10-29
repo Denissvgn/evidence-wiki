@@ -779,10 +779,10 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         if body is None:
             continue
         path = root / "wiki/questions" / (question["slug"] + ".md")
-        _, front, _ = path.read_text().split("---", 2)
-        path.write_text("---" + front + "---\n" + body)
+        _, front, _ = path.read_text(encoding="utf-8").split("---", 2)
+        path.write_text("---" + front + "---\n" + body, encoding="utf-8", newline="\n")
     (root / "sources/jurisdictions.yml").write_text(yaml.safe_dump({"jurisdiction_profiles": [{
-        "jurisdiction_id": "fixture-only", "official_domains": ["example.org"], "blocked_domains": []}]}))
+        "jurisdiction_id": "fixture-only", "official_domains": ["example.org"], "blocked_domains": []}]}), encoding="utf-8", newline="\n")
     capture_context = HostContext([root], grants, "fixture-host", [root], mutation_control_directory=control)
     captured = {}
     with capture_context.activate(), Workspace.open(root) as workspace:
@@ -794,7 +794,7 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
             originals.append(("capture-" + name, {"prepared": prepared, "result": result}))
         workspace.sources.inventory()
         originals.append(("normalization", workspace.normalize.sources(all_sources=True)))
-    inventory = [json.loads(line) for line in (root / "sources/manifest.jsonl").read_text().splitlines()]
+    inventory = [json.loads(line) for line in (root / "sources/manifest.jsonl").read_text(encoding="utf-8").splitlines()]
     for name in fixture["source_material"]:
         source = next(row for row in inventory if "raw/papers/" + name + ".md" in row["raw_paths"])
         normalized = root / "sources/normalized" / (owner("normalize_sources").safe_source_id(source["id"]) + ".md")
@@ -803,10 +803,10 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
             sidecar = normalized.with_suffix(".structured.json")
             raw = canonical({"records": [{"id": name, "amount": "6" if name == "shared" else "4"}]})
             sidecar.write_bytes(raw)
-            _, front, body = normalized.read_text().split("---", 2)
+            _, front, body = normalized.read_text(encoding="utf-8").split("---", 2)
             metadata = yaml.safe_load(front)
             metadata["structured_view"] = {"path": sidecar.relative_to(root).as_posix(), "content_hash": sha(raw)}
-            normalized.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + body)
+            normalized.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + body, encoding="utf-8", newline="\n")
     config_path = root / "research.yml"
     config = yaml.safe_load(config_path.read_bytes())
     config["evidence_trust"] = {"policy_id": "fixture-authority", "policy_revision": "1"}
@@ -821,7 +821,7 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         raise ValueError("workload_prospective_policy_changed")
     config["strict_evidence"] = policy_doc
     config["computation"] = _computation({name: row["normalized_path"] for name, row in captured.items()}, datetime.now(timezone.utc).replace(microsecond=0).isoformat())
-    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
     authority = {"schema_version": "evidence-trust-policy/v1", "policy_id": "fixture-authority", "policy_revision": "1",
         "not_before": authority_start if execution_policy is not None else now(), "expires_at": keys["expires_at"], "principals": {
             name: {"controller": name + "-controller", "roles": [role], "keys": {name + "-key": keys[name].hex()}}
@@ -884,7 +884,7 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         for claim in claims["claims"]:
             for evidence in claim["evidence"]:
                 row = captured[evidence["source_id"]]
-                _, front, _ = (root / row["normalized_path"]).read_text().split("---", 2)
+                _, front, _ = (root / row["normalized_path"]).read_text(encoding="utf-8").split("---", 2)
                 metadata = yaml.safe_load(front)
                 evidence.update(source_id=row["source_id"], record_sha256=sha((root / row["normalized_path"]).read_bytes()),
                     observed_at=metadata["host_capture"]["retrieved_at"])
@@ -1102,7 +1102,7 @@ def mutation(root, fixture, case, captured, keys, runtime, originals):
         if case["id"] == "unrelated-source-raw":
             row = captured["unused"]
             raw_path = root / "raw/papers/unused.md"
-            raw_path.write_text(mutations[0]["value"])
+            raw_path.write_text(mutations[0]["value"], encoding="utf-8", newline="\n")
             files = dict(row["files"])
             files["evidence/raw/papers/unused.md"] = raw_path.read_bytes()
             receipts = []
@@ -1111,11 +1111,11 @@ def mutation(root, fixture, case, captured, keys, runtime, originals):
             originals.append(("source-mutation", receipts))
         elif case["id"] == "question-demand-body":
             path = root / "wiki/questions/demand.md"
-            front = path.read_text().split("---", 2)
+            front = path.read_text(encoding="utf-8").split("---", 2)
             context = copy.deepcopy(fixture["question_context"]["demand"])
             context["body"] = mutations[0]["value"]
             question = next(q["question"] for q in fixture["inventory"]["questions"] if q["slug"] == "demand")
-            path.write_text("---" + front[1] + "---\n" + render_question_body(context, question=question))
+            path.write_text("---" + front[1] + "---\n" + render_question_body(context, question=question), encoding="utf-8", newline="\n")
         else:
             path = root / "docs/research-claims.json"
             inventory = json.loads(path.read_bytes())

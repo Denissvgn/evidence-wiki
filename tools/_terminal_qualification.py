@@ -246,7 +246,7 @@ def _raw_role_provenance(role, row, job, plan, execution, key):
 def _new_audit_expectations(adapter, job, independent):
     """Resolve a source-literal adjacent freeze, pinned before producer dispatch."""
     literals = {}
-    for node in ast.parse(adapter.read_text()).body:
+    for node in ast.parse(adapter.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and type(node.value.value) is str:
             for target in node.targets:
                 if isinstance(target, ast.Name) and target.id in {"EXPECTATIONS_FILENAME", "EXPECTATIONS_SHA256"}:
@@ -272,7 +272,7 @@ def _audit_job_declaration(job, timeout_seconds):
     if "--adapter" not in job["argv"]:
         return None
     adapter = Path(job["argv"][job["argv"].index("--adapter") + 1])
-    literals = {target.id: node.value.value for node in ast.parse(adapter.read_text()).body
+    literals = {target.id: node.value.value for node in ast.parse(adapter.read_text(encoding="utf-8")).body
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and type(node.value.value) is str
         for target in node.targets if isinstance(target, ast.Name)
         and target.id in {"EXPECTATIONS_FILENAME", "EXPECTATIONS_SHA256"}}
@@ -618,7 +618,7 @@ def freeze_plan(*, repo_root, assignments_path, assignments_sha256, jobs, contex
              "candidate": candidate_manifest(root), "context": context, "assignments": assignments,
              "assignments_path": str(Path(assignments_path).resolve()), "assignments_sha256": assignments_sha256,
              "jobs": frozen, "timeout_seconds": timeout_seconds,
-             "entrypoint_template": (root/".venv/bin/evidence-wiki").read_text().split("\n",1)[1]}
+             "entrypoint_template": (root/".venv/bin/evidence-wiki").read_text(encoding="utf-8").split("\n",1)[1]}
     value["plan_sha256"] = digest(value)
     return value
 
@@ -779,7 +779,7 @@ def python_transport_command(command, row, installation, plan, deadline_utc, int
     script = Path(producer["argv"][2])
     require(any(item["path"] == str(script.resolve()) and item["sha256"] == hash_file(script)["sha256"]
         for item in producer["command_manifest"]), "qualification_python_producer_not_pinned")
-    literals = [node.value.value for node in ast.parse(script.read_text()).body if isinstance(node,ast.Assign)
+    literals = [node.value.value for node in ast.parse(script.read_text(encoding="utf-8")).body if isinstance(node,ast.Assign)
         and any(isinstance(target,ast.Name) and target.id == "DRIVER" for target in node.targets)
         and isinstance(node.value,ast.Constant) and type(node.value.value) is str]
     require(len(literals) == 1 and driver.read_bytes() == literals[0].encode()

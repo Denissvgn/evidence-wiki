@@ -518,7 +518,7 @@ class NativeCaseInputs:
             application = self.applications[("baseline", "observed-capacity", "critic")]
             try:
                 with self.session(application["run_id"]) as (workspace, _session):
-                    path.write_text("---\n" + yaml.safe_dump(front, sort_keys=False) + "---" + parts[2])
+                    path.write_text("---\n" + yaml.safe_dump(front, sort_keys=False) + "---" + parts[2], encoding="utf-8", newline="\n")
                     before = self.guard()
                     strict = workspace.strict.check()
                     publication = workspace.publish_selected(["capacity", "demand"])
@@ -555,7 +555,7 @@ class NativeCaseInputs:
             malformed = copy.deepcopy(config)
             malformed["computation"]["arithmetic"] = "exact-rational"
             try:
-                config_path.write_text(yaml.safe_dump(malformed, sort_keys=False))
+                config_path.write_text(yaml.safe_dump(malformed, sort_keys=False), encoding="utf-8", newline="\n")
                 with self.runtime.context.activate():
                     literal = self.refused(
                         case_id + "-literal",
@@ -565,11 +565,11 @@ class NativeCaseInputs:
             finally:
                 config_path.write_bytes(original)
             config["computation"]["arithmetic"]["precision"] = 63
-            config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
         elif case_id == "computation-clock":
             actual = datetime.fromisoformat(config["computation"]["clock"]["as_of"].replace("Z", "+00:00"))
             config["computation"]["clock"]["as_of"] = (actual + timedelta(minutes=1)).isoformat()
-            config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
         else:
             source = self.sources["demand"]
             normalized = self.root / source["normalized_path"]
@@ -578,10 +578,10 @@ class NativeCaseInputs:
             _require(records["records"][0]["amount"] == "4", "native_demand_operand_changed_before_case")
             records["records"][0]["amount"] = "3"
             sidecar.write_bytes(canonical(records))
-            pieces = normalized.read_text().split("---", 2)
+            pieces = normalized.read_text(encoding="utf-8").split("---", 2)
             metadata = yaml.safe_load(pieces[1])
             metadata["structured_view"]["content_hash"] = owner("_structured_view").content_hash(sidecar.read_bytes())
-            normalized.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + pieces[2])
+            normalized.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + pieces[2], encoding="utf-8", newline="\n")
             files = dict(source["files"])
             files[source["normalized_path"]] = normalized.read_bytes()
             files[sidecar.relative_to(self.root).as_posix()] = sidecar.read_bytes()
@@ -810,7 +810,7 @@ class NativeCaseInputs:
                 if case_id == "unrelated-question-coverage":
                     coverage = yaml.safe_load(originals[paths[0]])
                     coverage["schema_version"] = "unsupported"
-                    paths[0].write_text(yaml.safe_dump(coverage, sort_keys=False))
+                    paths[0].write_text(yaml.safe_dump(coverage, sort_keys=False), encoding="utf-8", newline="\n")
                     native = owner("coverage_manifest")
                     config = owner("_strict_evidence").configuration(self.root)
                     refused = self.refused(
@@ -838,7 +838,8 @@ class NativeCaseInputs:
                         "---\n"
                         + yaml.safe_dump(front, sort_keys=False)
                         + "---\n"
-                        + render_question_body(context, question=question)
+                        + render_question_body(context, question=question),
+                        encoding="utf-8", newline="\n",
                     )
                     refused = self.refused(
                         case_id,
@@ -1442,7 +1443,7 @@ class NativeCaseInputs:
             observed = []
             try:
                 for body_size in (24000, 36000, 48000, 60000):
-                    question_path.write_text("---" + front + "---" + body + "\n" + "x" * body_size)
+                    question_path.write_text("---" + front + "---" + body + "\n" + "x" * body_size, encoding="utf-8", newline="\n")
                     try:
                         handle = prepare(self.root, **arguments)
                         header = handle.header()
@@ -1632,7 +1633,7 @@ class NativeCaseInputs:
         binding = owner("_evidence_usage").workspace_binding(self.root)
         authority["strict_workspaces"][binding] = copy.deepcopy(policy)
         owner("_strict_contract").policy_document(policy)
-        config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="\n")
         replacement = authority_path.with_name("replacement-authority.json")
         with replacement.open("xb") as stream:
             stream.write(canonical(authority))

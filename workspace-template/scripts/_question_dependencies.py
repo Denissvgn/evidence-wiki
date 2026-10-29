@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Lossless question semantics with independently derived native mirrors."""
 
 from __future__ import annotations

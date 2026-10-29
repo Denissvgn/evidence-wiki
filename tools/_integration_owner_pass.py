@@ -27,6 +27,7 @@ SOURCE_FILES = ("tools/_integration_owner_pass.py", "tools/read_integration_owne
                 "tools/_integration_improvement.py", "tools/_integration_improvement_owners.py",
                 "tools/run_repeated_integrations.py", "tools/replay_qualification_native.py",
                 "tools/_native_owner_execution.py", "src/evidence_wiki/_native_owner_execution.py",
+                "src/evidence_wiki/fixture_execution.py",
                 "tools/_native_child_registry.py", "tools/_command_completion.py",
                 "src/evidence_wiki/_process_groups.py",
                 "tools/measure_integration_costs.py", "tools/_repeated_integration_host.py",

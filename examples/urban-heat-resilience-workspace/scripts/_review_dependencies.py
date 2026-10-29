@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Native current dependency projection with separate semantic and raw custody."""
 
 from __future__ import annotations

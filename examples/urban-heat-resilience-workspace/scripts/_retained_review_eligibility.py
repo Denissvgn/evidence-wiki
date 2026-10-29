@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Native retained-review eligibility through the actual strict owner module."""
 
 from __future__ import annotations

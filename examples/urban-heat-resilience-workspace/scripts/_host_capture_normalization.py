@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Native pilot capture extraction; originals, declared scope and gaps stay explicit."""
 
 from __future__ import annotations

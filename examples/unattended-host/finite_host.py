@@ -64,7 +64,7 @@ def configuration(profile, config):
 
 def selections(document, *, child_tracker=None):
     if 'execution_authority' in document:
-        from evidence_wiki._native_owner_execution import validate_fixture_authority
+        from evidence_wiki.fixture_execution import validate_fixture_authority
         bound = validate_fixture_authority(document['execution_authority'])
         if document['expires_utc'] != bound['expires_at'] or document['policy']['budgets']['seconds'] != bound['run_seconds']:
             raise ValueError('Finite fixture authority binding differs.')

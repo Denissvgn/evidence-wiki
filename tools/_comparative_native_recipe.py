@@ -164,7 +164,7 @@ def _read_outputs(session, calls, destination):
 
 def _source_binding(root, frozen):
     raw = (root / "raw" / "papers" / "study.md").read_bytes()
-    records = [json.loads(line) for line in (root / "sources" / "manifest.jsonl").read_text().splitlines()]
+    records = [json.loads(line) for line in (root / "sources" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
     require(len(records) == 1, "recipe_native_source_inventory_changed")
     supplied = frozen.sources()[0]
     return {"packet_source_id": supplied["source_id"], "native_source_id": records[0]["id"],

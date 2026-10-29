@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Read versioned requirements through their protected existing mutation owner."""
 
 import hashlib
