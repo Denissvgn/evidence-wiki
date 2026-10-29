@@ -161,7 +161,7 @@ def _journal_proof(session, facts):
     complete.update(b"[")
     size, nodes, ordered = 2, 1, []
     for index, record in enumerate(facts.records):
-        raw = canonical_record(record)
+        raw = canonical_record(record, use_memo=False)
         size += len(raw) + (1 if index else 0)
         pending = [record]
         while pending:

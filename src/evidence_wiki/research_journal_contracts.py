@@ -411,7 +411,7 @@ def canonical_record(value: Any, *, use_memo: bool = True) -> bytes:
 
 
 def digest_record(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(canonical_record(value)).hexdigest()
+    return "sha256:" + hashlib.sha256(canonical_record(value, use_memo=False)).hexdigest()
 
 
 def expanded_size(value: Any) -> int:

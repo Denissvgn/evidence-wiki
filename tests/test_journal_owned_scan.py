@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import hmac
 from types import SimpleNamespace
 
@@ -138,6 +139,16 @@ def test_uncached_codec_preserves_transport_bounds_and_owned_values(monkeypatch)
     malformed = {**record, "unowned": True}
     with pytest.raises(EvidenceWikiError):
         codec._canonical_owned_record(malformed, use_memo=False)
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_record_digest_preserves_canonical_bytes_without_schema_key_work(monkeypatch, large):
+    record = memo_record() if large else memo_record({"value": "original"})
+    expected = "sha256:" + hashlib.sha256(codec.canonical_record(record)).hexdigest()
+    monkeypatch.setattr(codec, "_record_codec_key", lambda _: pytest.fail("Digest unexpectedly built a memo key"))
+    assert codec.digest_record(record) == expected
+    with pytest.raises(EvidenceWikiError):
+        codec.digest_record({**record, "foreign": True})
 
 
 def test_pure_record_codec_reuses_only_success_and_returns_fresh_values(codec_memo, monkeypatch):
