@@ -19,8 +19,12 @@ def test_actual_historical_recovery_status_reads_without_any_workspace_or_journa
         with workspace.research.session(policy, run_id="historical-read", execution=execution) as session:
             with native.gate(session):
                 native._begin(session)
+            with MutationStore(root, context.mutation_control_directory).locked("read-current"):
+                pass
             records = execution.records(session)
             before = owner("_evidence_revision").capture_workspace(root).revision_id
+            control_before = {path.relative_to(context.mutation_control_directory): path.read_bytes()
+                for path in context.mutation_control_directory.rglob("*") if path.is_file()}
             with MutationStore(root, context.mutation_control_directory).historical_locked("read-current"):
                 value = workspace.research.recovery_status(policy, run_id="historical-read", execution=execution)
                 assert value["status"] == "reconcilable" and not value["authorized"]
@@ -29,3 +33,5 @@ def test_actual_historical_recovery_status_reads_without_any_workspace_or_journa
                     session.reconcile_recovery(request_id="forbidden", expected_basis_id=value["current_basis_id"])
             assert execution.records(session) == records
             assert owner("_evidence_revision").capture_workspace(root).revision_id == before
+            assert {path.relative_to(context.mutation_control_directory): path.read_bytes()
+                for path in context.mutation_control_directory.rglob("*") if path.is_file()} == control_before

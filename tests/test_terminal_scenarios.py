@@ -7,7 +7,6 @@ import pytest
 
 from evidence_wiki import Workspace
 from evidence_wiki.errors import EvidenceWikiError
-from evidence_wiki.pack_discovery import owner
 from tests._semantic_fixture import native_fixture
 from tests.test_execution_session import fixture
 from tests.test_semantic_judging import journal_digest, record_acceptance_owner
@@ -38,10 +37,6 @@ def test_retained_exact_quote_cannot_support_the_opposite_finite_value(tmp_path,
 
 def test_missing_original_evidence_finishes_partial_without_dropping_original(tmp_path, monkeypatch, request):
     root, policy, execution, context = fixture.__wrapped__(tmp_path, monkeypatch, SimpleNamespace(param={'partial': True}))
-    owner('coverage_manifest').run_init_inline(root, slug='unavailable', template={'required_facets': [{
-        'facet_id': 'primary', 'description': 'Retain the unavailable independent observation.',
-        'evidence_path': 'official_guidance', 'source_policy': 'primary_or_official',
-        'freshness_policy': 'no_staleness_check', 'identity_policy': 'none', 'min_sources': 1}]})
     with context.activate(), Workspace.open(root) as workspace:
         with workspace.research.session(policy, run_id="missing-original", execution=execution) as session:
             before = session.current()

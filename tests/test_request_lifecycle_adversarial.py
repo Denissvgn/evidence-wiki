@@ -85,11 +85,14 @@ def test_legacy_fulfillment_keeps_protected_intake_refusal(setup, tmp_path, monk
         checked = owner("_usage_gate").source_decision(root, fixture.config, "sample-source", [],
             normalized=(root / "sources/normalized/sample-source.md").read_bytes(), uses=["retrieval"], purpose="research")
         assert checked["eligible"] and checked["source_revision"] == body["source_revision"]
+        before = owner("_evidence_revision").capture_workspace(root).revision_id
         with pytest.raises(Exception) as caught:
             native.run_fulfill_request(root, request_id=request_id,
                 source_id="sample-source", require_scope=True)
-        assert native.run_fulfill_request.__globals__["ScriptRefusal"] is type(caught.value)
-        assert caught.value.__cause__.details["reason"] == "protected_capture_requires_host_sanitization"
+        assert native.require_host_intake.__globals__["UsageRefusal"] is type(caught.value)
+        assert caught.value.error_code == "EVIDENCE_USAGE_REFUSED"
+        assert caught.value.details["reason"] == "protected_capture_requires_host_sanitization"
+        assert owner("_evidence_revision").capture_workspace(root).revision_id == before
 
 
 def test_frozen_required_scope_cannot_be_omitted_even_with_incomplete_flag(setup):

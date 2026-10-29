@@ -160,7 +160,7 @@ def test_genuine_signed_calibration_probe_expiry_is_live_inside_same_epoch(calib
     monkeypatch.setattr(owner, "now_utc", lambda: "2026-10-01T12:00:00Z")
     with owner._current_facts(session):
         assert owner._current_identity(session)["qualification"]["state"] == "qualified"
-        after_expiry = (datetime.fromisoformat(probe["expires_utc"]) + timedelta(seconds=1)).isoformat()
+        after_expiry = (datetime.fromisoformat(probe["expires_utc"].replace("Z", "+00:00")) + timedelta(seconds=1)).isoformat()
         monkeypatch.setattr(owner, "now_utc", lambda: after_expiry)
         closing = owner._current_identity(session)
         assert closing["qualification"]["state"] == "unknown"

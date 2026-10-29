@@ -2,6 +2,7 @@
 
 import copy
 import os
+import sqlite3
 
 import pytest
 
@@ -95,7 +96,13 @@ def test_native_memory_fts_and_lexical_retrieve_current_same_selected_record(roo
     assert not indexed["index_writes"]
 
 
+def require_index_serialization():
+    if not all(callable(getattr(sqlite3.Connection, name, None)) for name in ("serialize", "deserialize")):
+        pytest.skip("This native index fixture requires SQLite serialize/deserialize support.")
+
+
 def built(roots, source_id):
+    require_index_serialization()
     from evidence_wiki.mutation_store import MutationStore
     with selected(roots).activate(), MutationStore(*roots).workspace_locked():
         return retrieval.build_index(roots[0], source_ids=[source_id])

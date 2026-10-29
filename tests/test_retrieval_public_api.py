@@ -12,7 +12,7 @@ from evidence_wiki.pack_discovery import owner
 from evidence_wiki.source_contracts import schema_document
 from tests.test_mutation_operations import roots as roots
 from tests.test_native_capture_normalization import normalize
-from tests.test_retrieval_operations import selected
+from tests.test_retrieval_operations import require_index_serialization, selected
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd,
     reason="Native descriptor-relative retrieval custody is unavailable.")
@@ -34,6 +34,7 @@ def test_public_search_is_exact_bounded_readonly_and_schema_decodable(roots):
 
 
 def test_public_serialized_index_is_replayed_and_stale_cache_falls_back_without_rebuild(roots):
+    require_index_serialization()
     source_id, _result, _verify = normalize(roots, b"Measured reflectance was 0.74 ratio with context.\n", "plain_text")
     root, _ = roots
     with selected(roots).activate(), Workspace.open(root) as workspace:

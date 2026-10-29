@@ -11,7 +11,7 @@ from tests.test_mutation_operations import roots as roots
 from tests.test_native_capture_normalization import normalize
 from tests.test_request_lifecycle_adversarial import protected_source
 from tests.test_requirements_owner import setup as setup
-from tests.test_retrieval_operations import built, selected
+from tests.test_retrieval_operations import built, require_index_serialization, selected
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd,
     reason="Native descriptor-relative retrieval custody is unavailable.")
@@ -64,6 +64,7 @@ def test_protected_persistent_index_refuses_without_any_cache_creation(setup, tm
 
 
 def test_actual_index_barrier_contention_refuses_before_publication(roots):
+    require_index_serialization()
     from evidence_wiki.mutation_store import MutationStore
     source_id, _result, _verify = normalize(roots, b"Measured reflectance was 0.74 ratio.\n", "plain_text")
     native = owner("query_index")
