@@ -171,6 +171,8 @@ def test_distinct_runs_keep_separate_provider_caps_within_original_budget(config
 
 
 def test_new_run_cannot_restart_original_request_seconds(configured, monkeypatch):
+    from evidence_wiki import acquisition_budget
+
     root, policy, execution, context = configured
     path = root / "docs/research-requirements.json"
     declaration = json.loads(path.read_bytes())
@@ -178,23 +180,20 @@ def test_new_run_cannot_restart_original_request_seconds(configured, monkeypatch
     path.write_bytes(canonical(declaration) + b"\n")
     update_policy(root)
     transport = owner("_acquisition_transport")
-    actual = transport.execute_planned_request
-    calls = []
-
-    def local(plan, **values):
-        calls.append(plan.url)
-        response = FakeResponse(b"Scoped original", url=plan.url, headers={"Content-Type":"text/plain"})
-        return actual(plan, **values, opener=lambda *_: response, resolve_hostnames=False)
-
-    monkeypatch.setattr(transport, "execute_planned_request", local)
+    monkeypatch.setattr(transport, "execute_planned_request",
+        lambda *_args, **_kwargs: pytest.fail("Expired original request reached transport."))
     with context.activate(), Workspace.open(root) as workspace:
         source = workspace.source_requests.add(kind="web", query_or_identifier="https://example.org/source",
             rationale="Need current original", question_slugs=["q"], scope={"facet_id":"primary"})["request"]
         with workspace.research.session(policy, run_id="first-time", execution=execution) as session:
             with native.gate(session):
                 native._begin(session)
-                started = datetime.fromisoformat(native._document(session)["started_at"].replace("Z", "+00:00"))
-            session.acquire(request_id="first-fetch", source_request_id=source["request_id"], expected_request_basis=digest(source))
+            fetch = owner("fetch_sources")
+            selected = fetch.acquisition_context(root, owner("verify_quotes").load_config(root),
+                "web", 1, run_id=session.run_id)
+            reservation = acquisition_budget.reserve(session, "first-reservation", source, selected, 1)
+            started = datetime.fromisoformat(reservation["original_budget_started_utc"].replace("Z", "+00:00"))
+            assert reservation["caps"]["seconds"] == 5
         remaining = 5.1 - (datetime.now(timezone.utc) - started).total_seconds()
         if remaining > 0:
             time.sleep(remaining)
@@ -203,4 +202,3 @@ def test_new_run_cannot_restart_original_request_seconds(configured, monkeypatch
                 native._begin(session)
             with pytest.raises(EvidenceWikiError):
                 session.acquire(request_id="second-fetch", source_request_id=source["request_id"], expected_request_basis=digest(source))
-    assert calls == ["https://example.org/source"]

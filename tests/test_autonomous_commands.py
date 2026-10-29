@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,7 +67,11 @@ def test_explicit_factory_uses_same_public_runtime_and_real_closed_console(fixtu
     with Workspace.open(root) as workspace:
         expected = workspace.research.command({'schema_version': REQUEST, 'operation': 'current',
             'arguments': {'run_id': 'factory-read'}}, runtime=runtime)
-    assert json.loads(response.stdout) == expected
+    returned = json.loads(response.stdout)
+    returned_at = datetime.fromisoformat(returned['result'].pop('observed_utc'))
+    expected_at = datetime.fromisoformat(expected['result'].pop('observed_utc'))
+    assert returned_at <= expected_at
+    assert returned == expected
     conflict = command('current', '--target', str(root), '--services', str(path), '--runtime', str(path))
     assert conflict.returncode != 0 and json.loads(conflict.stdout)['status'] == 'refused'
 
@@ -229,12 +234,6 @@ def test_installed_native_journeys_match_public_replay(tmp_path,monkeypatch,opti
     case=fixture.__wrapped__(tmp_path,monkeypatch,SimpleNamespace(param=options))
     root,*_=case
     value=document(case)
-    if options.get('partial'):
-        from evidence_wiki.pack_discovery import owner
-        owner('coverage_manifest').run_init_inline(root,slug='unavailable',template={'required_facets':[{
-            'facet_id':'primary','description':'Retain the unavailable independent observation.',
-            'evidence_path':'official_guidance','source_policy':'primary_or_official',
-            'freshness_policy':'no_staleness_check','identity_policy':'none','min_sources':1}]})
     if options.get('role_isolation'):
         # Preserve qualified service identities while retaining a genuine disagreeing review.
         value['commands']['profile-b']=[*value['commands']['profile-b'][:2],

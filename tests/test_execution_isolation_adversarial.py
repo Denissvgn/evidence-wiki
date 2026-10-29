@@ -176,7 +176,8 @@ def test_required_model_diversity_blocks_identically_configured_models(monkeypat
     session = SimpleNamespace(policy=RunPolicy(policy), execution=SimpleNamespace(profile=shared))
     monkeypatch.setattr(execution_session, "_worker_config", lambda _session: "worker")
     monkeypatch.setattr(execution_session, "_terminal_action", lambda _session, _view, outcome, reason: {"outcome": outcome, "reason": reason})
-    assert execution_session._action(session, {}, []) == {"outcome": "blocked_external", "reason": "qualification_unknown"}
+    view = {"execution": {"pending": None}, "qualification": {"reason": "qualified_scoped_profiles"}}
+    assert execution_session._action(session, view, []) == {"outcome": "blocked_external", "reason": "qualification_unknown"}
 
 
 @pytest.mark.parametrize("write", [False, True])

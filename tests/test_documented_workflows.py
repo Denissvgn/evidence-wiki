@@ -2085,7 +2085,6 @@ class DocumentedWorkflowTests(unittest.TestCase):
         readme = README.read_text(encoding="utf-8")
 
         for label, text in (
-            ("README.md", readme),
             ("orchestration.md", orchestration),
             ("orchestrator-handoff.md", handoff),
             ("research-orchestrate.md", orchestrate),
@@ -2096,6 +2095,10 @@ class DocumentedWorkflowTests(unittest.TestCase):
                 self.assertIn("RUNNER_ISOLATION_UNAVAILABLE", text)
                 self.assertIn("runs/orchestrations/", text)
                 self.assertIn("resume", text)
+
+        self.assertIn("frameworks.md", readme)
+        self.assertIn("orchestration.md", readme)
+        self.assertIn("orchestrator-handoff.md", readme)
 
         self.assertIn('default_permissions="evidence_wiki_worker"', orchestration)
         self.assertIn("EVIDENCE_WIKI_PYTHON", orchestration)

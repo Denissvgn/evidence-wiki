@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import hmac
 import json
@@ -51,7 +52,15 @@ def command_manifest(command):
         if selected is None:
             raise ValueError("trial_command_unavailable")
         path = Path(selected)
-        if not path.is_file():
+        try:
+            is_file = path.is_file()
+        except OSError as error:
+            # Inline command text cannot name a file when the native path bound
+            # is exceeded. Other filesystem errors still invalidate custody.
+            if index == 0 or error.errno != errno.ENAMETOOLONG:
+                raise
+            is_file = False
+        if not is_file:
             if index == 0:
                 raise ValueError("trial_command_unavailable")
             continue

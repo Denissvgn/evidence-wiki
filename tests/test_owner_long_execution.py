@@ -234,7 +234,8 @@ def test_formal_long_plan_current_pair_closing_and_real_runtime_policy(cohort, r
     plan["host_identity_pin"]=workload.retain(tmp_path/"host-long.json",{"host_id":"direct"})
     recipe={**ceiling.binding(ceiling.OWNER_PROFILE),"schema_version":pilot.OWNER_RECIPE,
         "journal_collection_policy":copy.deepcopy(native.JOURNAL_COLLECTION_POLICY),
-        "formal_execution_policy":policy,"phase_caps":caps,"review_producer_id":plan["review_producer_id"],
+        "formal_execution_policy":policy,"phase_caps":caps,"candidate_sha256":plan["candidate_sha256"],
+        "review_producer_id":plan["review_producer_id"],
         "formal_application_policy":plan["formal_application_policy"],"group_overhead_cap_seconds":0}
     plan["measured_recipe_pin"]=workload.retain(tmp_path/"formal-long-recipe.json",recipe)
     monkeypatch.setattr(pilot,"completed_extended_pilot_measurements",lambda value,candidate: ({},0))

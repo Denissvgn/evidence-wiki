@@ -1,9 +1,11 @@
 """Actual bounded processes and authenticated full comparative attempt coverage."""
 
 import copy
+import errno
 import hashlib
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +42,27 @@ def ledger(tmp_path, selected=None):
     selected = selected or plan()
     return TrialLedger(tmp_path / "private", selected, observer_key=b"k" * 32,
         work_root=tmp_path / "workers", create=True)
+
+
+def test_command_manifest_retains_script_pins_with_long_inline_arguments(tmp_path):
+    script = tmp_path / "worker.py"
+    script.write_text("print('retained')\n")
+    command = [sys.executable, "-c", "#" * 5000, str(script)]
+    rows = command_manifest(command)
+    assert [row["argument_index"] for row in rows] == [0, 3]
+    assert rows[1] == {"argument_index": 3, "path": str(script.resolve()),
+        "sha256": hashlib.sha256(script.read_bytes()).hexdigest()}
+
+
+def test_command_manifest_does_not_hide_script_access_errors(monkeypatch):
+    actual = Path.is_file
+    def denied(path):
+        if str(path) == "protected.py":
+            raise PermissionError(errno.EACCES, "Access denied", str(path))
+        return actual(path)
+    monkeypatch.setattr(Path, "is_file", denied)
+    with pytest.raises(PermissionError):
+        command_manifest([sys.executable, "protected.py"])
 
 
 def test_read_only_open_never_recovers_creates_lock_or_appends(tmp_path, monkeypatch):

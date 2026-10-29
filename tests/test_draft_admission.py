@@ -585,8 +585,11 @@ def test_supported_derived_question_retains_exact_original_mapping(draft_root):
             assert result["question_slugs"] == ["detail", "q"] and result["original_ids"] == ["q"]
 
 
-@pytest.mark.parametrize("kind", ["multi_origin", "computation"])
-def test_unsupported_accounting_and_computation_profiles_refuse_explicitly(draft_root, kind):
+@pytest.mark.parametrize("kind,code,reason", [
+    ("multi_origin", "DRAFT_ADMISSION_UNSUPPORTED", "multi_origin_mapping_unsupported"),
+    ("computation", "DRAFT_ADMISSION_REFUSED", "computation_claim_schema_required"),
+])
+def test_unsupported_accounting_and_incompatible_computation_refuse_explicitly(draft_root, kind, code, reason):
     root, control, proposal, _normalized = draft_root
     if kind == "multi_origin":
         path = root / "docs/research-requirements.json"
@@ -605,7 +608,8 @@ def test_unsupported_accounting_and_computation_profiles_refuse_explicitly(draft
             seed(store, wanted)
             with pytest.raises(Exception) as error:
                 recovery.prepare(root, wanted, store)
-            assert error.value.error_code == "DRAFT_ADMISSION_UNSUPPORTED"
+            assert error.value.error_code == code
+            assert error.value.details["reason"] == reason
     assert not (root / "docs/research-claims.json").exists()
 
 

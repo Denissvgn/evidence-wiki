@@ -104,15 +104,17 @@ def memo_record(data=None):
         "data": _owned_data() if data is None else data, "authentication": None}
 
 
-def test_legacy_signing_uses_full_codec_without_selective_schema_keys(monkeypatch):
+@pytest.mark.parametrize("context_version", [None, "legacy", "complete", "dependencies"])
+def test_signing_uses_full_codec_for_every_delivery_profile(monkeypatch, context_version):
     execution = observer()
-    execution._profile = SimpleNamespace(review_delivery=None)
+    execution._profile = SimpleNamespace(review_delivery=None if context_version is None
+        else SimpleNamespace(context_version=context_version))
     record = memo_record()
     expected = codec.canonical_record(record)
     expected_signature = hmac.new(execution._observer_key, expected, "sha256").hexdigest()
 
     def no_selective_key(_value):
-        raise AssertionError("Legacy encoding must retain the full codec path")
+        raise AssertionError("Signing must retain the full codec path")
 
     monkeypatch.setattr(codec, "_record_codec_key", no_selective_key)
     signed = execution.sign(record)

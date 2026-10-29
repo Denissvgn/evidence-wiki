@@ -72,7 +72,7 @@ def requires_refresh(record, frontmatter):
     if type(value) is not int or value != VERSION:
         errors = sibling("_script_errors")
         raise errors.ScriptRefusal("NORMALIZATION_PROFILE_UNSUPPORTED", "The capture normalization revision is unsupported.",
-            exit_code=2, recoverable=False, details={"field":"host_capture_normalization_version"})
+            exit_code=2, recoverable=True, details={"field":"host_capture_normalization_version"})
     return False
 
 

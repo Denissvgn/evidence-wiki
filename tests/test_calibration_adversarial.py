@@ -340,7 +340,8 @@ def test_current_application_rejects_authenticated_review_without_observed_model
     session = SimpleNamespace(policy=policy, execution=SimpleNamespace(profile=profile))
     view = {"basis_id": attempt.job["basis_id"], "qualification": {"state": "qualified"},
         "execution": {"accounting": {"overrun": False}}, "usage": {"claims": 0, "sources": 0}}
-    monkeypatch.setattr(driver, "retained", lambda _: [])
+    monkeypatch.setattr(driver, "retained", lambda _: [{"kind": "execution_attempt", "data": {
+        "purpose": "evaluate", "attempt": attempt.document()}}])
     monkeypatch.setattr(driver, "current", lambda _: view)
     driver._validate_application(session, attempt, observed, None)
     if "model_calls" in change:
@@ -358,15 +359,18 @@ def test_unaccepted_generation_can_complete_without_model_review_qualification(m
     from types import SimpleNamespace
 
     from evidence_wiki import execution_session as driver
+    from evidence_wiki.workflow_contracts import JOB
 
     now = datetime.now(timezone.utc)
     policy = RunPolicy(policy_document())
     session = SimpleNamespace(policy=policy, execution=SimpleNamespace(profile=SimpleNamespace(calibration=object())))
-    attempt = SimpleNamespace(job={"operation": "generate", "basis_id": "basis",
+    attempt = SimpleNamespace(attempt_id="draft-generation", job={"schema_version": JOB,
+        "operation": "generate", "basis_id": "basis",
         "deadline_utc": (now + timedelta(seconds=30)).isoformat()})
     view = {"basis_id": "basis", "qualification": {"state": "unknown"},
         "execution": {"accounting": {"overrun": False}}, "usage": {"claims": 0, "sources": 0}}
-    monkeypatch.setattr(driver, "retained", lambda _: [])
+    monkeypatch.setattr(driver, "retained", lambda _: [{"kind": "execution_attempt", "data": {
+        "purpose": "generate", "attempt": {"attempt_id": attempt.attempt_id}}}])
     monkeypatch.setattr(driver, "current", lambda _: view)
     driver._validate_application(session, attempt, {"state": "succeeded", "final_accounting": True,
         "observed_usage": {"model_calls": 0}, "reason": "offline_fixture"}, None)

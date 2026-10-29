@@ -198,17 +198,22 @@ def test_probe_refresh_checks_mandatory_first_and_keeps_optional_failure_local(c
                 return {"request": {**request, "nonce": "stale"}, "configuration": host.calibration_configuration("investigator")}
             return {"request": request, "configuration": {"private_key": "never-persist-this"}}
         return {"request": request, "configuration": host.calibration_configuration(request["config_ref"])}
-    session = SimpleNamespace(policy=policy, execution=SimpleNamespace(profile=profile, qualifications=registry,
+    grants = []
+    session = SimpleNamespace(policy=policy, context=SimpleNamespace(require_grant=grants.append),
+        execution=SimpleNamespace(profile=profile, qualifications=registry,
         executor=SimpleNamespace(qualification_configuration=configuration)))
     monkeypatch.setattr(driver, "gate", gate)
     monkeypatch.setattr(driver, "_begin", lambda _: None)
     # This pure routing fixture supplies the already checked native policy;
     # actual workspace machine compatibility is covered by native journeys.
     monkeypatch.setattr(driver, "machine_compatible", lambda _: True)
+    monkeypatch.setattr(driver, "retained", lambda _: [])
+    monkeypatch.setattr(driver, "execution_budget_overrun", lambda *_: False)
     monkeypatch.setattr(driver, "deadline", lambda _: fixed + timedelta(seconds=60))
     monkeypatch.setattr(owner, "domain_observation", lambda _: domain)
     monkeypatch.setattr(driver, "append", lambda _session, _kind, _request, data: saved.append(data))
     owner.refresh(session, "probe-request")
+    assert grants == ["research_session.intake_observation", "research_session.host_job.evaluate"]
     assert calls[-1] == "investigator" and set(calls[:-1]) == {"profile-a", "critic"}
     probe = saved[0]["probe"]
     assert probe["reasons"] == [] and probe["configuration_reasons"]["investigator"]

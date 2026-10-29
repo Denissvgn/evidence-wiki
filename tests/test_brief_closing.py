@@ -59,8 +59,10 @@ def test_dedicated_record_expiry_is_checked_after_native_work_and_manager_exit(i
     monkeypatch.setattr(owner.native, "current", native_current)
     @contextmanager
     def current_facts(_session):
-        yield SimpleNamespace(view=native_current(_session), records=[], packets=[], observed=object())
+        yield SimpleNamespace(view=native_current(_session), records=[], packets=[],
+            observed=SimpleNamespace(require=lambda selected: None))
     monkeypatch.setattr(owner.native, "_current_facts", current_facts)
+    monkeypatch.setattr(owner, "_journal_proof", lambda *_: {})
     monkeypatch.setattr(owner.native, "policy_observation", lambda *_: fixture["policy_observation"])
     monkeypatch.setattr(owner.native, "execution_budget_overrun", lambda *_: False)
     from evidence_wiki import readability_execution
