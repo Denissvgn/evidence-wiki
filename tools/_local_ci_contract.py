@@ -15,6 +15,9 @@ PYTHON_PATCHES = {"3.10": "3.10.21", "3.12": "3.12.14", "3.14": "3.14.7"}
 GROUP_SIZE = 48
 GROUP_TIMEOUT = 1800
 LINUX_NATIVE_TARGETS = (
+    "tests/test_agent_execution.py::test_process_dispatch_input_correlation_and_host_measured_receipt",
+    "tests/test_agent_execution.py::test_real_cancellation_confirms_exit_and_preserves_unknown_accounting",
+    "tests/test_agent_execution.py::test_background_descendant_is_stopped_after_leader_exit",
     "tests/test_native_filesystem.py",
     "tests/test_workspace_capture_portability.py",
     "tests/test_process_peak_memory.py",
@@ -23,6 +26,14 @@ LINUX_NATIVE_TARGETS = (
     "tests/test_journal_owned_scan.py",
     "tests/test_yaml_safe.py",
     "tests/test_orchestration_host.py::OrchestrationHostTests::test_codex_runtime_resolution_fails_closed_for_missing_platform_package",
+)
+LINUX_NATIVE_REQUIRED = (
+    *LINUX_NATIVE_TARGETS[:3],
+    "tests/test_process_peak_memory.py::test_native_peak_resident_memory_is_positive",
+    "tests/test_native_filesystem.py::test_native_directory_operations_and_exclusive_publication",
+    "tests/test_native_filesystem.py::test_native_private_permissions_are_enforced",
+    "tests/test_native_filesystem.py::test_metadata_signature_retains_changes_when_size_and_mtime_are_restored",
+    "tests/test_handoff_pipe.py::test_delayed_reader_exact_payload_same_thread_and_final_completion",
 )
 REQUIRED_LOCAL_PROFILES = (
     "linux-3.10", "linux-3.14", "linux-native", "macos-3.12", "macos-compatibility", "packages",
@@ -58,10 +69,11 @@ def policy():
     root = Path(__file__).resolve().parent
     harness = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in
                ("_local_ci_contract.py", "local_ci.py", "verify_local_ci.py", "check_local_ci_status.py",
-                "linux_architecture_probe.py", "run_test_groups.py", "_suite_plugin.py")}
+                "linux_architecture_probe.py", "check_ci_compatibility.py", "run_test_groups.py", "_suite_plugin.py")}
     return {"schema_version": SCHEMA, "python_patches": PYTHON_PATCHES,
             "group_size": GROUP_SIZE, "group_timeout": GROUP_TIMEOUT,
             "local_profiles": REQUIRED_LOCAL_PROFILES, "linux_native_targets": LINUX_NATIVE_TARGETS,
+            "linux_native_required": LINUX_NATIVE_REQUIRED,
             "linux_common_architectures": ("X64", "ARM64"), "implementation": "CPython",
             "installation_limits": {"command": 900, "case": 1200, "journey": 5400, "workers": 3},
             "harness_sha256": harness}
@@ -111,8 +123,14 @@ def suite_result(report, *, commit, source, targets, runtime):
         raise ValueError("local combined orders are incomplete")
     for row, (label, order) in zip(report["combined_orders"], orders, strict=True):
         check_run(row, label, [node for module in order for node in nodes if node.startswith(module + "::")])
-    return {"collection_sha256": digest(nodes), "collected": len(nodes), "executed": len(nodes),
-            "groups": len(planned), "combined_orders": len(orders), "status": "passed"}
+    result = {"collection_sha256": digest(nodes), "collected": len(nodes), "executed": len(nodes),
+              "groups": len(planned), "combined_orders": len(orders), "status": "passed"}
+    if list(targets) == list(LINUX_NATIVE_TARGETS):
+        outcomes = {key: outcome for row in report["groups"] for key, outcome in row["result"].get("case_outcomes", {}).items()}
+        if any(outcomes.get(node) != "passed" for node in LINUX_NATIVE_REQUIRED):
+            raise ValueError("required native behavior was skipped or did not pass")
+        result["native_checks"] = dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")
+    return result
 
 
 def linux_obligation(runtime):
@@ -129,7 +147,8 @@ def linux_native_pair(left, right):
     for value in (left, right):
         checked_runtime(value["runtime"], system="Linux", python=PYTHON_PATCHES["3.12"])
         if (value["targets"] != list(LINUX_NATIVE_TARGETS) or value["status"] != "passed"
-                or value["collected"] <= 0 or value["executed"] != value["collected"]):
+                or value["collected"] <= 0 or value["executed"] != value["collected"]
+                or value.get("native_checks") != dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")):
             raise ValueError("native architecture probe is incomplete")
     if {left["runtime"]["architecture"], right["runtime"]["architecture"]} != {"X64", "ARM64"}:
         raise ValueError("both real Linux architectures are required")
@@ -163,6 +182,8 @@ def checked_receipt(value, *, commit, tree, base, repository, now=None):
         fields = {"commit", "tree", "runtime", "status", "compatibility", "collection_sha256"}
         fields |= {"installations", "limits", "wheel_sha256", "sdist_sha256"} if name == "packages" else (
             {"targets", "collected", "executed", "groups", "combined_orders"} if name != "macos-compatibility" else set())
+        if name == "linux-native":
+            fields.add("native_checks")
         if (type(row) is not dict or set(row) != fields or row.get("status") != "passed"
                 or row.get("commit") != commit or row.get("tree") != tree):
             raise ValueError("local profile is failed or bound to another candidate")
@@ -195,6 +216,7 @@ def checked_receipt(value, *, commit, tree, base, repository, now=None):
     native = profiles["linux-native"]
     if (native.get("targets") != list(LINUX_NATIVE_TARGETS) or type(native.get("collected")) is not int
             or native["collected"] <= 0 or type(native.get("executed")) is not int
-            or native["executed"] != native["collected"]):
+            or native["executed"] != native["collected"]
+            or native.get("native_checks") != dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")):
         raise ValueError("local native architecture probe is incomplete")
     return value

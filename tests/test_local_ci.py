@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import pytest
 
 from tools._local_ci_contract import (
+    LINUX_NATIVE_REQUIRED,
     LINUX_NATIVE_TARGETS,
     PYTHON_PATCHES,
     REQUIRED_LOCAL_PROFILES,
@@ -45,6 +46,7 @@ def receipt():
                           "compatibility": "passed", "collection_sha256": "c" * 64, "collected": 14,
                           "executed": 14, "groups": 1, "combined_orders": 2, "targets": ["tests"]}
     profiles["linux-native"]["targets"] = list(LINUX_NATIVE_TARGETS)
+    profiles["linux-native"]["native_checks"] = dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")
     for key in ("targets", "collected", "executed", "groups", "combined_orders"):
         profiles["macos-compatibility"].pop(key)
         profiles["packages"].pop(key)
@@ -72,10 +74,11 @@ def test_shared_linux_obligation_does_not_relabel_the_native_machine():
         linux_obligation(runtime("riscv64", "3.14.7"))
 
 
-@pytest.mark.parametrize("damage", [None, "same-architecture", "collection", "candidate", "incomplete", "target", "mislabel"])
+@pytest.mark.parametrize("damage", [None, "same-architecture", "collection", "candidate", "incomplete", "target", "mislabel", "skipped-native"])
 def test_architecture_pair_requires_both_real_machines_and_equal_probe_coverage(damage):
     left = {"runtime": runtime("x86_64"), "targets": list(LINUX_NATIVE_TARGETS), "status": "passed",
             "commit": "a" * 40, "tree": "b" * 40, "collection_sha256": "c" * 64, "collected": 20, "executed": 20}
+    left["native_checks"] = dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")
     right = {**copy.deepcopy(left), "runtime": runtime("aarch64")}
     if damage == "same-architecture":
         right["runtime"] = runtime("x86_64")
@@ -89,6 +92,8 @@ def test_architecture_pair_requires_both_real_machines_and_equal_probe_coverage(
         right["targets"].pop()
     elif damage == "mislabel":
         right["runtime"]["architecture"] = "X64"
+    elif damage == "skipped-native":
+        right["native_checks"][LINUX_NATIVE_REQUIRED[0]] = "skipped"
     if damage is None:
         assert linux_native_pair(left, right)["architectures"] == ["X64", "ARM64"]
     else:

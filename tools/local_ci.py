@@ -93,14 +93,22 @@ def audit_profile(directory, *, commit, tree, source):
         raise ValueError("profile failed or belongs to another candidate")
     runtime = checked_runtime(row["runtime"], system=profile_runtime(row["profile"])[0], python=profile_runtime(row["profile"])[1])
     compatibility = read_json(directory / "compatibility/summary.json")
-    from tools.check_ci_compatibility import require_complete
+    from tools.check_ci_compatibility import TARGETS, require_complete
 
     if (compatibility["status"] != "passed" or compatibility["sources_unchanged"] is not True
             or compatibility["source_sha256"] != source or compatibility["python_version"] != runtime["python"]
             or compatibility["expected_python"] != runtime["python"] or len(compatibility["runs"]) != 2):
         raise ValueError("compatibility original differs")
-    for record in compatibility["runs"]:
-        require_complete(record, record["result"]["collected"], collect=record["label"] == "collection")
+    collection, selected_run = compatibility["runs"]
+    nodes = collection["result"]["collected"]
+    expected = [node for node in nodes if any(node == target or node.startswith(target + "::")
+                                             or node.startswith(target + "[") for target in TARGETS)]
+    if collection["label"] != "collection" or selected_run["label"] != "compatibility" or not expected:
+        raise ValueError("compatibility stage selection differs")
+    require_complete(collection, nodes, collect=True)
+    require_complete(selected_run, expected)
+    if compatibility["collected"] != len(nodes) or compatibility["selected"] != len(expected):
+        raise ValueError("compatibility denominators differ")
     name = row["profile"]
     if name in {"linux-3.10", "linux-3.14", "macos-3.12", "linux-native"}:
         targets = list(LINUX_NATIVE_TARGETS) if name == "linux-native" else ["tests"]
@@ -316,6 +324,8 @@ def seal(args):
         fields = {"commit", "tree", "runtime", "status", "compatibility", "collection_sha256"}
         fields |= {"installations", "limits", "wheel_sha256", "sdist_sha256"} if name == "packages" else (
             {"targets", "collected", "executed", "groups", "combined_orders"} if name != "macos-compatibility" else set())
+        if name == "linux-native":
+            fields.add("native_checks")
         rows[name] = {key: row[key] for key in fields}
     inventory = {}
     for path in sorted(args.evidence.rglob("*")):
