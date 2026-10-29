@@ -17,6 +17,8 @@ from evidence_wiki.agent_execution import BoundedSubprocessExecutor, _Running
 from tools import _integration_owner_pass as groups
 from tools import _review_dependency_workload as native
 
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Owned child receipts require POSIX process-group identity.")
+
 
 @pytest.fixture
 def tracker(tmp_path, monkeypatch):

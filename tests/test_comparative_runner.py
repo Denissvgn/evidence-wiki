@@ -6,6 +6,7 @@ import hashlib
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,6 +40,8 @@ def plan(command=None, *, seconds=10, max_attempts=3):
 
 
 def ledger(tmp_path, selected=None):
+    if os.name != "posix":
+        pytest.skip("The reference trial ledger requires POSIX private storage and process groups.")
     selected = selected or plan()
     return TrialLedger(tmp_path / "private", selected, observer_key=b"k" * 32,
         work_root=tmp_path / "workers", create=True)
@@ -63,6 +66,21 @@ def test_command_manifest_does_not_hide_script_access_errors(monkeypatch):
     monkeypatch.setattr(Path, "is_file", denied)
     with pytest.raises(PermissionError):
         command_manifest([sys.executable, "protected.py"])
+
+
+def test_unsupported_private_storage_refuses_before_filesystem_access(tmp_path, monkeypatch):
+    from tools import run_comparative_trials as runner
+    selected = plan()
+    monkeypatch.setattr(runner, "os", SimpleNamespace(name="nt"))
+    path = tmp_path / "absent"
+    with pytest.raises(ValueError, match="trial_platform_unsupported"):
+        runner.checked_directory(path)
+    with pytest.raises(ValueError, match="trial_platform_unsupported"):
+        runner.read_private(path, 128)
+    work = tmp_path / "workers"
+    with pytest.raises(ValueError, match="trial_platform_unsupported"):
+        TrialLedger(path, selected, observer_key=b"k" * 32, work_root=work, create=True)
+    assert not path.exists() and not work.exists()
 
 
 def test_read_only_open_never_recovers_creates_lock_or_appends(tmp_path, monkeypatch):

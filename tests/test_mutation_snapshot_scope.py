@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from evidence_wiki import Workspace, _script_host, mutation_operations
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.host_context import HostContext
 from tests.test_mutation_operations import GRANTS
 
@@ -16,7 +17,7 @@ def test_absolute_wiki_path_cannot_reopen_live_question_for_reconciliation(tmp_p
     questions = root / "wiki" / "questions"
     questions.mkdir(parents=True)
     (root / "sources").mkdir()
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     config = {
         "wiki": {"root": str(root / "wiki")},
         "sources": {

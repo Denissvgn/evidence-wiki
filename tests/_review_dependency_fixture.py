@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest import SkipTest
 
 from evidence_wiki._process_groups import ProcessGroupOwnership
 from tools._integration_owner_pass import _group_alive
@@ -194,7 +195,7 @@ def require_storage():
 
     require_host_storage()
     if os.open not in os.supports_dir_fd:
-        raise RuntimeError("Native no-follow descriptor storage is required.")
+        raise SkipTest("This native comparison producer requires no-follow descriptor storage.")
 
 
 def case_evidence_report(selected=("unchanged-baseline",)):

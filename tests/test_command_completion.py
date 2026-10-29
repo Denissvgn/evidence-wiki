@@ -18,6 +18,7 @@ from tools._integration_costs import METRICS, freeze_cost_plan
 from tools._journey_cases import digest
 
 KEY = b"k" * 32
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Owned completion requires POSIX process-group identity.")
 SCOPE = {"plan_sha256": "a" * 64, "stage": "run-primary-direct"}
 
 

@@ -13,6 +13,7 @@ import yaml
 
 from evidence_wiki import Onboarding, Workspace
 from evidence_wiki._facades._base import call_seam
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.errors import ConfigError
 from evidence_wiki.host_context import HostContext, checked_operation
 from evidence_wiki.mutation_store import MutationStore, MutationStoreError
@@ -37,7 +38,7 @@ def roots(tmp_path, monkeypatch):
     root, control = tmp_path / "workspace", tmp_path / "control"
     (root / "wiki/questions").mkdir(parents=True)
     (root / "sources").mkdir()
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     (root / "research.yml").write_text(yaml.safe_dump({"wiki": {"root": "wiki"},
         "sources": {"manifest_path": "sources/manifest.jsonl", "coverage_dir": "sources/coverage"}}))
     (root / "sources/manifest.jsonl").write_text("")
@@ -195,7 +196,7 @@ def test_control_identity_replacement_refuses_before_direct_effect(roots):
     root, control = roots
     with host(roots).activate(), pytest.raises(MutationStoreError), MutationStore(*roots).workspace_locked():
         control.rename(control.with_name("old-control"))
-        control.mkdir(mode=0o700)
+        native_os.mkdir(control, mode=0o700)
         with pytest.raises(ConfigError):
             call_seam(lambda _: pytest.fail("owner loaded"), "coverage_manifest", "run_init_inline", root)
 

@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from evidence_wiki import mutation_store as module
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.mutation_contracts import RECEIPT, REQUEST, STATE, arguments, make_intent
 from evidence_wiki.mutation_store import MutationStore, MutationStoreError, capture_owner_generation, capture_revision
 
@@ -18,7 +19,7 @@ from evidence_wiki.mutation_store import MutationStore, MutationStoreError, capt
 def roots(tmp_path):
     workspace, control = tmp_path / "workspace", tmp_path / "control"
     workspace.mkdir()
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     (workspace / "input.yml").write_bytes(b"schema_version: '1.0'\nquestions: []\n")
     return workspace, control
 
@@ -231,7 +232,7 @@ def test_unowned_or_escaped_control_entries_refuse(roots, tmp_path, kind):
             MutationStore(workspace, workspace)
         return
     if kind == "public_control":
-        control.chmod(0o755)
+        native_os.chmod(control, 0o755)
         with pytest.raises(MutationStoreError), MutationStore(workspace, control).workspace_locked():
             pass
         return
@@ -401,6 +402,6 @@ def test_stored_invalid_json_and_unknown_state_are_not_admitted(roots):
             store.write(invalid)
     path = request_directory(control, workspace) / "state.json"
     path.write_text("not-json")
-    path.chmod(0o600)
+    native_os.chmod(path, 0o600)
     with pytest.raises(MutationStoreError):
         MutationStore(workspace, control).inspect("request")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os as system_os
 from pathlib import Path
 from unittest import SkipTest
 
@@ -17,6 +18,13 @@ def require_host_storage():
     if (importlib.util.find_spec("fcntl") is None or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid")
             or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd):
         raise SkipTest("host evidence storage requires native locking, ownership and no-follow directory operations")
+
+
+def require_bounded_inventory():
+    """The bundled inventory producer uses Python's descriptor traversal API."""
+    if (system_os.open not in system_os.supports_dir_fd or system_os.scandir not in system_os.supports_fd
+            or not hasattr(system_os, "O_NOFOLLOW")):
+        raise SkipTest("this source fixture requires the bundled descriptor-based inventory producer")
 
 
 class UsageFixture:

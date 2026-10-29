@@ -8,6 +8,7 @@ import stat
 import pytest
 
 from evidence_wiki import mutation_store as module
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.mutation_store import MutationStore, MutationStoreError
 from tests.test_mutation_store import intent, request_directory
 from tests.test_mutation_store import roots as roots
@@ -73,7 +74,7 @@ def test_staged_custody_and_content_changes_refuse(roots, tmp_path, alias):
     target = leaf.with_name(leaf.name + ".json") if alias == "metadata_link" else leaf
     outside = tmp_path / "outside"
     outside.write_bytes(b"outside-marker")
-    outside.chmod(0o600)
+    native_os.chmod(outside, 0o600)
     if alias == "tampered":
         target.write_bytes(b"other")
     else:
@@ -127,14 +128,14 @@ def test_retained_temporaries_are_private_bounded_and_count_toward_quota(roots, 
     directory = request_directory(control, root)
     temporary = directory / (".mutation-" + "1" * 32)
     temporary.write_bytes(b"retained staging bytes")
-    temporary.chmod(0o600)
+    native_os.chmod(temporary, 0o600)
     monkeypatch.setattr(module, "MAX_STAGE_BYTES", temporary.stat().st_size - 1)
     with pytest.raises(MutationStoreError) as error, MutationStore(root, control, value).locked():
         pass
     assert error.value.details == {"reason": "stage_aggregate_bound"}
     assert temporary.read_bytes() == b"retained staging bytes"
     monkeypatch.setattr(module, "MAX_STAGE_BYTES", 256 * 1024 * 1024)
-    temporary.chmod(0o644)
+    native_os.chmod(temporary, 0o644)
     with pytest.raises(MutationStoreError), MutationStore(root, control, value).locked():
         pass
 

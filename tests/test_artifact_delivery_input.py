@@ -70,8 +70,7 @@ def test_admission_cannot_be_copied_or_used_after_its_actual_scope(monkeypatch):
 
 
 def test_unowned_publication_cannot_create_even_a_temporary_file(tmp_path):
-    import os
-
+    from evidence_wiki._filesystem import os
     from evidence_wiki.source_delivery import _publish
 
     if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
@@ -86,8 +85,7 @@ def test_unowned_publication_cannot_create_even_a_temporary_file(tmp_path):
 
 
 def test_no_replace_publication_preserves_even_identical_existing_bytes(tmp_path):
-    import os
-
+    from evidence_wiki._filesystem import os
     from evidence_wiki.source_delivery import _publish
 
     target = tmp_path / "brief.md"
@@ -105,9 +103,9 @@ def test_no_replace_publication_preserves_even_identical_existing_bytes(tmp_path
 
 
 def test_publication_checks_named_parent_against_retained_native_directory(tmp_path):
-    import os
     from types import SimpleNamespace
 
+    from evidence_wiki._filesystem import os
     from evidence_wiki.artifact_publication import _PublicationWitness
     from evidence_wiki.host_context import HostContext
 

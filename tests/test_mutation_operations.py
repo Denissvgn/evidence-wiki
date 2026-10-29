@@ -15,6 +15,7 @@ import yaml
 
 from evidence_wiki import Workspace, _script_host
 from evidence_wiki import mutation_operations as operations
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
 from evidence_wiki.mutation_contracts import INSPECTION, RECEIPT, RECONCILIATION, MutationError
@@ -37,7 +38,7 @@ def roots(tmp_path, monkeypatch):
     (root / "wiki/questions").mkdir(parents=True)
     (root / "sources").mkdir()
     (root / "raw/web").mkdir(parents=True)
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     config = {"wiki": {"root": "wiki", "required_dirs": ["questions"]},
         "raw": {"source_roots": ["raw/web"]}, "sources": {"manifest_path": "sources/manifest.jsonl",
             "coverage_dir": "sources/coverage", "normalized_dir": "sources/normalized"}}
@@ -151,7 +152,7 @@ def test_changed_host_selection_refuses_historical_replay_and_inspection(roots, 
         options["controller_refs"] = {"evaluator": "independent-controller"}
     else:
         other = tmp_path / "other-control"
-        other.mkdir(mode=0o700)
+        native_os.mkdir(other, mode=0o700)
         selected_roots = root, other
     with host(selected_roots, **options).activate(), pytest.raises(MutationError) as error:
         operations.submit(root, request)
@@ -164,7 +165,7 @@ def test_changed_host_selection_refuses_historical_replay_and_inspection(roots, 
 def test_authority_policy_digest_changes_and_links_refuse_before_replay(roots, tmp_path):
     root, _ = roots
     custody = tmp_path / "authority"
-    custody.mkdir(mode=0o700)
+    native_os.mkdir(custody, mode=0o700)
     policy = custody / "policy.json"
     policy.write_text('{"policy":"original"}')
     selected = host(roots, authority_file=policy)
@@ -567,7 +568,7 @@ def strict_context(fixture, control):
 def test_strict_review_reuses_authenticated_protocol_and_exact_event_recovery(strict_fixture, tmp_path, monkeypatch):
     fixture = strict_fixture
     control = tmp_path / "mutation-control"
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     envelope = signed_review(fixture)
     original = operations._invoke
     def interrupted(*args):
@@ -597,7 +598,7 @@ def test_forged_review_same_inner_id_never_matches_original_canonical_event(stri
     forged = copy.deepcopy(envelope)
     forged["payload"]["body"]["review"]["verdicts"]["support"] = "fail"
     control = tmp_path / "mutation-control"
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     before = (fixture.host / "evidence-state.json").read_bytes()
     with strict_context(fixture, control).activate():
         request = prepared(fixture.root, "strict.register_review", {"envelope": forged})

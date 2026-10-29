@@ -1,5 +1,6 @@
 """Historical native receipts preserve current observations; host calls expire them."""
 
+import os
 from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from tests.test_execution_role_binding import scoped
 
 observation = strict_scope.observation
 register = strict_scope.register
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="The native reference receipt verifier requires the POSIX executor.")
 
 
 def execution(host):

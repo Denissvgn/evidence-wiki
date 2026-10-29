@@ -1,6 +1,7 @@
 """Host retention boundaries, bounded processes, and partial comparative costs."""
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -16,6 +17,7 @@ from tools.measure_integration_costs import from_comparative_ledger, main, obser
 from tools.run_comparative_trials import TrialLedger, clock, command_manifest
 
 KEY = b"k" * 32
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Observed command and ledger integration uses POSIX private storage and process groups.")
 
 
 def selected_plan():

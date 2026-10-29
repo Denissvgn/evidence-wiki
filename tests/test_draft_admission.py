@@ -17,6 +17,7 @@ import yaml
 from evidence_wiki import Workspace, draft_contracts
 from evidence_wiki import mutation_draft_recovery as recovery
 from evidence_wiki import mutation_operations as operations
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
@@ -26,7 +27,7 @@ from evidence_wiki.onboarding_contract import decode_document
 from evidence_wiki.pack_discovery import owner
 from tests._execution_fixture import KEYS, authenticate, closure, identifier
 from tests._execution_fixture import canonical as authenticated_bytes
-from tests._usage_fixture import UsageFixture
+from tests._usage_fixture import UsageFixture, require_bounded_inventory
 from tests.test_host_capture import deposit, profile
 from tests.test_mutation_store import state
 
@@ -62,12 +63,13 @@ def update_policy(root, edit=None):
 
 @pytest.fixture
 def draft_root(tmp_path, monkeypatch):
+    require_bounded_inventory()
     monkeypatch.delenv("EVIDENCE_WIKI_AUTHORITY_FILE", raising=False)
     monkeypatch.delenv("EVIDENCE_WIKI_STATE_DIR", raising=False)
     root, control = tmp_path / "workspace", tmp_path / "control"
     for name in ("wiki/questions", "sources", "raw/web", "docs"):
         (root / name).mkdir(parents=True, exist_ok=True)
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     (root / "workspace-system.yml").write_text("workspace_system:\n  starter_version: local\n")
     (root / "AGENTS.md").write_text("Retain exact source observations.\n")
     declaration = request(root)
@@ -368,7 +370,7 @@ def test_exact_native_claims_control_forms_are_bounded(draft_root, form):
     (root / ".locks").mkdir(exist_ok=True)
     lock = root / ".locks/draft-admission.lock"
     lock.write_bytes(form)
-    lock.chmod(0o600)
+    native_os.chmod(lock, 0o600)
     with host(draft_root).activate():
         wanted = intent(root, proposal)
         with MutationStore(root, control, wanted).locked() as store:

@@ -3,6 +3,7 @@
 import hashlib
 import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -45,8 +46,9 @@ def refresh_hash(snapshot):
 
 
 def baseline():
-    snapshot = {"run_id": "business", "source_path": "/owned/runs/business/events.jsonl",
-        "state_path": "/owned/runs/business/run-state.json", "source_sha256": "", "state_sha256": "d" * 64,
+    directory = Path("/owned") / "runs" / "business"
+    snapshot = {"run_id": "business", "source_path": str(directory / "events.jsonl"),
+        "state_path": str(directory / "run-state.json"), "source_sha256": "", "state_sha256": "d" * 64,
         "state": {"run_id": "business", "agent_id": "host", "research_session": {"run_id": "business"},
             "updated_at": "2026-10-11T03:00:00+00:00", "original_question": "Unchanged original."}, "events": []}
     append(snapshot, "execution_attempt", {"attempt_id": "original", "input": "Original input."}, "original-work")

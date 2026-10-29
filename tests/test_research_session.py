@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from evidence_wiki import Workspace
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.host_context import HostContext
 from evidence_wiki.mutation_contracts import digest
@@ -68,7 +69,8 @@ def policy(*, paid=False):
 
 def host(root, tmp_path, *, grants=GRANTS, **options):
     control = tmp_path / "control"
-    control.mkdir(mode=0o700, exist_ok=True)
+    if not control.exists():
+        native_os.mkdir(control, mode=0o700)
     return HostContext([root], grants, "caller", [root], mutation_control_directory=control,
         controller_refs={"host_worker": "worker", "evaluator": "independent"}, **options)
 

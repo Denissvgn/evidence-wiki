@@ -77,6 +77,8 @@ def command_manifest(command):
 
 
 def checked_directory(path):
+    if os.name != "posix":
+        raise ValueError("trial_platform_unsupported")
     path = Path(path).absolute()
     if path.resolve() != path or path.is_symlink():
         raise ValueError("trial_directory_not_canonical")
@@ -87,6 +89,8 @@ def checked_directory(path):
 
 
 def read_private(path, maximum):
+    if os.name != "posix":
+        raise ValueError("trial_platform_unsupported")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(descriptor)
@@ -149,6 +153,8 @@ class TrialLedger:
                  read_only=False):
         if type(read_only) is not bool or read_only and create:
             raise ValueError("trial_read_only_selection_invalid")
+        if os.name != "posix":
+            raise ValueError("trial_platform_unsupported")
         self._read_only = read_only
         if type(observer_key) is not bytes or not 32 <= len(observer_key) <= 128:
             raise ValueError("trial_observer_key_invalid")

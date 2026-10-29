@@ -3,7 +3,6 @@
 import hashlib
 import io
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +12,7 @@ from evidence_wiki import mutation_capture_recovery as recovery
 from evidence_wiki import mutation_operations as mutations
 from evidence_wiki import source_capture_contracts as codec
 from evidence_wiki import source_capture_operations as capture
+from evidence_wiki._filesystem import os
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
 from evidence_wiki.mutation_store import MutationStore

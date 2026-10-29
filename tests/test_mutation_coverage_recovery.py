@@ -13,6 +13,7 @@ import yaml
 from evidence_wiki import Workspace
 from evidence_wiki import mutation_coverage_recovery as recovery
 from evidence_wiki import mutation_operations as operations
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki._pack_io import canonical
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.host_context import HostContext
@@ -54,7 +55,7 @@ def migration_root(workspace, candidate, tmp_path):
     wanted = migration(prepared)
     wanted["template"]["required_facets"][0]["min_sources"] = 2
     control = tmp_path / "mutation-control"
-    control.mkdir(mode=0o700)
+    native_os.mkdir(control, mode=0o700)
     return workspace.resolve(), control.resolve(), wanted
 
 

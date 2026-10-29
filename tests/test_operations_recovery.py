@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from evidence_wiki import Workspace, cli
+from evidence_wiki._filesystem import os as native_os
 from evidence_wiki.host_context import HostContext
 from evidence_wiki.mutation_store import MutationStore
 from evidence_wiki.operation_control import OperationControl
@@ -28,7 +29,7 @@ def upgrade(tmp_path):
     root = tmp_path / "workspace"
     assert cli.main(["init", "--target", str(root), "--project-name", "Retained upgrade", "--project-description", "Keep approved tooling"]) == 0
     private = tmp_path / "control"
-    private.mkdir(mode=0o700)
+    native_os.mkdir(private, mode=0o700)
     context = HostContext((root,), {"operations.recover_upgrade"}, "operations-host", (root,), mutation_control_directory=private)
     path = root / "scripts/query_index.py"
     path.write_bytes(b"# permitted previous generation\n")
@@ -243,7 +244,7 @@ def protected(tmp_path, monkeypatch):
     body, files = fixture.source()
     fixture.transact(module, "deposit", body, files)
     private = tmp_path / "control"
-    private.mkdir(mode=0o700)
+    native_os.mkdir(private, mode=0o700)
     context = HostContext((fixture.root,), {"workspace.open", "evidence_usage.run_status", "evidence_usage.run_check", "evidence_usage.run_materialize",
         "operations.backup", "operations.restore"}, "operations-host", (fixture.root,), authority_file=fixture.policy_path,
         state_directory=fixture.host, mutation_control_directory=private)

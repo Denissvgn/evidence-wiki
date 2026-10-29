@@ -1,6 +1,7 @@
 """Pinned observer policies survive selection and allocation without renewal."""
 
 import copy
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,8 @@ from tools._observation_freshness import observation_policy
 
 def pinned_recipe(tmp_path, profile):
     """Persist policy provenance only; this is no completed native execution."""
+    if os.name != "posix":
+        pytest.skip("The frozen reference-recipe pin format uses POSIX absolute paths.")
     source = case_evidence_report()[1]
     observation = observation_policy(profile)
     native = {"schema_version": formal.PLAN_SCHEMA_EXECUTION, "study": "pilot",

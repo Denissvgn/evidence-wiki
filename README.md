@@ -186,6 +186,7 @@ python -B scripts/normalize_sources.py --all
 ```
 
 Inventory writes `sources/manifest.jsonl`; normalization writes evidence records.
+The bounded inventory producer requires POSIX descriptor traversal.
 Use `--dry-run` to preview either operation, but normalization previews still
 require a written manifest; inventory dry-run output cannot replace it. Keep raw
 evidence immutable and continue with the [research workflow][research-run].
@@ -194,7 +195,7 @@ evidence immutable and continue with the [research workflow][research-run].
 
 | Mode | Entry point and boundary |
 | --- | --- |
-| Direct Python host | The installed [unattended host example](examples/unattended-host/README.md) drives public setup, source admission, review/repair, current export and refresh, with separate fixture and live runtime modes. |
+| Direct Python host | The installed POSIX [unattended host example](examples/unattended-host/README.md) drives public setup, source admission, review/repair, current export and refresh, with separate fixture and live runtime modes. |
 | Automated agent host | [Host recipes](examples/agent-host/README.md) select bounded task instructions with a Planner and independent critic, then drive current-caller or scoped MCP operations with explicit terminal telemetry. |
 | Integration documentation | The installed [documentation example](examples/integration-docs/README.md) assembles a contract-derived journey/reference, checks it with an independent critic and records bounded repair proposals. |
 | Scoped MCP host | `serve-onboarding-mcp` exposes [startup-granted research tools](workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools), with explicit runtime, native cancellation/recovery and no elicitation. |
@@ -205,7 +206,7 @@ evidence immutable and continue with the [research workflow][research-run].
 
 For exact candidate conformance, the [unattended qualification guide](docs/unattended-qualification.md)
 describes original agent/tool evidence, complete installed transports, terminal
-accounting and independent replay.
+accounting and independent replay. The supplied comparison runners require POSIX.
 The [release decision guide](docs/release-qualification.md) describes frozen
 evidence rules, scoped qualification outcomes and current-owner replay without
 manual sign-off or publication.

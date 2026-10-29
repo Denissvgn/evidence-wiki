@@ -1,6 +1,7 @@
 """Authenticated producer provenance is consumed before plain JSON retention."""
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,8 @@ from tools import measure_integration_costs as observer
 from tools import run_native_owner_feasibility as runner
 from tools._integration_costs import METRICS, freeze_cost_plan
 from tools._release_decision import canonical, digest
+
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="Native producer retention uses the POSIX private observer store.")
 
 
 @pytest.mark.parametrize("action", ["decide", "replay"])

@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 from types import FunctionType
 
@@ -22,6 +23,8 @@ from tools.decide_release import _HostDeadline
 
 @pytest.fixture
 def plan(tmp_path):
+    if os.name != "posix":
+        pytest.skip("This comparison fixture requires the POSIX producer's pinned-file and process-group contracts.")
     questions = [{"slug": "capacity", "original_id": "capacity", "question": "Does retained capacity cover retained demand?"},
         {"slug": "demand", "original_id": "demand", "question": "What demand and independent service note were retained?"}]
     evidence = lambda source, quote: {"source_id": source, "record_sha256": "sha256:" + "0" * 64,
