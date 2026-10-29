@@ -834,6 +834,8 @@ def test_single_artifact_and_timeout_options_are_explicit():
 @pytest.mark.parametrize("requested", [None, "", "9.9.9"])
 @pytest.mark.parametrize("artifact", ["wheel", "sdist"])
 def test_installation_version_binds_defaults_to_candidate_source(tmp_path, monkeypatch, requested, artifact):
+    for name in ('public_expectations', 'active_artifact'):
+        monkeypatch.setattr(artifacts._OPTIONS, name, getattr(artifacts._OPTIONS, name, None), raising=False)
     wheel, sdist = tmp_path/'candidate.whl', tmp_path/'candidate.tar.gz'
     layout = {"project": {"version": "1.2.3"}}
     monkeypatch.setattr(artifacts, 'find_artifacts', lambda path: (wheel, sdist))
