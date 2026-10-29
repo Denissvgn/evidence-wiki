@@ -435,18 +435,29 @@ def expanded_size(value: Any) -> int:
     return size
 
 
-def detached_records(value: Any) -> list[dict[str, Any]]:
-    """Detach a native collection without charging list/header depth to data."""
+def _record_collection(value: Any) -> tuple[bytes, list[dict[str, Any]]]:
+    """Check each child and the complete logical/physical frames once."""
     if type(value) is not list or len(value) > 4096:
         refuse("LIMIT")
-    result = [detached_record(record) for record in value]
-    expanded_size(result)
-    _aggregate([_owned_record_transport(record, physical=False) for record in result])
-    return result
+    result = []
+    expanded = 2 + max(0, len(value) - 1)
+    for record in value:
+        raw = _detached_record_bytes(record)
+        expanded += len(raw)
+        if expanded > 16777216:
+            refuse("LIMIT")
+        result.append(json.loads(raw))
+    physical = [_owned_record_transport(record, physical=False) for record in result]
+    return _aggregate_bytes(physical), result
+
+
+def detached_records(value: Any) -> list[dict[str, Any]]:
+    """Detach a native collection without charging list/header depth to data."""
+    return _record_collection(value)[1]
 
 
 def canonical_records(value: Any) -> bytes:
-    raw = _serialized([_owned_record_transport(record, physical=False) for record in detached_records(value)])
+    raw = _record_collection(value)[0]
     if len(raw) > 1048576:
         refuse("LIMIT")
     return raw

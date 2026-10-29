@@ -156,12 +156,12 @@ def test_collection_encoding_detaches_each_input_once_with_identical_bytes(monke
     records = [memo_record() if large else memo_record({"value": "original"}), memo_record({"value": "second"})]
     logical = [codec.detached_record(record) for record in records]
     expected = _serialized([codec._record_transport(record, physical=False) for record in logical])
-    original = codec.detached_record
+    original = codec._detached_record_bytes
     calls = []
     def detached(record):
         calls.append(record)
         return original(record)
-    monkeypatch.setattr(codec, "detached_record", detached)
+    monkeypatch.setattr(codec, "_detached_record_bytes", detached)
     assert codec.canonical_records(records) == expected
     assert len(calls) == len(records)
     owned = codec.detached_records(records)
