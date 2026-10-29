@@ -44,7 +44,7 @@ def validate_execution_policy(value):
 
 def _utc(value):
     try:
-        instant = datetime.fromisoformat(value) if type(value) is str else value
+        instant = datetime.fromisoformat(value.replace("Z", "+00:00")) if type(value) is str else value
         if not isinstance(instant, datetime) or instant.tzinfo is None or instant.utcoffset() is None:
             raise ValueError
         return instant.astimezone(timezone.utc)

@@ -431,12 +431,12 @@ def detached_records(value: Any) -> list[dict[str, Any]]:
         refuse("LIMIT")
     result = [detached_record(record) for record in value]
     expanded_size(result)
-    _aggregate([_record_transport(record, physical=False) for record in result])
+    _aggregate([_owned_record_transport(record, physical=False) for record in result])
     return result
 
 
 def canonical_records(value: Any) -> bytes:
-    raw = _serialized([_record_transport(record, physical=False) for record in detached_records(value)])
+    raw = _serialized([_owned_record_transport(record, physical=False) for record in detached_records(value)])
     if len(raw) > 1048576:
         refuse("LIMIT")
     return raw

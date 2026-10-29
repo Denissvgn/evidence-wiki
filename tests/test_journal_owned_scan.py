@@ -151,6 +151,24 @@ def test_record_digest_preserves_canonical_bytes_without_schema_key_work(monkeyp
         codec.digest_record({**record, "foreign": True})
 
 
+@pytest.mark.parametrize("large", [False, True])
+def test_collection_encoding_detaches_each_input_once_with_identical_bytes(monkeypatch, large):
+    records = [memo_record() if large else memo_record({"value": "original"}), memo_record({"value": "second"})]
+    logical = [codec.detached_record(record) for record in records]
+    expected = _serialized([codec._record_transport(record, physical=False) for record in logical])
+    original = codec.detached_record
+    calls = []
+    def detached(record):
+        calls.append(record)
+        return original(record)
+    monkeypatch.setattr(codec, "detached_record", detached)
+    assert codec.canonical_records(records) == expected
+    assert len(calls) == len(records)
+    owned = codec.detached_records(records)
+    owned[0]["request_id"] = "caller-change"
+    assert records[0]["request_id"] == "record"
+
+
 def test_pure_record_codec_reuses_only_success_and_returns_fresh_values(codec_memo, monkeypatch):
     original = codec.detached_record
     calls = []

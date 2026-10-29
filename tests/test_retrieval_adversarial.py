@@ -14,6 +14,7 @@ from evidence_wiki.pack_discovery import owner
 from tests.test_mutation_operations import GRANTS
 from tests.test_mutation_operations import roots as roots
 from tests.test_native_capture_normalization import normalize
+from tests.test_retrieval_operations import require_index_serialization
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd,
     reason="Native descriptor-relative retrieval custody is unavailable.")
@@ -25,6 +26,7 @@ def selected(roots):
 
 
 def built(roots,source_id):
+    require_index_serialization()
     with selected(roots).activate(),MutationStore(*roots).workspace_locked():
         return retrieval.build_index(roots[0],source_ids=[source_id])
 
