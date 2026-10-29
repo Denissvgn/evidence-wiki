@@ -320,8 +320,8 @@ def _record_codec_key(value):
         return None
 
 
-def _aggregate(value: Any) -> Any:
-    """Apply the unchanged total budget after checking every child separately."""
+def _aggregate_bytes(value: Any) -> bytes:
+    """Apply the unchanged total budget and encode checked children once."""
     pending, count = [value], 0
     while pending:
         item = pending.pop()
@@ -332,11 +332,15 @@ def _aggregate(value: Any) -> Any:
             pending.extend(child for pair in item.items() for child in pair)
         elif type(item) is list:
             pending.extend(item)
-    return json.loads(_serialized(value))
+    return _serialized(value)
 
 
-def detached_record(value: Any) -> dict[str, Any]:
-    """Detach one closed header around data checked at its original depth 16."""
+def _aggregate(value: Any) -> Any:
+    return json.loads(_aggregate_bytes(value))
+
+
+def _detached_record_bytes(value: Any) -> bytes:
+    """Encode one closed header around data checked at its original depth 16."""
     if (type(value) is not dict or any(type(key) is not str for key in value)
             or value.keys() not in (_FIELDS, _FIELDS | {"event_ref"})
             or value.get("schema_version") != JOURNAL):
@@ -351,7 +355,12 @@ def detached_record(value: Any) -> dict[str, Any]:
     else:
         data = detached_native(data)
     result["data"] = data
-    return _aggregate(result)
+    return _aggregate_bytes(result)
+
+
+def detached_record(value: Any) -> dict[str, Any]:
+    """Return a fresh logical record after its complete bounded encoding."""
+    return json.loads(_detached_record_bytes(value))
 
 
 def _owned_record_transport(result: dict[str, Any], *, physical: bool) -> dict[str, Any]:
@@ -391,10 +400,11 @@ def _canonical_owned_record(value: Any, *, expanded_limit: int | None = None, us
             if expanded_limit is not None and expanded_size(owned) > expanded_limit:
                 refuse("LIMIT")
             return canonical, owned
-    logical = detached_record(value)
-    if expanded_limit is not None and expanded_size(logical) > expanded_limit:
+    logical_raw = _detached_record_bytes(value)
+    logical = json.loads(logical_raw)
+    if expanded_limit is not None and len(logical_raw) > expanded_limit:
         refuse("LIMIT")
-    canonical = _serialized(_owned_record_transport(logical, physical=False))
+    canonical = logical_raw if len(logical_raw) <= 262144 else _serialized(_owned_record_transport(logical, physical=False))
     if selected is not None and _record_codec_key(value) == selected:
         _RecordCodecMemo.put(generation, charge, raw, canonical, _serialized(logical))
     return canonical, logical

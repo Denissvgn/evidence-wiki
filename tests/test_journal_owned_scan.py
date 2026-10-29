@@ -169,6 +169,23 @@ def test_collection_encoding_detaches_each_input_once_with_identical_bytes(monke
     assert records[0]["request_id"] == "record"
 
 
+def test_owned_small_record_reuses_its_bounded_encoding_and_keeps_fresh_values(monkeypatch):
+    record = memo_record({"value": "café 🙂"})
+    expected = codec._canonical_owned_record(record, use_memo=False)
+    original = codec._serialized
+    calls = []
+    def serialized(value):
+        calls.append(value)
+        return original(value)
+    monkeypatch.setattr(codec, "_serialized", serialized)
+    actual = codec._canonical_owned_record(record, use_memo=False)
+    assert actual == expected and len(calls) == 1
+    actual[1]["data"]["value"] = "caller mutation"
+    assert record["data"]["value"] == "café 🙂"
+    with pytest.raises(EvidenceWikiError):
+        codec._canonical_owned_record(record, expanded_limit=len(expected[0]) - 1, use_memo=False)
+
+
 def test_pure_record_codec_reuses_only_success_and_returns_fresh_values(codec_memo, monkeypatch):
     original = codec.detached_record
     calls = []
