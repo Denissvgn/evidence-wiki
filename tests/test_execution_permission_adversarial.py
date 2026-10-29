@@ -44,7 +44,9 @@ def isolated_boundaries(monkeypatch, policy, *, steps_used=0, steps_limit=8):
                           "source_bindings": [{"source_id": "captured-source", "extent_ref": NATIVE_SOURCE, "closure_id": DIGEST}]}}
     session = SimpleNamespace(policy=policy, run_id="controlled-run", root="/workspace", binding={},
                               context=SimpleNamespace(require_grant=lambda _grant: None),
-                              execution=SimpleNamespace(profile=SimpleNamespace(total_steps=steps_limit, review_services=None, input_handoff=None, disagreement=None, calibration=None), ledger=lambda *_args: None))
+                              execution=SimpleNamespace(profile=SimpleNamespace(total_steps=steps_limit, review_services=None,
+                                  input_handoff=None, disagreement=None, calibration=None, readability=None,
+                                  artifact_delivery=None), ledger=lambda *_args: None))
 
     def current(_session):
         result = copy.deepcopy(view)
