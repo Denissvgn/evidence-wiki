@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import SafeLoader
 
 SCHEMA = "evidence-host-capture/v1"
 MAX_BYTES = 524_288
@@ -82,7 +83,7 @@ def origin(value):
 
 def validate(value):
     if type(value) is dict and value.get("schema_version") == "evidence-host-capture/v2":
-        return copy.deepcopy(load_workspace_module(_SCRIPT_DIR, "_capture_bridge").validate(value))
+        return copy.deepcopy(load_workspace_module(_SCRIPT_DIR, "_capture_bridge", cache=_VALIDATION_MODULES).validate(value))
     require(isinstance(value, dict) and set(value) == FIELDS and value.get("schema_version") == SCHEMA, "capture_shape_invalid")
     for key in ("capture_id", "tool_id"):
         identifier(value[key])
@@ -149,19 +150,22 @@ def read(root: Path, relative: str, maximum=MAX_BYTES, *, read_input=None):
 
 def sidecar(raw):
     require(isinstance(raw, bytes) and 0 < len(raw) <= MAX_BYTES, "capture_sidecar_bound")
-    class Loader(yaml.SafeLoader):
-        pass
-    def mapping(loader, node):
-        result = {}
-        for key_node, value_node in node.value:
-            key = loader.construct_object(key_node)
-            require(isinstance(key, str) and key not in result, "capture_sidecar_key_invalid")
-            result[key] = loader.construct_object(value_node)
-        return result
-    Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
-    try:
+
+    def parse(base):
+        class Loader(base):
+            pass
+
+        def mapping(loader, node):
+            result = {}
+            for key_node, value_node in node.value:
+                key = loader.construct_object(key_node)
+                require(isinstance(key, str) and key not in result, "capture_sidecar_key_invalid")
+                result[key] = loader.construct_object(value_node)
+            return result
+
+        Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
         depth = 0
-        for count, event in enumerate(yaml.parse(raw)):
+        for count, event in enumerate(yaml.parse(raw, Loader=Loader)):
             require(count < 4096 and not isinstance(event, yaml.AliasEvent), "capture_sidecar_bound")
             if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
                 depth += 1
@@ -171,6 +175,14 @@ def sidecar(raw):
         value = yaml.load(raw, Loader=Loader)  # noqa: S506 -- bounded SafeLoader subclass with duplicate-key refusal.
         require(isinstance(value, dict), "capture_sidecar_invalid")
         return value
+
+    try:
+        if SafeLoader is yaml.SafeLoader or any(marker in raw for marker in (b"\t", b"%YAML")):
+            return parse(yaml.SafeLoader)
+        try:
+            return parse(SafeLoader)
+        except yaml.YAMLError:
+            return parse(yaml.SafeLoader)
     except (yaml.YAMLError, TypeError, RecursionError, UnicodeError):
         raise CaptureInvalid("capture_sidecar_invalid") from None
 
@@ -184,7 +196,7 @@ def inspect_record(root: Path, record, *, read_input=None):
     if type(record.get("provenance")) is dict and record["provenance"].get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
         from types import SimpleNamespace
         native = SimpleNamespace(read=read, require=require, sidecar=sidecar)
-        return load_workspace_module(_SCRIPT_DIR, "_capture_bridge").inspect(root, record, native, read_input=read_input)
+        return load_workspace_module(_SCRIPT_DIR, "_capture_bridge", cache=_VALIDATION_MODULES).inspect(root, record, native, read_input=read_input)
     provenance = record.get("provenance")
     require(isinstance(provenance, dict) and "host_capture" in provenance, "capture_metadata_missing")
     profile = validate(provenance["host_capture"])

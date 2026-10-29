@@ -149,3 +149,47 @@ def test_composed_nodes_are_fresh_and_keep_alias_identity(reader):
     current = reader.compose_current(b"first: &same [original]\nsecond: *same\n")
     assert current.value[0][1] is current.value[1][1]
     assert current.value[0][1].value[0].value == "original"
+
+
+@pytest.mark.parametrize("raw", [
+    b"origin: https://example.org/source\nrights: {status: allowed, license: null}\n",
+    'title: "caf\u00e9"\ncount: 007\nobserved: 2026-08-09\n'.encode(),
+    b"value: &once [first, second]\n",
+    b"first: &same [value]\nsecond: *same\n",
+    b"first: &same {nested: *same}\n",
+    b"rights: {status: allowed, status: restricted}\n",
+    b'"\\u0061": first\na: second\n',
+    b"? [one, two]\n: invalid key\n",
+    b"value: !!python/object/apply:builtins.eval ['1 + 1']\n",
+    b"value: !unknown false\n",
+    b"value: [\n",
+    b"value: *undefined\n",
+    b'quote: "literal\ttab"\n',
+    b"%YAML 1.2\n---\nvalue: current\n",
+    b"%YAML 1.3\n---\nvalue: current\n",
+    b"[not, a, mapping]\n",
+    b"value: " + b"[" * 12 + b"0" + b"]" * 12 + b"\n",
+    b"value:\n" + b"- item\n" * 4096,
+])
+def test_capture_sidecars_preserve_portable_values_and_refusals(reader, monkeypatch, raw):
+    capture = load_script("yaml_capture_sidecar", "_host_capture.py")
+
+    def outcome():
+        try:
+            return "value", repr(capture.sidecar(raw))
+        except (ValueError, TypeError, RecursionError, UnicodeError) as error:
+            return type(error).__name__, str(error)
+
+    monkeypatch.setattr(capture, "SafeLoader", yaml.SafeLoader)
+    expected = outcome()
+    monkeypatch.setattr(capture, "SafeLoader", reader.SafeLoader)
+    assert outcome() == expected
+
+
+def test_capture_sidecar_reads_are_fresh_and_detached(reader, monkeypatch):
+    capture = load_script("yaml_capture_fresh_sidecar", "_host_capture.py")
+    monkeypatch.setattr(capture, "SafeLoader", reader.SafeLoader)
+    first = capture.sidecar(b"items: [original]\n")
+    first["items"][0] = "changed"
+    assert capture.sidecar(b"items: [original]\n") == {"items": ["original"]}
+    assert capture.sidecar(b"items: [current]\n") == {"items": ["current"]}
