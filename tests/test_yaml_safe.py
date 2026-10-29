@@ -170,6 +170,10 @@ def test_composed_nodes_are_fresh_and_keep_alias_identity(reader):
     b"[not, a, mapping]\n",
     b"value: " + b"[" * 12 + b"0" + b"]" * 12 + b"\n",
     b"value:\n" + b"- item\n" * 4096,
+], ids=[
+    "native", "unicode", "unused-anchor", "alias", "cycle", "duplicate", "escaped-duplicate", "list-key",
+    "python-tag", "unknown-tag", "malformed", "undefined-alias", "literal-tab", "yaml-1-2", "yaml-1-3",
+    "non-mapping", "depth-bound", "event-bound",
 ])
 def test_capture_sidecars_preserve_portable_values_and_refusals(reader, monkeypatch, raw):
     capture = load_script("yaml_capture_sidecar", "_host_capture.py")
