@@ -41,6 +41,11 @@ You can select the interpreter explicitly without activating the environment:
 .research-env/bin/python -B -m evidence_wiki agent --format json
 ```
 
+To use a repository checkout, run `.research-env/bin/python -m pip install .`
+from its root. The published package can expose an earlier contract than this
+checkout; use `evidence-wiki contract` to discover the selected installation's
+operations and match its documentation to that version.
+
 The `evidence-wiki` console command and `-B -m evidence_wiki.cli` module form
 remain supported. Generated commands include the selected Python executable;
 retain that interpreter and its arguments. For affected installations missing
@@ -181,6 +186,7 @@ python -B scripts/normalize_sources.py --all
 ```
 
 Inventory writes `sources/manifest.jsonl`; normalization writes evidence records.
+The bounded inventory producer requires POSIX descriptor traversal.
 Use `--dry-run` to preview either operation, but normalization previews still
 require a written manifest; inventory dry-run output cannot replace it. Keep raw
 evidence immutable and continue with the [research workflow][research-run].
@@ -189,9 +195,23 @@ evidence immutable and continue with the [research workflow][research-run].
 
 | Mode | Entry point and boundary |
 | --- | --- |
+| Direct Python host | The installed POSIX [unattended host example](examples/unattended-host/README.md) drives public setup, source admission, review/repair, current export and refresh, with separate fixture and live runtime modes. |
+| Automated agent host | [Host recipes](examples/agent-host/README.md) select bounded task instructions with a Planner and independent critic, then drive current-caller or scoped MCP operations with explicit terminal telemetry. |
+| Integration documentation | The installed [documentation example](examples/integration-docs/README.md) assembles a contract-derived journey/reference, checks it with an independent critic and records bounded repair proposals. |
+| Scoped MCP host | `serve-onboarding-mcp` exposes [startup-granted research tools](workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools), with explicit runtime, native cancellation/recovery and no elicitation. |
+| Configured autonomous host | `agent run-cycle` / `refresh` share the [public library dispatcher](docs/library-api.md), with explicit private runtime selection and bounded noninteractive execution. |
 | Current caller | `agent research-guide` describes advice, claims, ingestion and controlled export without another model runner. |
-| Managed adapters | `orchestrate run` / `resume` support Codex CLI 0.138+ and Claude Code. Managed Claude is unavailable on native Windows. |
+| Managed adapters | `orchestrate run` / `resume` use the Codex CLI and Claude Code version/platform/mode rows listed by `agent frameworks`. Managed Claude is unavailable on native Windows. |
 | External host | `start` / `next` / `submit` / `status` support an operator-controlled host, including OpenCode, Pi, Aider or Gemini CLI. |
+
+For exact candidate conformance, the [unattended qualification guide](docs/unattended-qualification.md)
+describes original agent/tool evidence, complete installed transports, terminal
+accounting and independent replay. The supplied comparison runners require POSIX.
+The [release decision guide](docs/release-qualification.md) describes frozen
+evidence rules, scoped qualification outcomes and current-owner replay without
+manual sign-off or publication.
+The [repeated integration guide](docs/repeated-integrations.md) covers scoped
+host scenarios, same-workspace evidence updates and frozen improvement selection.
 
 Managed execution refuses with `RUNNER_ISOLATION_UNAVAILABLE` when its required
 boundary is unavailable. The parent owns `runs/orchestrations/`; workers follow
@@ -288,6 +308,12 @@ Python 3.10+ is required. Installation includes PyYAML, ruamel.yaml, pypdf and
 tzdata; [package metadata][package-metadata] owns their supported version bounds.
 pypdf provides portable PDF extraction. Poppler is optional unless explicitly
 selected as the PDF backend; Git snapshots and managed model CLIs are optional.
+An installed package exposes its exact library API, operation matrix and schema
+documents through `evidence-wiki contract`. Retrieve the closed resource catalog
+with `evidence-wiki agent resources --format json`. These declarations identify
+the selected installation; Python's minimum version does not establish optional
+runner, platform or host isolation capabilities. Framework support is limited to
+the exact version, platform and mode rows in `agent frameworks`.
 Run `evidence-wiki doctor --format json` for available capabilities and
 `evidence-wiki status --target WORKSPACE --format json` for workspace health.
 See [workspace validation][workspace-status] for lower-level checks and completion.

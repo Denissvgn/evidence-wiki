@@ -19,4 +19,13 @@ def recipes():
                    "text_characters": docx.MAX_TEXT, "xml_nodes": docx.MAX_NODES},
         "execution_authority": "Explicit source delivery and native normalization; discovery only describes capability.",
         "owner_commands": ["agent inspect", "agent apply", "scripts/source_inventory.py", "scripts/normalize_sources.py", "normalize verify"],
-    }], "unqualified": ["scanned-document OCR", "audio transcription", "other office/media layouts", "new domain providers"]}
+    }], "agent_hosts": {
+        "schema_version": "evidence-agent-host-recipes/v1",
+        "instructions": "guide/agent-host/v1", "generator_instructions": "guide/agent-generator/v1",
+        "example": "example/agent-host/v1", "context_owner": "AgentHostContext",
+        "integration_guide": "guide/integration/v1", "documentation_example": "example/integration-docs/v1",
+        "routes": ["current-caller", "mcp"], "tasks": ["research", "refresh", "capture", "calculation", "delivery"],
+        "roles": ["host", "generator"], "selection": ["planner", "independent_critic", "native_bounds"],
+        "authority": "Host-selected services, policy, scope and native evidence owners; instruction selection grants no effects.",
+        "human_required_profile": "terminal_refused", "automatic_installation": False,
+    }, "unqualified": ["scanned-document OCR", "audio transcription", "other office/media layouts", "new domain providers"]}

@@ -44,6 +44,16 @@ one call document on standard input. The tool result retains the exact canonical
 JSON text, digest and exit status; finite Decimal strings are not coerced to binary
 floats. Invalid, incomplete and refused results stay distinguishable.
 
+To enumerate the full resource catalog through the native tool, explicitly select
+`evidence-framework-call/v2` and operation `resources`. Its optional `offset`
+(0–1,000,000) and `limit` (1–128) parameters require integer JSON tokens. Advance
+the offset by the returned page's `bounds.returned` until it reaches
+`bounds.total`; `bounds.truncated` indicates that the response omits catalog
+entries. These parameters apply only to `resources`. Results retain
+`evidence-framework-result/v1` and the exact native page JSON. The portable bundle
+includes `tool-call-paged.schema.json` for this explicit selection;
+`tool-call.schema.json` and the default Pi binding continue to use call/v1.
+
 Only strict export can report eligible claims, through its existing owner. Other
 successful operations do not mean evidence was accepted. The native wrapper does
 not sign a review, change a policy or create a second receipt store. Its result

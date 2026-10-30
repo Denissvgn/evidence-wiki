@@ -10,6 +10,7 @@ import sys
 import tarfile
 import time
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,29 @@ from tools import qualify_journeys as journeys
 from tools import validate_installed_artifacts as artifacts
 from tools import verify_installed_artifacts as verification
 from tools._qualification_process import CommandRunner, positive_seconds, stop_process
+
+
+@lru_cache(maxsize=1)
+def synthetic_candidate():
+    """One immutable source snapshot for report-shape fixtures, never installed evidence."""
+    from hatchling.builders.wheel import WheelBuilder
+    layout,files=artifacts.source_layout(artifacts.REPO_ROOT)
+    source=artifacts.source_identity(files)
+    expected=artifacts.qualification_expectations(layout)
+    builder=WheelBuilder(str(artifacts.REPO_ROOT))
+    return layout, files, source, expected, builder.config.core_metadata_constructor(builder.metadata).encode(), builder.construct_entry_points_file().encode()
+
+
+def synthetic_verify(dist, evidence, **options):
+    """Exercise report-shape checks with command replay explicitly stubbed in this test module."""
+    import hashlib
+    from pathlib import Path
+    from unittest.mock import patch
+
+    originals=[hashlib.sha256(path.read_bytes()).hexdigest() for path in Path(evidence).rglob('summary.json')]
+    layout,files,source,expected,_,_=synthetic_candidate()
+    with patch.object(verification,'replay_installation',return_value=None), patch.object(verification,'source_layout',return_value=(layout,files)), patch.object(verification,'source_identity',return_value=source), patch.object(verification,'qualification_expectations',return_value=expected):
+        return verification.verify(dist, evidence, report_sha256=originals, **options)
 
 
 @pytest.fixture
@@ -530,6 +554,67 @@ def installation_reports(tmp_path):
     dist.mkdir()
     wheel = make_wheel(dist / "evidence_wiki-1.0.0-py3-none-any.whl", sorted(set(artifacts.REQUIRED_WHEEL_MEMBERS)))
     sdist = make_sdist(dist / "evidence_wiki-1.0.0.tar.gz", sorted(set(artifacts.REQUIRED_SDIST_MEMBERS)))
+    # Report-shape fixtures use real candidate member bytes, while retaining
+    # explicit synthetic execution observations rather than claiming a build.
+    import base64
+    import csv
+    import hashlib
+    import io
+    import tarfile
+    import zipfile
+    from importlib.metadata import distribution
+
+    from pip._vendor.packaging.markers import default_environment
+
+    from tools._installation_contract import project_requirements
+    from tools.probe_installed_public import PUBLIC_CASES, digest, runtime_identity
+
+    layout,files,source,expected_public,metadata,entries=copy.deepcopy(synthetic_candidate())
+    wheel_data = {name: (artifacts.REPO_ROOT / relative).read_bytes() for name, relative in layout['maps']['wheel'].items()}
+    info = layout['generated']['wheel'][0].rsplit('/',1)[0]+'/'
+    wheel_data[info+'METADATA'] = metadata
+    wheel_data[info+'WHEEL'] = b'Wheel-Version: 1.0\nGenerator: hatchling 1.30.1\nRoot-Is-Purelib: true\nTag: py3-none-any\n'
+    wheel_data[info+'entry_points.txt'] = entries
+    output=io.StringIO(); writer=csv.writer(output)
+    for name,data in sorted(wheel_data.items()):
+        writer.writerow([name,'sha256='+base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('='),len(data)])
+    writer.writerow([info+'RECORD','',''])
+    wheel_data[info+'RECORD']=output.getvalue().encode()
+    with zipfile.ZipFile(wheel, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for name,data in wheel_data.items(): archive.writestr(name,data)
+    with tarfile.open(sdist, 'w:gz') as archive:
+        files={name:(artifacts.REPO_ROOT / relative).read_bytes() for name,relative in layout['maps']['sdist'].items()}
+        files['PKG-INFO']=metadata
+        for name,data in files.items():
+            item=tarfile.TarInfo('evidence_wiki-1.0.0/'+name); item.size=len(data)
+            archive.addfile(item,io.BytesIO(data))
+    runtime = runtime_identity()
+    resolved={}
+    dependencies = ('evidence-wiki','pypdf','pyyaml','ruamel-yaml','tzdata')
+    if sys.version_info < (3, 11):
+        dependencies += ('typing-extensions',)
+    for name in dependencies:
+        item=distribution(name)
+        resolved[name]={'version':item.version,'requires_python':item.metadata.get('Requires-Python'),
+                        'requires_dist':sorted(item.requires or []),'entry_points':{e.name:e.value for e in item.entry_points if e.group=='console_scripts'}}
+    import hashlib
+    import importlib
+    from pathlib import Path
+    modules={'pypdf':'pypdf','pyyaml':'yaml','ruamel-yaml':'ruamel.yaml','tzdata':'tzdata'}
+    if sys.version_info < (3, 11):
+        modules['typing-extensions'] = 'typing_extensions'
+    origins={}
+    for name,module_name in modules.items():
+        module=importlib.import_module(module_name); origin=Path(module.__file__).resolve(); data=origin.read_bytes()
+        origins[name]={'module':module_name,'origin':str(origin),'version':getattr(module,'__version__',None),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+    assert project_requirements(layout['project'])
+    public_report = {'observation_class':'public_installed_fixture_mechanics','outcomes':dict.fromkeys(PUBLIC_CASES,'passed'),
+        'expectations_sha256':digest(expected_public),'framework_matrix_sha256':digest(expected_public['framework_matrix']),
+        'production_qualification':False,'runtime':runtime,'resolved_distributions':{name:item['version'] for name,item in resolved.items()},
+        'resolved_metadata':resolved,'marker_environment':default_environment(),'dependency_origins':origins,'prefix':str(Path(sys.prefix).resolve()),
+        'optional_hosts':{'git':'not_invoked','poppler':'not_invoked','model_clis':'not_invoked','live_models':'not_invoked','host_enforcement':'not_established'}}
+    from tests.test_public_stage_deadline import synthetic_supervision
+    public_report.update(synthetic_supervision())
     cases = verification.load_cases(artifacts.REPO_ROOT / "tests/fixtures/onboarding-journeys/cases.json")["cases"]
     cases += verification.reference_cases(artifacts.REPO_ROOT / "tests/fixtures/strict-evidence/review-cases.json")[0]
     trials = []
@@ -541,11 +626,14 @@ def installation_reports(tmp_path):
     for kind in ("wheel", "sdist"):
         report = {"artifact": kind, "status": "partial", "selection_status": "passed",
             "workflow": {"GITHUB_SHA": "commit", "GITHUB_RUN_ID": "run"}, "validation_inputs": artifacts.validation_identity(),
+            "archive_expectations": layout, "retained_files": {}, "qualification_runtime": runtime, "candidate_source": source, "candidate_source_sha256": digest(source),
+            "public_expectations": expected_public, "public_expectations_sha256": digest(expected_public), "candidate_unchanged": True,
             "wheel": {"name": wheel.name, "sha256": artifacts.sha256_of(wheel)},
             "sdist": {"name": sdist.name, "sha256": artifacts.sha256_of(sdist)},
             "commands": [{"stage": "probe", "status": "passed"}],
             "checks": {"membership": artifacts.check_archive_membership(wheel, sdist), "installed_" + kind: {
                 "label": kind, "checkout_imports": "disabled", "version": verification.__version__,
+                "public_installed": copy.deepcopy(public_report), "native_regression_scope": "copied_owner_fixtures",
                 "html_usability": html_observations(),
                 **{group: dict.fromkeys(cases, "passed") for group, cases in installed_cli.OUTCOME_CASES.items()},
                 "native_initialization": {"direct_profile": "passed", "nested_profile": "passed",
@@ -591,7 +679,7 @@ def test_final_gate_requires_complete_html_qualification(tmp_path, kind, defect)
         directory.mkdir(parents=True)
         (directory / "summary.json").write_text(json.dumps(report))
     with pytest.raises(ValueError, match="HTML"):
-        verification.verify(dist, evidence, commit="commit", run_id="run")
+        synthetic_verify(dist, evidence, commit="commit", run_id="run")
 
 
 def test_html_qualification_inputs_are_bound_and_copied(tmp_path):
@@ -689,9 +777,9 @@ def test_final_gate_requires_exact_bytes_and_every_scenario(tmp_path, defect):
         (directory / "summary.json").write_text(json.dumps(row))
     if defect:
         with pytest.raises(ValueError):
-            verification.verify(dist, evidence, commit="commit", run_id="run")
+            synthetic_verify(dist, evidence, commit="commit", run_id="run")
     else:
-        assert verification.verify(dist, evidence, commit="commit", run_id="run")["status"] == "passed"
+        assert synthetic_verify(dist, evidence, commit="commit", run_id="run")["status"] == "passed"
 
 
 @pytest.mark.parametrize("label", ["wheel", "sdist"])
@@ -713,7 +801,7 @@ def test_final_gate_refuses_absent_or_malformed_installed_groups(tmp_path, label
         directory.mkdir(parents=True)
         (directory / "summary.json").write_text(json.dumps(report))
     with pytest.raises(ValueError, match=group):
-        verification.verify(dist, evidence, commit="commit", run_id="run")
+        synthetic_verify(dist, evidence, commit="commit", run_id="run")
 
 
 @pytest.mark.parametrize("label", ["wheel", "sdist"])
@@ -733,7 +821,7 @@ def test_final_gate_requires_each_installed_case_to_pass(tmp_path, label, group,
         directory.mkdir(parents=True)
         (directory / "summary.json").write_text(json.dumps(report))
     with pytest.raises(ValueError, match=group):
-        verification.verify(dist, evidence, commit="commit", run_id="run")
+        synthetic_verify(dist, evidence, commit="commit", run_id="run")
 
 
 def test_single_artifact_and_timeout_options_are_explicit():
@@ -741,6 +829,41 @@ def test_single_artifact_and_timeout_options_are_explicit():
     assert args.artifact == "sdist" and args.journey_workers == 3 and args.command_timeout == 50
     with pytest.raises(SystemExit):
         artifacts.parse_args(["--artifact", "sdist", "--skip-sdist"])
+
+
+@pytest.mark.parametrize("requested", [None, "", "9.9.9"])
+@pytest.mark.parametrize("artifact", ["wheel", "sdist"])
+def test_installation_version_binds_defaults_to_candidate_source(tmp_path, monkeypatch, requested, artifact):
+    for name in ('public_expectations', 'active_artifact'):
+        monkeypatch.setattr(artifacts._OPTIONS, name, getattr(artifacts._OPTIONS, name, None), raising=False)
+    wheel, sdist = tmp_path/'candidate.whl', tmp_path/'candidate.tar.gz'
+    layout = {"project": {"version": "1.2.3"}}
+    monkeypatch.setattr(artifacts, 'find_artifacts', lambda path: (wheel, sdist))
+    monkeypatch.setattr(artifacts, 'source_layout', lambda root: (layout, set()))
+    monkeypatch.setattr(artifacts, 'source_identity', lambda files: {})
+    monkeypatch.setattr(artifacts, 'check_review_producer_inventory', lambda *args: None)
+    monkeypatch.setattr(artifacts, 'qualification_expectations', lambda layout: {})
+    monkeypatch.setattr(artifacts, 'validation_identity', lambda: {})
+    monkeypatch.setattr(artifacts, 'sha256_of', lambda path: 'a'*64)
+    monkeypatch.setattr(artifacts, 'check_archive_membership', lambda *args: {})
+    monkeypatch.setattr(artifacts, 'check_archive_source_bytes', lambda *args: {})
+    monkeypatch.setattr(artifacts, 'run', lambda *args, **kwargs: json.dumps({'runtime': {}, 'markers': {}}))
+    monkeypatch.setattr(artifacts, 'create_venv_with_wheel', lambda *args: tmp_path/'environment')
+    monkeypatch.setattr(artifacts, 'build_wheel_from_sdist', lambda *args: wheel)
+    monkeypatch.setattr(artifacts, 'wheel_members', lambda path: ['package.py'])
+    expected = requested or layout['project']['version']
+
+    def installed(environment, scratch, version, label):
+        assert label == artifact and version == expected
+        raise RuntimeError('Version-bound installation reached')
+
+    monkeypatch.setattr(artifacts, 'validate_installed', installed)
+    args = SimpleNamespace(dist_dir=tmp_path, expected_version=requested, artifact=artifact,
+        python=sys.executable, membership_only=False)
+    summary = {}
+    with pytest.raises(RuntimeError, match='Version-bound installation reached'):
+        artifacts.validate_distributions(args, summary, tmp_path)
+    assert summary['expected_version'] == expected
 
 
 @pytest.mark.parametrize("defect", [None, "missing-version", "different-report-version", "different-requested-version"])
@@ -761,9 +884,9 @@ def test_release_reports_promote_only_the_explicitly_qualified_version(tmp_path,
     requested = "9.9.9" if defect == "different-requested-version" else version
     if defect:
         with pytest.raises(ValueError, match="version"):
-            verification.verify(dist, evidence, commit="commit", run_id="run", expected_version=requested)
+            synthetic_verify(dist, evidence, commit="commit", run_id="run", expected_version=requested)
         return
-    result = verification.verify(dist, evidence, commit="commit", run_id="run", expected_version=requested)
+    result = synthetic_verify(dist, evidence, commit="commit", run_id="run", expected_version=requested)
     candidate = tmp_path / "release-candidate"
     shutil.copytree(dist, candidate / "dist")
     (candidate / "artifact-validation.json").write_text(json.dumps(result))

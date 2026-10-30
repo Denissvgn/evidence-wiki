@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import importlib.metadata
@@ -14,7 +15,9 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
@@ -252,6 +255,7 @@ from _normalizer_adapter import (
     build_request,
     run_adapter,
 )
+from _operation_control import OperationControl, checkpoint
 from _script_errors import ScriptRefusal, emit_error, emit_refusal, handle_system_exit
 
 # Aliased because this module already has a `content_hash` — that one hashes a record's
@@ -261,6 +265,24 @@ from _usage_gate import require_host_intake
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
 from source_failure_taxonomy import unusable_evidence_reasons as delivery_unusable_evidence_reasons
+from source_inventory import (
+    _bounded_bytes,
+    _bounded_context_active,
+    _bounded_inputs,
+    _bounded_text,
+    _capture_input_reader,
+    _capture_tree,
+    _input_refusal,
+    _recheck_inputs,
+    _release_owned_output,
+    _walk_paths,
+    plan_absent_input,
+    plan_activity_effect,
+    plan_file_effect,
+    plan_input_state,
+    plan_preserved_effect,
+    validate_plan_clock,
+)
 
 
 @dataclass
@@ -414,7 +436,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     config_path = project_root / "research.yml"
     if not config_path.exists():
         raise SystemExit(f"Missing config: {config_path}")
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config = yaml.safe_load(_bounded_text(config_path)) or {}
     if not isinstance(config, dict):
         raise SystemExit(f"Invalid config: {config_path}")
     return config
@@ -497,7 +519,7 @@ def load_manifest(manifest_path: Path) -> list[dict[str, Any]]:
     if not manifest_path.exists():
         raise SystemExit(f"Missing manifest: {manifest_path}")
     records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(manifest_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(_bounded_text(manifest_path).splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -531,7 +553,7 @@ def timestamp_utc() -> str:
 def read_output_frontmatter(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    text = path.read_text(encoding="utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+    text = _bounded_text(path, errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return {}
@@ -659,6 +681,8 @@ def is_stale(
     ``missing_structured_view_key``.
     """
     frontmatter = read_output_frontmatter(output_path)
+    if record.get("kind") == "host_capture" and load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization").requires_refresh(record, frontmatter):
+        return True
     profile = evaluate_html_usability(
         frontmatter, source_kind=record.get("kind"), effective_method=effective_method,
     )
@@ -932,7 +956,8 @@ def normalization_method(
     built-in extractor. Callers that pass no adapters get the pre-adapter behaviour.
     """
     if record.get("kind") == "host_capture":
-        return "host_text"
+        host = load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization")
+        return host.format_method(record) or "host_text"
     try:
         execution_profile = _execution_evidence.profile_for(record)
     except _execution_evidence.EvidenceInvalid:
@@ -1075,8 +1100,8 @@ def normalize_selected_record(
 ) -> NormalizedSource:
 
     require_host_intake(config, [item.record])
-    if item.method == "host_text":
-        return normalize_host_capture_record(project_root, item.record)
+    if item.record.get("kind") == "host_capture":
+        return normalize_host_capture_record(project_root, item.record, pdf_extractor=pdf_extractor)
     if pdftotext_path is not None:
         if pdf_extractor is not None:
             raise TypeError("pass pdf_extractor or pdftotext_path, not both")
@@ -1114,12 +1139,16 @@ def record_raw_paths(record: dict[str, Any]) -> list[str]:
     return [path for path in value if isinstance(path, str) and path]
 
 
-def normalize_host_capture_record(project_root: Path, record: dict[str, Any]) -> NormalizedSource:
+def normalize_host_capture_record(project_root: Path, record: dict[str, Any], *, pdf_extractor=None) -> NormalizedSource:
+    profile = record.get("provenance", {}).get("host_capture", {})
+    if profile.get("schema_version") == "evidence-host-capture/v2":
+        return load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization").normalize(project_root, record, pdf_extractor=pdf_extractor)
     capture = load_workspace_module(_SCRIPT_DIR, "_host_capture")
     metadata = record.setdefault("metadata", {})
     warnings = manifest_warnings(record)
     try:
-        inspected = capture.inspect_record(project_root, record)
+        inspected = capture.inspect_record(project_root, record,
+            **({"read_input": _capture_input_reader} if _bounded_bytes_available() else {}))
         profile = inspected["profile"]
         metadata["host_capture"] = profile
         if inspected["unusable_reasons"]:
@@ -1268,7 +1297,7 @@ def read_latex_with_includes(
     visited.add(resolved_path)
     included_paths.append(rel_label)
     try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
+        text = _bounded_text(path, errors="ignore")
     except OSError as exc:
         return IncludeResult(
             text=f"\n\n[Unreadable include: {rel_label}]\n\n",
@@ -1900,7 +1929,7 @@ def matched_reference_source_ids(
         if bib_path is None or not bib_path.is_file():
             continue
         try:
-            entries = bibtex_entries(bib_path.read_text(encoding="utf-8", errors="ignore"))
+            entries = bibtex_entries(_bounded_text(bib_path, errors="ignore"))
         except OSError:
             continue
         for entry in entries:
@@ -2093,6 +2122,8 @@ def resolve_pdf_extractor(name: str) -> PdfExtractor:
 
 
 PYPDF_EXTRACTION_PROGRAM = r"""
+import base64
+import io
 import json
 import logging
 import sys
@@ -2108,7 +2139,8 @@ max_output_chars = int(sys.argv[3])
 try:
     import pypdf
 
-    reader = pypdf.PdfReader(pdf_path, strict=False, root_object_recovery_limit=10_000)
+    original = io.BytesIO(base64.b64decode(sys.stdin.buffer.read(200_000_000), validate=True)) if pdf_path == "-" else pdf_path
+    reader = pypdf.PdfReader(original, strict=False, root_object_recovery_limit=10_000)
     page_count = len(reader.pages)
     if page_count > max_pages:
         raise RuntimeError(f"PDF has {page_count} pages; limit is {max_pages}")
@@ -2147,6 +2179,7 @@ except Exception as exc:
 
 
 def run_pypdf_extractor(pdf_path: Path, pdf_label: str, extractor: PdfExtractor) -> PdfExtractionResult:
+    snapshot = _bounded_bytes(pdf_path)
     try:
         size_bytes = pdf_path.stat().st_size
     except OSError as exc:
@@ -2165,7 +2198,7 @@ def run_pypdf_extractor(pdf_path: Path, pdf_label: str, extractor: PdfExtractor)
         "-B",
         "-c",
         PYPDF_EXTRACTION_PROGRAM,
-        str(pdf_path),
+        "-" if snapshot is not None else str(pdf_path),
         str(PDF_MAX_PAGES),
         str(PDF_MAX_OUTPUT_CHARS),
     ]
@@ -2177,6 +2210,7 @@ def run_pypdf_extractor(pdf_path: Path, pdf_label: str, extractor: PdfExtractor)
             encoding="utf-8",
             errors="replace",
             timeout=PDF_EXTRACTION_TIMEOUT_SECONDS,
+            **({"input": base64.b64encode(snapshot).decode("ascii")} if snapshot is not None else {}),
         )
     except OSError as exc:
         return PdfExtractionResult(
@@ -2609,6 +2643,7 @@ def normalize_pdf_record(
     project_root: Path,
     record: dict[str, Any],
     extractor: PdfExtractor | str,
+    *, _extraction: PdfExtractionResult | None = None,
 ) -> NormalizedSource:
     source_id = str(record.get("id", "unknown"))
     warnings = manifest_warnings(record)
@@ -2620,7 +2655,7 @@ def normalize_pdf_record(
     if pdf_path is None or not pdf_path.is_file():
         raise RuntimeError(f"{source_id}: raw PDF file not found: {raw_pdf}")
 
-    extraction = extract_pdf(pdf_path, raw_pdf, extractor)
+    extraction = _extraction if _extraction is not None else extract_pdf(pdf_path, raw_pdf, extractor)
     extracted_text = extraction.reading_text
     warnings.extend(extraction.warnings)
     if not extraction.extractor_ran:
@@ -3079,8 +3114,12 @@ def strip_html_tags(text: str) -> str:
 def read_html_text(html_path: Path, relative_path: str) -> tuple[str, list[str]]:
     warnings: list[str] = []
     try:
-        with html_path.open("rb") as handle:
-            data = handle.read(HTML_MAX_BYTES + 1)
+        snapshot = _bounded_bytes(html_path)
+        if snapshot is not None:
+            data = snapshot[:HTML_MAX_BYTES + 1]
+        else:
+            with html_path.open("rb") as handle:
+                data = handle.read(HTML_MAX_BYTES + 1)
     except OSError as exc:
         return "", [f"{relative_path}: cannot read HTML file: {exc}"]
     if len(data) > HTML_MAX_BYTES:
@@ -3302,7 +3341,9 @@ def normalize_docx_record(project_root, record):
         observed = path.lstat()
         if observed.st_size > extractor.MAX_BYTES:
             raise extractor.DocxInvalid("docx_container_invalid_or_large")
-        raw = revision.read_observed_file(project_root, paths[0], revision.observation(observed))
+        raw = _bounded_bytes(path)
+        if raw is None:
+            raw = revision.read_observed_file(project_root, paths[0], revision.observation(observed))
         data = extractor.extract(raw)
     except (ValueError, OSError) as error:
         reason = str(error) if isinstance(error, extractor.DocxInvalid) else "docx_input_invalid_or_changed"
@@ -3333,8 +3374,12 @@ def infer_table_delimiter(sample: str, suffix: str) -> str:
 def read_table_text(table_path: Path, relative_path: str) -> tuple[str, bool, list[str]]:
     warnings: list[str] = []
     try:
-        with table_path.open("rb") as handle:
-            data = handle.read(TABLE_MAX_BYTES + 1)
+        snapshot = _bounded_bytes(table_path)
+        if snapshot is not None:
+            data = snapshot[:TABLE_MAX_BYTES + 1]
+        else:
+            with table_path.open("rb") as handle:
+                data = handle.read(TABLE_MAX_BYTES + 1)
     except OSError as exc:
         return "", False, [f"{relative_path}: cannot read table file: {exc}"]
     truncated = len(data) > TABLE_MAX_BYTES
@@ -3768,7 +3813,7 @@ def inspect_codebase_artifact_bundle(
     seen_files = 0
     seen_entries = 0
     unsafe = False
-    for path in artifact_dir.rglob("*"):
+    for path in _walk_paths(artifact_dir):
         seen_entries += 1
         if seen_entries > CODEBASE_MAX_ARTIFACT_ENTRIES:
             warnings.append(
@@ -3846,7 +3891,7 @@ def inspect_codebase_artifact_bundle(
 
     manifest_label = relative_label(project_root, manifest_path)
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(_bounded_text(manifest_path))
     except (OSError, json.JSONDecodeError) as exc:
         warnings.append(f"{manifest_label}: invalid codebase artifact manifest: {exc}")
         return CodebaseArtifactIntake("invalid", artifact_paths, None, manifest_label, checksums, None, warnings)
@@ -3902,7 +3947,7 @@ def json_warnings(value: Any) -> list[str]:
 def read_codebase_artifact(project_root: Path, artifact_path: Path) -> tuple[str, str | None, list[tuple[int, str]], list[str], list[str]]:
     relative_path = relative_label(project_root, artifact_path)
     try:
-        text = artifact_path.read_text(encoding="utf-8", errors="ignore")
+        text = _bounded_text(artifact_path, errors="ignore")
     except OSError as exc:
         return "None extracted.", None, [], [], [f"{relative_path}: cannot read codebase artifact: {exc}"]
     if artifact_path.suffix.lower() == ".json":
@@ -4223,12 +4268,14 @@ def frontmatter_for(
     project_root: Path | None = None,
     normalized_at: str | None = None,
     structured_view: dict[str, str] | None = None,
+    created_date: str | None = None,
+    read_created_date: bool = True,
 ) -> dict[str, Any]:
     record = source.record
     metadata = record_metadata(record)
     academic = academic_metadata_from_record(record)
     standards = standards_metadata_from_record(record)
-    created = existing_created_date(output_path) or date_text
+    created = (existing_created_date(output_path) if read_created_date else created_date) or date_text
     normalized_at = normalized_at or timestamp_utc()
     url = record_url(record)
     venue = academic.get("venue") if academic else None
@@ -4247,7 +4294,9 @@ def frontmatter_for(
         "normalized_format": NORMALIZED_FORMAT_VERSION,
         "source_id": record.get("id"),
         "source_kind": record.get("kind"),
-        **({"host_capture": metadata.get("host_capture")} if source.extraction_method == "host_text" else {}),
+        **({"host_capture": metadata.get("host_capture")} if record.get("kind") == "host_capture" else {}),
+        **({"host_capture_normalization_version": 1}
+           if record.get("kind") == "host_capture" and metadata.get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2" else {}),
         "status": status_for(source),
         "evidence_usable": not unusable_reasons,
         "unusable_evidence_reasons": unusable_reasons or None,
@@ -4336,8 +4385,13 @@ def frontmatter_for(
 
 
 def render_yaml(frontmatter: dict[str, Any]) -> str:
-    return yaml.safe_dump(
+    class AliasFreeDumper(yaml.SafeDumper):
+        def ignore_aliases(self, _data):
+            return True
+
+    return yaml.dump(
         frontmatter,
+        Dumper=AliasFreeDumper,
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,
@@ -4524,6 +4578,7 @@ def sync_structured_view(
     source_id: str,
     *,
     project_root: Path | None = None,
+    operation_control: OperationControl | None = None,
 ) -> dict[str, str] | None:
     """Put a record's structured-view sidecar into the state ``payload`` describes.
 
@@ -4541,6 +4596,7 @@ def sync_structured_view(
     no structured view. Native tabular emission is the second caller.
     """
     sidecar = expected_structured_path(normalized_root, source_id)
+    checkpoint(operation_control, "before_sidecar_publication")
     if payload is None:
         sidecar.unlink(missing_ok=True)
         return None
@@ -4548,6 +4604,7 @@ def sync_structured_view(
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = sidecar.with_name(f".{sidecar.name}.tmp")
     temporary_path.write_bytes(data)
+    checkpoint(operation_control, "before_sidecar_replace")
     temporary_path.replace(sidecar)
     return {
         "path": declared_structured_path(sidecar, project_root),
@@ -4564,6 +4621,7 @@ def write_normalized_source(
     project_root: Path | None = None,
     force: bool = False,
     normalized_at: str | None = None,
+    operation_control: OperationControl | None = None,
 ) -> tuple[Path, str]:
     output_path = normalized_output_path(source, normalized_root)
     existed = output_path.exists()
@@ -4579,6 +4637,7 @@ def write_normalized_source(
         normalized_root,
         record_id(source.record),
         project_root=project_root,
+        operation_control=operation_control,
     )
     frontmatter = frontmatter_for(
         source,
@@ -4593,8 +4652,24 @@ def write_normalized_source(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = output_path.with_name(f".{output_path.name}.tmp")
     temporary_path.write_text(render_markdown(source, frontmatter), encoding="utf-8", newline="\n")
+    checkpoint(operation_control, "before_record_replace")
     temporary_path.replace(output_path)
     return output_path, "updated" if existed else "created"
+
+
+def render_normalized_artifacts(source: NormalizedSource, normalized_root: Path, manifest_path: str,
+    date_text: str, *, manifest_records=None, project_root=None, normalized_at=None) -> list[tuple[Path, bytes | None]]:
+    """Render sidecar/record once, preserving the captured prior creation date."""
+    output = normalized_output_path(source, normalized_root)
+    sidecar = structured_view_path_for_record(output)
+    structured = render_structured_view(source.structured) if source.structured is not None else None
+    descriptor = {"path": declared_structured_path(sidecar, project_root),
+                  "content_hash": structured_view_content_hash(structured)} if structured is not None else None
+    created = existing_created_date(output)
+    frontmatter = frontmatter_for(source, manifest_path, output, date_text, manifest_records=manifest_records,
+        project_root=project_root, normalized_at=normalized_at, structured_view=descriptor,
+        created_date=created, read_created_date=False)
+    return [(sidecar, structured), (output, render_markdown(source, frontmatter).encode("utf-8"))]
 
 
 def method_count_key(method: str) -> str:
@@ -4826,7 +4901,30 @@ def verify_adapter_output(
     )
 
 
-def run_normalization(args: argparse.Namespace) -> int:
+def _normalization_diagnostic(render: Callable[[str, Any], None] | None, text: str) -> None:
+    if render is not None:
+        render("diagnostic", text)
+
+
+def _bounded_bytes_available() -> bool:
+    return _bounded_context_active()
+
+
+def _normalization_operation(
+    args: argparse.Namespace,
+    *,
+    render: Callable[[str, Any], None] | None = None,
+    max_sources: int | None = None,
+    allow_external: bool = True,
+    max_manifest_bytes: int | None = None,
+    max_manifest_records: int | None = None,
+    plan_only: bool = False,
+    observed_utc: str | None = None,
+    operation_control: OperationControl | None = None,
+    max_entries: int = 10_000,
+    max_input_bytes: int = 16_777_216,
+) -> dict[str, Any]:
+    checkpoint(operation_control, "before_input_capture")
     json_output = args.format == "json"
     project_root = Path(args.project_root).resolve()
     config = load_config(project_root)
@@ -4835,9 +4933,20 @@ def run_normalization(args: argparse.Namespace) -> int:
     manifest_path_text, normalized_dir_text = source_paths(config)
     manifest_path = project_root / manifest_path_text
     normalized_root = project_root / normalized_dir_text
+    if max_sources is not None:
+        checked = [manifest_path, normalized_root]
+        if args.append_log and not args.dry_run:
+            checked.extend((project_root / "log.md", project_root / ".locks" / "log.lock"))
+        if any(not path.resolve().is_relative_to(project_root) for path in checked):
+            raise ScriptRefusal("SOURCE_SCOPE_INVALID", "Normalization paths leave the selected workspace.",
+                                exit_code=2, recoverable=False, details={"field": "workspace_paths"})
+    if max_manifest_bytes is not None and manifest_path.exists() and manifest_path.stat().st_size > max_manifest_bytes:
+        _input_refusal("manifest_bytes")
     records = load_manifest(manifest_path)
-    date_text = today_utc()
-    run_timestamp = timestamp_utc()
+    if max_manifest_records is not None and len(records) > max_manifest_records:
+        _input_refusal("manifest_records")
+    date_text = observed_utc.split("T", 1)[0] if observed_utc else today_utc()
+    run_timestamp = observed_utc or timestamp_utc()
     normalized_at = run_timestamp
     configured_adapters = normalization_config(config)["adapters"]
     eligible = eligible_records(project_root, records, configured_adapters)
@@ -4850,9 +4959,58 @@ def run_normalization(args: argparse.Namespace) -> int:
         pdf_extractor=selected_pdf_extractor_name,
         adapters=configured_adapters,
     )
+    # Selection is capped before extraction and artifact writes. Manifest loading
+    # and freshness inspection remain separate work, not bounded by this cap.
+    if max_sources is not None and len(selected) > max_sources:
+        raise ScriptRefusal("SOURCE_NORMALIZATION_LIMIT", "Normalization exceeds the selected source cap.",
+                            exit_code=2, recoverable=False, details={"limit": max_sources},
+                            remediation="Select fewer source IDs or explicitly increase the finite source cap.")
+    if max_sources is not None:
+        for item in selected:
+            checkpoint(operation_control, "before_source_capture")
+            if item.method in {"execution", "market"}:
+                raise ScriptRefusal("SOURCE_BOUNDED_EXECUTION_UNSUPPORTED", "Nested evidence closure cannot share the caller's snapshot budget.",
+                                    exit_code=2, recoverable=False, details={"field": "nested_closure"})
+            if item.method == "codebase":
+                try:
+                    profiled = _qualified_packet.profile_for(config, item.record) is not None
+                except _qualified_packet.IntakeInvalid:
+                    profiled = True
+                if profiled:
+                    raise ScriptRefusal("SOURCE_BOUNDED_EXECUTION_UNSUPPORTED", "Qualified packet reads cannot share the caller's pinned snapshot.",
+                                        exit_code=2, recoverable=False, details={"field": "qualified_snapshot"})
+        for item in selected:
+            paths = record_raw_paths(item.record)
+            if item.record.get("kind") == "host_capture":
+                if len(paths) != 1:
+                    raise ScriptRefusal("SOURCE_SCOPE_INVALID", "A host capture must declare one direct original.",
+                                        exit_code=2, recoverable=False)
+                paths.append(paths[0] + ".provenance.yml")
+            paths.extend(value for name in ("raw_pdf", "latex_root")
+                         if isinstance(value := item.record.get(name), str))
+            paths.append(normalized_output_path_for_record(item.record, normalized_root))
+            if item.method == "codebase":
+                paths.append(codebase_output_dir(config))
+            if any(not (project_root / path).resolve().is_relative_to(project_root) for path in paths):
+                raise ScriptRefusal("SOURCE_SCOPE_INVALID", "A selected source leaves the workspace scope.",
+                                    exit_code=2, recoverable=False, details={"field": "selected_source_paths"})
+            for path in paths:
+                checkpoint(operation_control, "before_path_capture")
+                resolved = project_root / path
+                if resolved.is_dir():
+                    if normalized_root.resolve().is_relative_to(resolved.resolve()):
+                        raise ScriptRefusal("SOURCE_SCOPE_INVALID", "Normalization outputs overlap a selected input tree.",
+                                            exit_code=2, recoverable=False)
+                    _capture_tree(resolved)
+                elif resolved.is_file():
+                    # Pin and bound every selected direct input before any extraction.
+                    _bounded_bytes(resolved)
+                else:
+                    plan_absent_input(resolved)
     summary = empty_summary(len(selected), skipped_unsupported, selector)
     actions: list[dict[str, Any]] = []
     report_warnings: list[str] = []
+    planned_effects: list[dict[str, Any]] = []
 
     # Per-source observability for unsupported records: without this, a source the
     # normalizer cannot process (for example, a bare Markdown file) is dropped
@@ -4870,13 +5028,11 @@ def run_normalization(args: argparse.Namespace) -> int:
             "skipped (no content extracted)"
         )
         if not json_output:
-            print(
-                f"skipped unsupported source_id={source_id} kind={kind}",
-                file=sys.stderr,
-            )
+            _normalization_diagnostic(render, f"skipped unsupported source_id={source_id} kind={kind}")
 
     actionable: list[tuple[EligibleRecord, Path, bool, bool]] = []
     for item in selected:
+        checkpoint(operation_control, "before_record_selection")
         method_key = method_count_key(item.method)
         summary[method_key] = int(summary.get(method_key, 0)) + 1
         output_path = normalized_output_path_for_record(item.record, normalized_root)
@@ -4890,6 +5046,9 @@ def run_normalization(args: argparse.Namespace) -> int:
             effective_method=item.method,
         )
         if existed and not args.force and not stale:
+            if plan_only:
+                planned_effects.extend(plan_preserved_effect(project_root, path) for path in (
+                    output_path, structured_view_path_for_record(output_path)))
             summary["skipped_existing"] += 1
             output_text = relative_output_path(project_root, output_path)
             actions.append(
@@ -4904,11 +5063,10 @@ def run_normalization(args: argparse.Namespace) -> int:
                 }
             )
             if not json_output:
-                print(
+                _normalization_diagnostic(render,
                     "skipped existing "
                     f"{output_text} "
                     f"source_id={record_id(item.record)} method={item.method}",
-                    file=sys.stderr,
                 )
             continue
         if stale:
@@ -4939,38 +5097,34 @@ def run_normalization(args: argparse.Namespace) -> int:
                 }
             )
             if not json_output:
-                print(
+                _normalization_diagnostic(render,
                     f"{text_action}{reason} {output_text} "
                     f"source_id={record_id(item.record)} method={item.method}",
-                    file=sys.stderr,
                 )
         if args.append_log:
             warning = "--append-log skipped during --dry-run"
             if json_output:
                 report_warnings.append(warning)
             else:
-                print(f"warning: {warning}", file=sys.stderr)
-        if json_output:
-            print(
-                json.dumps(
-                    build_normalization_report(
-                        timestamp=run_timestamp,
-                        manifest_path=manifest_path_text,
-                        normalized_dir=normalized_dir_text,
-                        dry_run=True,
-                        force=args.force,
-                        selector=selector,
-                        summary=summary,
-                        warnings=report_warnings,
-                        actions=actions,
-                    ),
-                    indent=2,
-                    sort_keys=False,
-                )
-            )
-        else:
-            print_summary(summary)
-        return 0
+                _normalization_diagnostic(render, f"warning: {warning}")
+        report = build_normalization_report(timestamp=run_timestamp, manifest_path=manifest_path_text,
+            normalized_dir=normalized_dir_text, dry_run=True, force=args.force, selector=selector,
+            summary=summary, warnings=report_warnings, actions=actions)
+        if max_sources is not None:
+            _recheck_inputs()
+        checkpoint(operation_control, "before_report_return")
+        if render is not None:
+            render("report", (report, summary))
+        return report
+
+    external_needed = any(
+        item.method == ADAPTER_METHOD or (item.method == "pdf" and selected_pdf_extractor_name == "poppler")
+        for item, _, _, _ in actionable
+    )
+    if external_needed and (max_sources is not None or not allow_external):
+        raise ScriptRefusal("SOURCE_BOUNDED_EXECUTION_UNSUPPORTED", "Configured external execution cannot enforce these input/output bounds.",
+                            exit_code=2, recoverable=False,
+                            remediation="Use a supported native path or a separately qualified bounded host executor.")
 
     resolved_pdf_extractor = (
         resolve_pdf_extractor(selected_pdf_extractor_name)
@@ -4980,9 +5134,25 @@ def run_normalization(args: argparse.Namespace) -> int:
 
     for item, output_path, _existed, stale in actionable:
         try:
-            source = normalize_selected_record(project_root, config, item, resolved_pdf_extractor)
+            checkpoint(operation_control, "before_extraction")
+            source = (normalize_selected_record(project_root, config, item, resolved_pdf_extractor)
+                if operation_control is None else _controlled_normalize_source(
+                    project_root, config, item, resolved_pdf_extractor, operation_control,
+                    max_entries=max_entries, max_input_bytes=max_input_bytes))
+            checkpoint(operation_control, "after_extraction")
+            if max_sources is not None:
+                _recheck_inputs()
             # The selection loop already decided to (re)write this record, so force the write.
-            output_path, write_action = write_normalized_source(
+            if plan_only:
+                checkpoint(operation_control, "before_rendering")
+                artifacts = render_normalized_artifacts(source, normalized_root, manifest_path_text, date_text,
+                    normalized_at=normalized_at, manifest_records=records, project_root=project_root)
+                prepared_effects = [plan_file_effect(project_root, path, data) for path, data in artifacts]
+                planned_effects.extend(prepared_effects)
+                write_action = "updated" if _existed else "created"
+            else:
+                checkpoint(operation_control, "before_publication")
+                output_path, write_action = write_normalized_source(
                 source,
                 normalized_root,
                 manifest_path_text,
@@ -4991,10 +5161,19 @@ def run_normalization(args: argparse.Namespace) -> int:
                 manifest_records=records,
                 project_root=project_root,
                 force=True,
+                operation_control=operation_control,
             )
-            if item.method == ADAPTER_METHOD:
+            if item.method == ADAPTER_METHOD and not plan_only:
                 verify_adapter_output(project_root, output_path, records, normalized_root, config=config)
+            if max_sources is not None and not plan_only:
+                _release_owned_output(output_path)
+                _release_owned_output(structured_view_path_for_record(output_path))
         except Exception as exc:
+            if isinstance(exc, ScriptRefusal) and exc.error_code.startswith("OPERATION_"):
+                raise
+            if plan_only:
+                planned_effects.extend(plan_preserved_effect(project_root, path) for path in (
+                    output_path, structured_view_path_for_record(output_path)))
             summary["failed"] += 1
             output_text = relative_output_path(project_root, output_path)
             actions.append(
@@ -5016,11 +5195,10 @@ def run_normalization(args: argparse.Namespace) -> int:
                 }
             )
             if not json_output:
-                print(
+                _normalization_diagnostic(render,
                     "failed "
                     f"{output_text} "
                     f"source_id={record_id(item.record)} method={item.method} error={exc}",
-                    file=sys.stderr,
                 )
             continue
 
@@ -5059,15 +5237,15 @@ def run_normalization(args: argparse.Namespace) -> int:
             }
         )
         if not json_output:
-            print(
+            _normalization_diagnostic(render,
                 f"{write_action}{reason} {output_text} "
                 f"source_id={record_id(item.record)} method={item.method} status={status}",
-                file=sys.stderr,
             )
             for warning in source.warnings:
-                print(f"warning: {warning}", file=sys.stderr)
+                _normalization_diagnostic(render, f"warning: {warning}")
 
-    if args.append_log:
+    if args.append_log and not plan_only:
+        checkpoint(operation_control, "before_activity_publication")
         append_normalization_log(
             project_root,
             {
@@ -5077,27 +5255,175 @@ def run_normalization(args: argparse.Namespace) -> int:
             },
         )
 
-    if json_output:
-        print(
-            json.dumps(
-                build_normalization_report(
-                    timestamp=run_timestamp,
-                    manifest_path=manifest_path_text,
-                    normalized_dir=normalized_dir_text,
-                    dry_run=False,
-                    force=args.force,
-                    selector=selector,
-                    summary=summary,
-                    warnings=report_warnings,
-                    actions=actions,
-                ),
-                indent=2,
-                sort_keys=False,
-            )
-        )
+    report = build_normalization_report(timestamp=run_timestamp, manifest_path=manifest_path_text,
+        normalized_dir=normalized_dir_text, dry_run=False, force=args.force, selector=selector,
+        summary=summary, warnings=report_warnings, actions=actions)
+    if plan_only:
+        if args.append_log:
+            planned_effects.append(plan_activity_effect(project_root, render_normalization_log_entry({
+                "timestamp": run_timestamp, "manifest": manifest_path_text, "summary": summary})))
+        _recheck_inputs()
+        checkpoint(operation_control, "before_plan_return")
+        return {"report": report, "effects": planned_effects, "inputs": plan_input_state(),
+                "selected_records": [item.record for item in selected],
+                "strict_refusals": [], "clock_utc": run_timestamp}
+    if render is not None:
+        render("report", (report, summary))
+    checkpoint(operation_control, "before_report_return")
+    return report
+
+
+def _controlled_normalize_source(project_root, config, item, extractor, control, *, max_entries, max_input_bytes):
+    """Extract in a bounded process with no publication capability in its route."""
+    with tempfile.TemporaryDirectory(prefix="evidence-normalize-") as temporary:
+        request_path = Path(temporary) / "request.json"
+        result_path = Path(temporary) / "result.json"
+        request = {"project_root": str(project_root), "config": config, "item": asdict(item),
+                   "pdf_extractor": asdict(extractor) if extractor is not None else None,
+                   "max_entries": max_entries, "max_input_bytes": max_input_bytes}
+        raw = json.dumps(request, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(raw) > 67_108_864:
+            raise ScriptRefusal("SOURCE_NORMALIZATION_LIMIT", "Extraction request exceeds its byte cap.",
+                                exit_code=2, recoverable=False)
+        request_path.write_bytes(raw)
+        result = control.run([sys.executable, str(_SCRIPT_DIR / "_normalization_worker.py"),
+                              str(request_path), str(result_path)])
+        if result != 0 or not result_path.is_file() or result_path.stat().st_size > 67_108_864:
+            raise ScriptRefusal("SOURCE_EXTRACTION_FAILED", "The bounded native extractor did not produce a valid result.",
+                                exit_code=2, recoverable=False)
+        value = json.loads(result_path.read_text(encoding="utf-8"))
+        item.record.clear()
+        item.record.update(value["record"])
+        value["record"] = item.record
+        value["media"] = [MediaReference(**media) for media in value["media"]]
+        value["outline"] = [tuple(entry) for entry in value["outline"]]
+        return NormalizedSource(**value)
+
+
+def run_normalization_report(
+    project_root: str | Path,
+    *,
+    source_ids: Sequence[str] | None = None,
+    all_sources: bool = False,
+    dry_run: bool = False,
+    force: bool = False,
+    append_log: bool = False,
+    pdf_extractor: str | None = None,
+    max_sources: int = 128,
+    allow_external: bool = False,
+    max_manifest_bytes: int = 1_048_576,
+    max_manifest_records: int = 1000,
+    max_entries: int = 10_000,
+    max_input_bytes: int = 16_777_216,
+    operation_control: OperationControl | None = None,
+) -> dict[str, Any]:
+    """Return the canonical report, retaining failed-source verdicts as data.
+
+    None selects pending sources; all_sources explicitly selects all eligible
+    records. A supplied ID list is nonempty, finite and mutually exclusive with
+    all_sources. The cap bounds selected sources before extraction/writes, not
+    manifest scan work. Dry runs execute no extractors or configured tools.
+    Config/manifest and selected inputs have finite byte/traversal bounds.
+    Configured adapters/Poppler currently refuse bounded API execution even
+    with opt-in: timeout and post-capture checks cannot enforce output bounds.
+    An optional host control bounds native extraction in a child process and
+    checks cancellation before publication. Earlier committed artifacts remain
+    observable when a later checkpoint stops the operation.
+    """
+    invalid = (not isinstance(project_root, (str, Path))
+        or any(type(value) is not bool for value in (all_sources, dry_run, force, append_log, allow_external))
+        or type(max_sources) is not int or not 1 <= max_sources <= 1000
+        or type(max_manifest_bytes) is not int or not 1 <= max_manifest_bytes <= 16_777_216
+        or type(max_manifest_records) is not int or not 1 <= max_manifest_records <= 10_000
+        or type(max_entries) is not int or not 1 <= max_entries <= 100_000
+        or type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 67_108_864
+        or (pdf_extractor is not None and (type(pdf_extractor) is not str or pdf_extractor not in PDF_EXTRACTORS)))
+    if source_ids is not None:
+        invalid = invalid or (type(source_ids) not in (list, tuple) or not 1 <= len(source_ids) <= max_sources
+            or all_sources or any(type(value) is not str or not value.strip() or len(value) > 4096 for value in source_ids))
+    if invalid:
+        raise ScriptRefusal("SOURCE_NORMALIZATION_REQUEST_INVALID", "Normalization arguments are invalid or unbounded.",
+                            exit_code=2, recoverable=False)
+    args = argparse.Namespace(project_root=project_root, source_id=list(source_ids or ()), all=all_sources,
+        dry_run=dry_run, force=force, append_log=append_log, pdf_extractor=pdf_extractor, format="json")
+    try:
+        checkpoint(operation_control, "before_input_capture")
+        with _bounded_inputs(Path(project_root), max_entries=max_entries, max_input_bytes=max_input_bytes):
+            return _normalization_operation(args, max_sources=max_sources, allow_external=allow_external,
+                max_manifest_bytes=max_manifest_bytes, max_manifest_records=max_manifest_records,
+                operation_control=operation_control, max_entries=max_entries, max_input_bytes=max_input_bytes)
+    except LockUnavailableError as exc:
+        raise ScriptRefusal(exc.error_code, str(exc), exit_code=2, details=exc.details) from exc
+    except NormalizationConfigError as exc:
+        raise ScriptRefusal(exc.error_code, exc.message, exit_code=2, remediation=exc.remediation,
+                            text_line=exc.message) from exc
+    except SystemExit as exc:
+        if callable(getattr(exc, "to_envelope", None)):
+            raise
+        raise ScriptRefusal.from_system_exit(exc, exit_code=2) from exc
+
+
+def prepare_normalization_effects(project_root: str | Path, arguments: dict[str, Any], *, observed_utc: str,
+                                  operation_control: OperationControl | None = None) -> dict[str, Any]:
+    """Extract/render the bounded canonical native plan without publication."""
+    fields = {"source_ids", "all_sources", "dry_run", "force", "append_log", "pdf_extractor", "max_sources",
+              "allow_external", "max_manifest_bytes", "max_manifest_records", "max_entries", "max_input_bytes"}
+    validate_plan_clock(observed_utc)
+    if type(arguments) is not dict or set(arguments) != fields:
+        raise ScriptRefusal("SOURCE_NORMALIZATION_REQUEST_INVALID", "Normalization arguments are invalid.", exit_code=2, recoverable=False)
+    invalid = (any(type(arguments[key]) is not bool for key in ("all_sources", "dry_run", "force", "append_log", "allow_external"))
+        or arguments["allow_external"] is not False
+        or any(type(arguments[key]) is not int or not 1 <= arguments[key] <= limit for key, limit in (
+            ("max_sources", 1000), ("max_manifest_bytes", 16_777_216), ("max_manifest_records", 10_000),
+            ("max_entries", 100_000), ("max_input_bytes", 67_108_864)))
+        or arguments["pdf_extractor"] not in (None, "pypdf", "poppler"))
+    identifiers = arguments["source_ids"]
+    if identifiers is not None:
+        invalid = invalid or (type(identifiers) is not list or not 1 <= len(identifiers) <= arguments["max_sources"]
+            or arguments["all_sources"] or any(type(value) is not str or not value.strip() or len(value) > 4096 for value in identifiers))
+    if invalid:
+        raise ScriptRefusal("SOURCE_NORMALIZATION_REQUEST_INVALID", "Normalization arguments are invalid or unbounded.", exit_code=2, recoverable=False)
+    args = argparse.Namespace(project_root=project_root, source_id=identifiers or [], all=arguments["all_sources"],
+        dry_run=arguments["dry_run"], force=arguments["force"], append_log=arguments["append_log"],
+        pdf_extractor=arguments["pdf_extractor"], format="json")
+    checkpoint(operation_control, "before_input_capture")
+    with _bounded_inputs(Path(project_root), max_entries=arguments["max_entries"], max_input_bytes=arguments["max_input_bytes"]):
+        try:
+            value = _normalization_operation(args, max_sources=arguments["max_sources"], allow_external=False,
+                max_manifest_bytes=arguments["max_manifest_bytes"], max_manifest_records=arguments["max_manifest_records"],
+                plan_only=True, observed_utc=observed_utc, operation_control=operation_control,
+                max_entries=arguments["max_entries"], max_input_bytes=arguments["max_input_bytes"])
+            if arguments["dry_run"]:
+                return {"report": value, "effects": [], "inputs": plan_input_state(), "selected_records": [],
+                        "strict_refusals": [], "clock_utc": observed_utc}
+            return value
+        except LockUnavailableError as error:
+            raise ScriptRefusal(error.error_code, str(error), exit_code=2, details=error.details) from error
+        except NormalizationConfigError as error:
+            raise ScriptRefusal(error.error_code, error.message, exit_code=2, remediation=error.remediation,
+                                text_line=error.message) from error
+        except SystemExit as error:
+            if callable(getattr(error, "to_envelope", None)):
+                raise
+            raise ScriptRefusal.from_system_exit(error, exit_code=2) from error
+
+
+def _render_normalization(event: str, value: Any, *, json_output: bool) -> None:
+    if event == "diagnostic":
+        print(value, file=sys.stderr)
     else:
-        print_summary(summary)
-    return 1 if summary["failed"] else 0
+        report, summary = value
+        if json_output:
+            print(json.dumps(report, indent=2, sort_keys=False))
+        else:
+            print_summary(summary)
+
+
+def run_normalization(args: argparse.Namespace) -> int:
+    """Compatibility command adapter using the same canonical effect engine."""
+    report = _normalization_operation(args,
+        render=lambda event, value: _render_normalization(event, value, json_output=args.format == "json"))
+    return 1 if report["summary"]["failed"] else 0
 
 
 def main(argv: list[str] | None = None) -> int:

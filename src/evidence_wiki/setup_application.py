@@ -9,12 +9,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ._pack_io import canonical, json_document, read_file, yaml_document
+from .agent_resources import installation_metadata
+from .errors import EvidenceWikiError
+from .host_context import current_context
 from .orchestration import _execute_bounded
 from .pack_discovery import owner
 from .planning import compile_plan, plan_identity
 from .planning_contracts import MAX_BYTES, PLAN, decode, digest, refuse
 from .planning_inputs import installation_basis, target_basis
-from .setup_contracts import CHECKPOINT, RESULT, checked
+from .setup_contracts import CHECKPOINT, RESULT, STATUS, checked
 from .setup_effects import verify_effects
 from .setup_store import SetupStore, snapshot
 from .setup_worker import MUTATIONS, REQUIRED, STEPS, local_paths
@@ -24,7 +27,168 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def revalidate(plan, *, owned=False):
+def worker_environment(plan):
+    """Contain fixed local setup children without borrowing ambient authority."""
+    context = current_context()
+    if context is None:
+        return {}
+    if (context.authority_file is not None or context.state_directory is not None
+            or context.mutation_control_directory is not None
+            or plan["initialization"]["effective_config"].get("evidence_trust")):
+        refuse("setup_explicit_protected_worker_bridge_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+    platform_keys = ("PATH", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "SystemRoot", "TEMP", "TMP")
+    return {"environment": {key: os.environ[key] for key in platform_keys if key in os.environ},
+            "inherit_environment": False}
+
+
+def research_compatibility(plan):
+    """Describe frozen scope compatibility without qualifying a claim or reviewer."""
+    target = Path(plan["bindings"]["target"]["target"]["writable_root"]) / plan["bindings"]["target"]["target"]["relative_path"]
+    payload = plan["request"]["request"]["payload"]
+    gaps = []
+    if not payload["authority"]["source_scope"]:
+        gaps.append("frozen_source_scope_missing")
+    if any(row["kind"] != "local_file" for row in payload["sources"]):
+        gaps.append("non_native_source_kind_not_supported_by_native_admission_profile")
+    for value in [*payload["authority"]["source_scope"], *(row["locator"] for row in payload["sources"])]:
+        path = Path(value)
+        if "://" in value or not path.is_absolute() or ".." in path.parts or not path.is_relative_to(target):
+            gaps.append("frozen_source_scope_outside_native_workspace_profile")
+            break
+    if plan["computation"] is not None:
+        gaps.append("computation_not_supported_by_native_admission_profile")
+    if any(len(row["original_ids"]) != 1 for row in plan["questions"]["rows"]):
+        gaps.append("multi_origin_mapping_not_supported_by_native_admission_profile")
+    return {"profile": "native_draft_admission", "state": "blocked" if gaps else "candidate", "gaps": gaps}
+
+
+def workspace_versions(target):
+    """Read only bounded version declarations from an existing selected target."""
+    import re
+
+    installed = installation_metadata()
+    result = {"installation": installed, "workspace": None, "skew": None}
+    marker = target / "workspace-system.yml"
+    if marker.is_symlink():
+        refuse("setup_workspace_metadata_invalid", "ONBOARDING_OWNERSHIP_CONFLICT")
+    if not marker.exists():
+        return result
+    try:
+        document = yaml_document(read_file(target, "workspace-system.yml", 65536))
+    except FileNotFoundError:
+        return result
+    if type(document) is not dict:
+        refuse("setup_workspace_metadata_invalid", "ONBOARDING_OWNERSHIP_CONFLICT")
+    metadata = document.get("workspace_system")
+    if type(metadata) is not dict:
+        refuse("setup_workspace_metadata_invalid", "ONBOARDING_OWNERSHIP_CONFLICT")
+    keys = {"starter_version": "starter_version", "schema_version": "profile_schema_version",
+            "compatible_research_yml_contract": "research_contract_version"}
+    observed = {}
+    for name in keys:
+        value = metadata.get(name)
+        if value is not None and (type(value) is not str or re.fullmatch(r"[0-9][A-Za-z0-9.+-]{0,63}", value) is None):
+            refuse("setup_workspace_metadata_invalid", "ONBOARDING_OWNERSHIP_CONFLICT")
+        observed[name] = value
+    mismatch = any(observed[name] is not None and observed[name] != installed[key] for name, key in keys.items())
+    result.update(workspace=observed, skew=True if mismatch else False if all(observed.values()) else None)
+    return result
+
+
+def status_plan(raw):
+    """Observe exact existing setup ownership; archived checks never become current readiness."""
+    plan = decode(raw, PLAN)
+    if plan_identity(plan) != plan["plan_id"]:
+        refuse("saved_plan_identity_changed", "ONBOARDING_PLAN_STALE")
+    selected = plan["request"]["request"]["payload"]["target"]
+    binding = plan["bindings"].get("target")
+    if (type(binding) is not dict or set(binding) != {"target", "root_identity", "parent_identity", "state", "directory_identity"}
+            or binding.get("target") != selected or type(binding["root_identity"]) is not dict
+            or type(binding["parent_identity"]) is not dict or type(binding["state"]) is not str
+            or binding["state"] not in {"absent", "empty"}):
+        refuse("setup_target_binding_changed", "ONBOARDING_PLAN_STALE")
+    result = {"schema_version": STATUS, "plan_id": plan["plan_id"],
+        "target": str(Path(selected["writable_root"]) / selected["relative_path"]),
+        "status": "not_applied", "transaction_id": None, "checkpoint_state": None, "pending": None,
+        "completed": [], "snapshot_matches": None, "ownership_valid": False, "recorded_setup_ready": None,
+        "versions": {"installation": installation_metadata(), "workspace": None, "skew": None}, "guidance": ["apply_same_plan"],
+        "setup_ready": None, "recovery": "apply", "diagnostics": [], "observed_at": now(),
+        "receipt_trust": "local_observation", "research_compatibility": {
+            "profile": "native_draft_admission", "state": "unknown", "gaps": ["setup_plan_not_validated"]},
+        "actions_executed": False, "authority_verified": False, "research_complete": False, "claims_verified": False}
+    try:
+        target_basis(selected, owned_basis=binding)
+        result["versions"] = workspace_versions(Path(result["target"]))
+        current = revalidate(plan, owned=True, read_only=True)
+        result["research_compatibility"] = research_compatibility(current)
+        store = SetupStore(plan)
+        with store.inspected():
+            if store.transaction is None:
+                if target_basis(selected)[1] != plan["bindings"]["target"]:
+                    refuse("setup_target_unowned_or_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
+                revalidate(plan, read_only=True)
+                result.update(ownership_valid=True, snapshot_matches=True, setup_ready=False)
+            else:
+                checkpoint = store.read("checkpoint.json")
+                checkpoint_valid(checkpoint)
+                result.update(transaction_id=store.transaction_id, checkpoint_state=checkpoint["state"],
+                              pending=checkpoint["pending"], completed=checkpoint["completed"])
+                revalidate(plan, owned=True, read_only=True)
+                captured = snapshot(store.target)
+                if captured != checkpoint["snapshot"]:
+                    result["snapshot_matches"] = False
+                    from .requirements_operations import setup_changes_owned
+                    try:
+                        revised = setup_changes_owned(store.target, checkpoint["snapshot"], captured)
+                    except (ValueError, EvidenceWikiError, TypeError, KeyError):
+                        revised = False
+                    if (checkpoint["state"] != "complete" or checkpoint["pending"] is not None
+                            or not revised):
+                        refuse("setup_owned_files_changed_or_interrupted_write", "ONBOARDING_OWNERSHIP_CONFLICT")
+                postconditions(store.target, plan, checkpoint["completed"])
+                try:
+                    saved = store.read("receipt.json")
+                except FileNotFoundError:
+                    saved = None
+                if saved is not None:
+                    checked(saved, RESULT)
+                    if saved["plan_id"] != plan["plan_id"] or saved["transaction_id"] != store.transaction_id:
+                        refuse("setup_receipt_binding_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
+                    result["recorded_setup_ready"] = saved["setup_ready"]
+                state = checkpoint["state"]
+                result.update(status="interrupted" if checkpoint["pending"] is not None or state == "running" else state,
+                              recovery="recheck" if state == "complete" else "resume",
+                              ownership_valid=True, snapshot_matches=captured == checkpoint["snapshot"])
+                result["guidance"] = ["recheck_owned_checks"] if state == "complete" else ["apply_same_plan"]
+                if snapshot(store.target) != captured or store.read("checkpoint.json") != checkpoint:
+                    refuse("setup_status_changed_during_observation", "ONBOARDING_OWNERSHIP_CONFLICT")
+            store.verify()
+    except EvidenceWikiError as error:
+        code = error.error_code
+        reason = (error.details or {}).get("field", "setup_observation_refused")
+        import re
+
+        if type(reason) is not str or re.fullmatch(r"[a-z][a-z0-9_]{0,255}", reason) is None:
+            reason = "setup_observation_refused"
+        state, action = {"ONBOARDING_PLAN_STALE": ("stale", "reprepare"),
+            "ONBOARDING_ENVIRONMENT_INCOMPATIBLE": ("unsupported", "unsupported"),
+            "ONBOARDING_LOCK_BUSY": ("busy", "retry_lock")}.get(code, ("conflict", "inspect_conflict"))
+        result.update(status=state, recovery=action, ownership_valid=False,
+                      diagnostics=[{"error_code": code, "reason": reason}])
+        result["guidance"] = {"stale": ["reprepare_current_installation", "prepare_new_target"],
+            "busy": ["retry_lock"], "unsupported": ["stop_unsupported"]}.get(state, ["inspect_ownership", "prepare_new_target"])
+        if result["versions"]["skew"] is True:
+            result["guidance"].append("inspect_upgrade_compatibility")
+        elif result["versions"]["workspace"] is not None and result["versions"]["skew"] is None:
+            result["guidance"].append("inspect_upgrade_compatibility")
+    except OSError:
+        result.update(status="conflict", recovery="inspect_conflict", ownership_valid=False,
+                      guidance=["inspect_ownership", "prepare_new_target"],
+                      diagnostics=[{"error_code": "ONBOARDING_OWNERSHIP_CONFLICT", "reason": "setup_read_unavailable"}])
+    return checked(result, STATUS)
+
+
+def revalidate(plan, *, owned=False, read_only=False):
     if plan_identity(plan) != plan["plan_id"]:
         refuse("saved_plan_identity_changed", "ONBOARDING_PLAN_STALE")
     current = compile_plan(canonical(plan["request"]), _owned_target=plan["bindings"]["target"] if owned else None)
@@ -34,6 +198,8 @@ def revalidate(plan, *, owned=False):
         refuse("setup_decisions_unresolved", "ONBOARDING_CHECK_FAILED")
     if current["strict"]["requested_assurance"] == "host_enforced":
         refuse("protected_setup_provisioner_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+    if not read_only:
+        worker_environment(current)
     target, _ = target_basis(current["bindings"]["target"]["target"], owned_basis=current["bindings"]["target"])
     if owner("_strict_evidence").resolve_policy(target, current["initialization"]["effective_config"]) != current["strict"].get("policy"):
         refuse("setup_external_policy_conflict", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
@@ -66,7 +232,11 @@ def checkpoint_valid(checkpoint):
     if not set(checkpoint["completed"]) <= set(checkpoint["results"]) or not set(checkpoint["results"]) <= set(STEPS):
         refuse("setup_checkpoint_results_invalid", "ONBOARDING_OWNERSHIP_CONFLICT")
     if checkpoint["clock"] is not None:
-        owner("_evidence_authority").timestamp(checkpoint["clock"])
+        authority = owner("_evidence_authority")
+        try:
+            authority.timestamp(checkpoint["clock"])
+        except authority.EvidenceInvalid:
+            refuse("setup_checkpoint_clock_invalid", "ONBOARDING_OWNERSHIP_CONFLICT")
 
 
 def postconditions(root, plan, completed):
@@ -77,8 +247,17 @@ def postconditions(root, plan, completed):
     if digest(config) != plan["initialization"]["config_sha256"]:
         refuse("setup_configuration_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
     frozen = owner("init_research_workspace").frozen_requirements_bytes(plan["profile"]["workspace_init"])
-    if read_file(root, "docs/research-requirements.json") != frozen:
-        refuse("setup_requirements_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
+    actual = read_file(root, "docs/research-requirements.json")
+    if actual != frozen:
+        from .requirements_operations import verifylineage
+        try:
+            lineage = verifylineage(root, json_document(actual))
+            expected = owner("_evidence_revision").canonical_bytes(lineage["base"])
+            valid = lineage["owner_authentication"] == "protected_mutation_receipts" and expected == frozen
+        except (Exception, SystemExit):
+            valid = False
+        if not valid:
+            refuse("setup_requirements_changed", "ONBOARDING_OWNERSHIP_CONFLICT")
     if "intake" in completed:
         status = owner("question_status")
         directory = status.questions_directory(root, config)
@@ -109,7 +288,7 @@ def measured(operation, plan, clock, before, timeout):
     started = now()
     process = _execute_bounded([sys.executable, "-B", "-I", "-m", "evidence_wiki.setup_worker", operation],
         cwd=Path(sys.prefix), stdin_text=canonical({"operation": operation, "plan": plan, "clock": clock}).decode(),
-        timeout_seconds=timeout, capture_limit=65536, preserve_stdout=True)
+        timeout_seconds=timeout, capture_limit=65536, preserve_stdout=True, **worker_environment(plan))
     if process.timed_out or process.stdout_truncated or process.stderr_truncated:
         result = {"status": "failed", "reason": "setup_check_time_or_output_bound"}
     else:

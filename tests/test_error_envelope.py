@@ -523,6 +523,73 @@ class ErrorEnvelopeTests(unittest.TestCase):
         self.assertEqual(2, text_code)
         self.assertEqual("refused (LOCK_UNAVAILABLE): workspace lock is held\n", stderr.getvalue())
 
+    def test_renderer_accepts_native_owner_refusal_without_message_or_text_line(self):
+        helper = load_helper()
+        controller = load_script_module("error_renderer_run_controller", "run_controller.py")
+        refusal = controller.RunControllerError("RUN_JOURNAL_UNREADABLE", "missing canonical bytes",
+            exit_code=2, details={"artifact": "runs/local/run-state.json"})
+        self.assertTrue(helper.is_refusal(refusal))
+        self.assertFalse(hasattr(refusal, "message"))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(2, helper.emit_refusal(refusal, json_mode=True))
+        value = json.loads(stderr.getvalue())
+        self.assertEqual("RUN_JOURNAL_UNREADABLE", value["error_code"])
+        self.assertEqual("missing canonical bytes", value["message"])
+        self.assertFalse(value["recoverable"])
+        self.assertEqual(helper.remediation_for("RUN_JOURNAL_UNREADABLE"), value["remediation"])
+        self.assertEqual({"artifact": "runs/local/run-state.json"}, value["details"])
+        self.assertEqual(2, value["exit_code"])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(2, helper.emit_refusal(refusal, json_mode=False))
+        self.assertEqual("refused (RUN_JOURNAL_UNREADABLE): missing canonical bytes\n", stderr.getvalue())
+
+    def test_renderer_preserves_optional_envelope_fields_and_explicit_text(self):
+        helper = load_helper()
+
+        class NativeRefusal(Exception):
+            error_code = "OPERATION_CANCEL_UNKNOWN"
+            def to_envelope(self):
+                return {"error_code": self.error_code, "message": "probe unavailable", "recoverable": None,
+                    "remediation": None, "details": None, "exit_code": 3, "text_line": "specific native text",
+                    "audit_ref": "retained-audit"}
+
+        refusal = NativeRefusal()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(3, helper.emit_refusal(refusal, json_mode=True))
+        value = json.loads(stderr.getvalue())
+        self.assertFalse(value["recoverable"])
+        self.assertEqual("1.0", value["schema_version"])
+        self.assertEqual("retained-audit", value["audit_ref"])
+        self.assertEqual(3, value["exit_code"])
+        self.assertNotIn("details", value)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(3, helper.emit_refusal(refusal, json_mode=False))
+        self.assertEqual("specific native text\n", stderr.getvalue())
+
+    def test_renderer_does_not_convert_programming_errors_or_keyboard_interrupt(self):
+        helper = load_helper()
+        with self.assertRaises(TypeError):
+            helper.emit_refusal(ValueError("ordinary bug"), json_mode=True)
+
+        class BrokenRefusal(Exception):
+            error_code = "OPERATION_CONTROL_INVALID"
+            def to_envelope(self):
+                raise RuntimeError("broken owner codec")
+
+        with self.assertRaisesRegex(RuntimeError, "broken owner codec"):
+            helper.emit_refusal(BrokenRefusal(), json_mode=True)
+
+        class InterruptedRefusal(BrokenRefusal):
+            def to_envelope(self):
+                raise KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            helper.emit_refusal(InterruptedRefusal(), json_mode=True)
+
     def test_helper_classifies_known_system_exit_messages(self):
         helper = load_helper()
 

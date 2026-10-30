@@ -20,6 +20,25 @@ synthetic_defaults: &synthetic_defaults
 
 fixtures:
   - <<: *synthetic_defaults
+    stable_id: adversarial-acceptance-source-text
+    source_work: Project-authored inert adversarial source strings
+    created_at: 2026-10-09
+    shipped_paths:
+      - tests/fixtures/acceptance-paths/challenges.json
+  - <<: *synthetic_defaults
+    stable_id: installed-terminal-recovery-result
+    source_work: Retained public adapter output from the project-authored synthetic observation journey
+    created_at: 2026-10-10
+    transformations: Local generated response with project documentation and synthetic source material; no third-party source text.
+    shipped_paths:
+      - tests/fixtures/installed-public/terminal-caller-result.json
+  - <<: *synthetic_defaults
+    stable_id: native-review-material
+    source_work: Project-authored minimal review material with placeholder identities and sample claim text
+    created_at: 2026-10-19
+    shipped_paths:
+      - tests/fixtures/native-review-material.json
+  - <<: *synthetic_defaults
     stable_id: html-prior-classification-records
     source_work: Native HTML classification revision 1 outputs from project-authored captures
     created_at: 2026-09-30

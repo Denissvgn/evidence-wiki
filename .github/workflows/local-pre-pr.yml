@@ -1,0 +1,76 @@
+name: Verify local pre-PR evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      receipt:
+        description: Base64 canonical producer receipt
+        type: string
+        required: true
+      signature:
+        description: Base64 detached SSH signature
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: local-evidence-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require trusted default-branch workflow
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+
+      - name: Check out trusted verifier and complete Git objects
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up verifier Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.14"
+
+      - name: Verify enrolled producer and exact candidate
+        env:
+          LOCAL_CI_PUBLIC_KEY: ${{ vars.LOCAL_CI_PUBLIC_KEY }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python -m venv .venv
+          .venv/bin/python tools/verify_local_ci.py --event "$GITHUB_EVENT_PATH" \
+            --base "$(git rev-parse "origin/$DEFAULT_BRANCH")" --output verified-local-ci.json
+
+      - name: Publish exact candidate status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .venv/bin/python - <<'PY'
+          import json, os, pathlib, subprocess
+          value = json.loads(pathlib.Path('verified-local-ci.json').read_text(encoding='utf-8'))
+          url = os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID']
+          body = {'state': 'success', 'context': 'local-pre-pr', 'target_url': url,
+                  'description': 'Authorized local profiles passed for exact commit, base, tree and policy'}
+          path = pathlib.Path('commit-status.json')
+          path.write_text(json.dumps(body), encoding='utf-8', newline='\n')
+          subprocess.run(['gh', 'api', '--method', 'POST', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/statuses/' + value['commit'],
+                          '--input', str(path)], check=True)
+          PY
+
+      - name: Retain verified public receipt summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verified-local-ci-${{ github.run_id }}
+          path: verified-local-ci.json
+          if-no-files-found: error
+          retention-days: 30

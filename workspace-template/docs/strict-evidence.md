@@ -116,6 +116,65 @@ requirements, checker bytes, revoked keys/approvals, expired review or current
 usage denial invalidate eligibility. A revoked/rejected newest review cannot
 revive an older approval. Historical events remain retained.
 
+## Dependency review selection
+
+A protected host can select `evidence-strict-policy/v2` with
+`review_basis_mode: claim_dependencies_v1`. This retains the other policy
+fields and uses `ReviewDelivery(context_version="dependencies")` in the actual
+research execution profile. The resulting profile is
+`research-execution-profile/v15`; its worker context is
+`research-review-context/v4`. Policy/v1 continues to select the whole workspace
+basis. Both policy selections require their own fresh reviews when migrating.
+
+The dependency basis binds the subject claim, its complete transitive premise
+closure, and each associated question's semantic frontmatter and exact body.
+Question mirrors are derived from every current claim for that question, so a
+sibling claim edit can invalidate other reviews of the same question. The
+closure supports at most 32 claims including the subject and refuses larger
+closures. It never truncates a prerequisite graph.
+
+Sources, inventories, instructions, requirements, coverage, computation, policy,
+worker semantics and the installed producer remain global dependencies. A
+change to any of them can invalidate every review. Valid question coordination
+updates can preserve the semantic basis; current lifecycle, human review,
+source permission, qualification and publication checks still run.
+
+Selective reviews use `evidence-strict-review/v3`. Their `basis_id` is the claim
+dependency basis, while `observed_workspace_basis_id` preserves the original
+whole workspace observation. The host retains authenticated original input
+bytes, delivery, attempt, worker observation and actual review application.
+Missing, changed or oversized original custody refuses reuse. A supplied
+dependency digest or historical receipt cannot replace those owner checks.
+The installed producer identifies owned package and asset bytes; it does not
+attest interpreter code objects or the operating system.
+
+The dependency worker context carries its complete blinded material through an
+explicit `research-review-native-bytes/v1` child with kind `blinded_material`.
+This bounded, canonical zlib/base64 encoding preserves the exact expanded native
+JSON bytes and all native semantic limits while retaining the existing outer
+packet and worker input limits. Hosts and workers can call
+`evidence_wiki.review_wire.decode_dependency_material` on the context's
+`dependency_material` child to read the complete blinded values. Plain children
+remain supported within their original bounds. Decoding grants no approval or
+identity authority: the parent reverses authenticated aliases, checks exact
+native identities, and applies the existing custody and authentication checks.
+
+Current checks return `evidence-strict-result/v3`, status uses
+`evidence-strict-review-status/v2`, and export uses
+`evidence-strict-publication/v3`. They retain the current whole workspace basis
+and expose `review_producer_id`, claim basis and original observation provenance.
+A selected review reports `reuse: fresh` or `reuse: reused`. The newest applicable
+review is selected before checking its validity or verdict; a newer failing,
+expired or revoked review cannot revive an older pass. Every use checks
+current dependencies and validates original custody and current authority.
+
+Session resolution uses `research-question-resolution/v2` for these publications
+and checks mandatory applications in that authenticated session. Its claim
+provenance comes from native publication. Ordinary evidence and critic delivery
+are supported; adjudication, semantic judging, retained counterevidence receipts,
+and legacy brief, readability or repair-report combinations require compatible
+owner contracts. Unsupported combinations refuse.
+
 ## Final output
 
 Strict export reuses the existing selected-publication capture and global gates,

@@ -468,7 +468,7 @@ def _run_publication(args: list[str]) -> int:
         document = _handle(parsed.project_root).publish_selected(parsed.question, expected_revision=parsed.expected_revision)
     except EvidenceWikiError as exc:
         return _refuse(exc, json_mode=True)
-    if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+    if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
         return _emit_refusal(_packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery"), json_mode=True)
     rendered = script.render(document)
     if parsed.output:
@@ -489,7 +489,7 @@ def _run_questions_export(forwarded: list[str]) -> int:
     # ``jsonl`` is the same document reshaped by the script's own renderer, and
     # ``--output`` only chooses where the rendered bytes go.
     try:
-        if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2"}:
+        if parsed.output and document.get("schema_version") in {"evidence-strict-publication/v1", "evidence-strict-publication/v2", "evidence-strict-publication/v3"}:
             raise _packaged_script("_strict_evidence").refusal("strict_output_requires_host_delivery")
         rendered = script.render_output(document, parsed.format)
     except Exception as exc:
@@ -702,6 +702,7 @@ def _print_help() -> None:
         "  evidence-wiki agent transition-plan|transition-apply --from-file DOCUMENT\n"
         "  evidence-wiki agent instructions-plan|instructions-apply|instructions-remove --from-file DOCUMENT\n"
         "  evidence-wiki agent inspect|routes|source-status|capture|source-schemas|source-guide [source options]\n"
+        "  evidence-wiki agent run-cycle|refresh|current|next-work|brief|resolution|recovery-status|changes|impact|history --target WORKSPACE (--runtime PRIVATE_JSON | --services PRIVATE_PY) [--noninteractive]\n"
         "  evidence-wiki agent next|start|resume|heartbeat|acquire|ingest|research-export|progress|research-guide|research-schemas [research options]\n"
         "  evidence-wiki agent apply --from-file PLAN [--format json|text]\n"
         "  evidence-wiki agent setup-guide|setup-schemas [options]\n"
@@ -730,6 +731,7 @@ def _print_help() -> None:
         "  evidence-wiki fleet-status --target PATH [--target PATH ...] [--format text|json]\n"
         "  evidence-wiki serve-mcp --target PATH\n"
         "  evidence-wiki serve-onboarding-mcp [--allow-root PATH] [--allow-operation NAME]\n"
+        "    [--research-runtime PRIVATE.json | --research-services PRIVATE.py] [--allow-research-operation NAME]\n"
         "  evidence-wiki strict schemas|check|prepare-review|review|export [options]\n"
         "  evidence-wiki computation schemas|check|aggregate|evaluate|verify|schedule|write|apply-warnings|dispatch [options]\n"
         "  evidence-wiki orchestrate start|next|submit|status|abandon|retire|cleanup-claims [options]\n"

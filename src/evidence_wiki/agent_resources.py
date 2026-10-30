@@ -17,9 +17,11 @@ from pathlib import Path, PurePosixPath
 from ._agent_catalog import CATALOG_PATH, resource_paths
 from ._filesystem import os
 from .errors import UsageError
+from .onboarding_schemas import LIMITS
 
 MAX_BYTES = 1_048_576
-MAX_RESOURCES = 64
+MAX_RESOURCES = LIMITS["resources"]
+MAX_INSTALLED_RESOURCES = 256
 
 
 def _refuse(reason: str, *, unknown: bool = False) -> None:
@@ -89,7 +91,7 @@ def _catalog():
         value = json.loads(_read(tree, CATALOG_PATH))
         entries = value["resources"]
         if (value["schema_version"] != "evidence-agent-catalog/v1" or not isinstance(entries, dict)
-                or not 1 <= len(entries) <= MAX_RESOURCES or set(entries) != set(resource_paths())):
+                or not 1 <= len(entries) <= MAX_INSTALLED_RESOURCES or set(entries) != set(resource_paths())):
             _refuse("catalog_invalid")
         for key, relative in resource_paths().items():
             entry = entries[key]
@@ -115,13 +117,22 @@ def _catalog():
         _refuse("catalog_invalid")
 
 
-def resource_index() -> dict:
-    """Return fresh metadata, with no filesystem locators or resource bodies."""
-    _, catalog = _catalog()
-    entries = [{key: entry[key] for key in ("id", "version", "media_type", "sha256")}
-               for entry in catalog["resources"].values()]
-    return {"schema_version": "evidence-agent-resources/v1", "resources": entries,
-            "bounds": {"total": len(entries), "returned": len(entries), "truncated": False}}
+def _resource_metadata(catalog=None) -> list[dict]:
+    """Read a complete trusted inventory independently of response page bounds."""
+    if catalog is None:
+        _, catalog = _catalog()
+    return [{key: catalog["resources"][identifier][key] for key in ("id", "version", "media_type", "sha256")}
+        for identifier in sorted(catalog["resources"], key=lambda value: value.encode("utf-8"))]
+
+
+def resource_index(*, offset=0, limit=MAX_RESOURCES) -> dict:
+    """Return a bounded deterministic metadata page, without paths or bodies."""
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= MAX_RESOURCES:
+        _refuse("resource_page_invalid")
+    entries = _resource_metadata()
+    selected = entries[offset:offset + limit]
+    return {"schema_version": "evidence-agent-resources/v1", "resources": selected,
+            "bounds": {"total": len(entries), "returned": len(selected), "truncated": len(selected) < len(entries)}}
 
 
 def resource_document(resource_id: str) -> dict:

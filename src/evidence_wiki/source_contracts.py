@@ -81,10 +81,22 @@ def schemas():
         content_bytes=capture["properties"]["content_bytes"], inventory={"const": "not_run"}, extraction={"const": "not_run"},
         research_ready={"const": False}, provider_enabled={"const": False}, request_fulfilled={"const": False},
         authority={"const": "caller_declared_capture_with_checked_bytes"})
-    return {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **value}
+    result = {name: {"$schema": "https://json-schema.org/draft/2020-12/schema", **value}
             for name, value in ((HOST_TOOLS, tools), (DELIVERY, delivery), (ROUTES, routes), (owner("_host_capture").SCHEMA, capture),
                                ("evidence-source-inspection/v1", inspection), ("evidence-source-route-result/v1", planned),
                                ("evidence-host-delivery-result/v1", delivered))}
+    from .source_capture_contracts import schemas as capture_schemas
+    result.update(capture_schemas())
+    from .source_usability_operations import schema as usability_schema
+    result["evidence-source-usability-view/v1"] = usability_schema()
+    from .retrieval_operations import schemas as retrieval_schemas
+    result.update(retrieval_schemas())
+    result["evidence-host-delivery-result/v2"] = {"$schema": "https://json-schema.org/draft/2020-12/schema",
+        **obj(**{**delivered["properties"], "schema_version": {"const": "evidence-host-delivery-result/v2"},
+            "content_bytes": {"type": "integer", "minimum": 1, "maximum": 8_388_608},
+            "artifact_revision": {"type": "string", "pattern": r"^sha256:[a-f0-9]{64}$"},
+            "authorized": {"const": False}, "evidence_accepted": {"const": False}})}
+    return result
 
 
 def schema_document(name):
@@ -148,4 +160,27 @@ def contract_index():
         "capture_effect": "explicit new raw bytes and provenance; ingestion remains separately requested",
         "limits": {"tools": 32, "sources": 32, "requirements": 16, "document_bytes": MAX_DOCUMENT,
                    "capture_bytes": owner("_host_capture").MAX_BYTES},
+        "revision_capture": {"operation": "sources.capture_revision", "delivery_schema": "evidence-host-delivery/v2",
+            "metadata_schema": "evidence-source-capture-input/v1", "formats": ["plain_text", "markdown", "json", "csv", "pdf"],
+            "inline_bytes": 49_152, "path_bytes": {"plain_text": 524_288, "markdown": 524_288,
+                "json": 1_048_576, "csv": 1_048_576, "pdf": 8_388_608},
+            "identity": "original and immutable provenance artifact closure; source path identity remains separate",
+            "recovery": "explicit retained pair repair; preserves original partial receipt and proves desired state only",
+            "protected_capture": "native signed usage deposit, scrub and ancestry; no inferred grant or raw publication",
+            "extraction": "not_run; capture never qualifies source usability or semantic acceptance"},
+        "current_usability": {"operation": "sources.usability", "schema": "evidence-source-usability-view/v1",
+            "route": "explicit sources.inventory then normalize.sources, followed by read-only current usability",
+            "bounds": {"source_ids": 32, "selected_bytes": 33_554_432, "per_file_bytes": 16_777_216},
+            "qualification": "native stored consistency and current rights; semantic adequacy remains not_evaluated",
+            "normalization_currency": "host_capture_normalization_version 1 for explicit v2 captures; stale/future observations refuse readiness",
+            "pdf": "one explicit bounded native extraction; retained page consistency checks never rerun parser or prove extraction fidelity"},
+        "retrieval": {"operations": ["sources.search", "sources.build_index"],
+            "schemas": ["evidence-retrieval-view/v1", "evidence-retrieval-index-result/v1"],
+            "bounds": {"sources": 32, "query_chars": 4096, "results": 32, "excerpt_chars": 4096,
+                "selected_bytes": 33_554_432, "index_bytes": 16_777_216, "output_bytes": 1_048_576},
+            "permission": "current native source use before rank/snippets/disclosed processed counts",
+            "index": "explicit serialized native publication; cache schema and full current material hashes checked at read",
+            "fallback": "stale, absent or unsupported cache visibly uses lexical; old runtimes without hard SQLite limits refuse cache use",
+            "protected_cache": "persistent build unsupported; eligible-only in-memory FTS allowed",
+            "acceptance": "exact mechanical body excerpts and current local/native revision identity; semantic adequacy not_evaluated"},
         "provider_enablement": False, "truth_guarantee": False}

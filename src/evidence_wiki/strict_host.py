@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ._script_host import load_packaged_script, shared_assets_root
@@ -109,19 +110,47 @@ class StrictResearchHost:
         protected_file = str(Path(os.environ["EVIDENCE_WIKI_AUTHORITY_FILE"]).resolve())
         workspace_file = str(self.root / "research.yml")
         program = (
-            "import pathlib,sys\n"
-            "pathlib.Path('probe-ok').write_text('ok')\n"
+            "import json,pathlib,sys\n"
+            "written=False\n"
+            "try:\n pathlib.Path('probe-ok').write_text('ok');written=True\n"
+            "except PermissionError: pass\n"
             "denied=0\n"
             "for path,mode in ((sys.argv[1],'rb'),(sys.argv[2],'r+b')):\n"
             " try:\n"
             "  with open(path,mode): pass\n"
             " except PermissionError: denied+=1\n"
-            "assert denied==2\n"
+            "print(json.dumps({'draft_write':written,'denied':denied}))\n"
         )
         with tempfile.TemporaryDirectory(prefix="evidence-strict-probe-") as directory:
-            self._execute(Path(directory), [sys.executable, "-B", "-c", program, protected_file, workspace_file], "", 10)
-            if (Path(directory) / "probe-ok").read_text(encoding="utf-8") != "ok":
+            stdout = self._execute(Path(directory), [sys.executable, "-B", "-c", program, protected_file, workspace_file], "", 10)
+            try:
+                observed = json.loads(stdout)
+                valid = (type(observed) is dict and set(observed) == {"draft_write", "denied"}
+                    and observed["draft_write"] is True and type(observed["denied"]) is int and observed["denied"] == 2
+                    and (Path(directory) / "probe-ok").read_text(encoding="utf-8") == "ok")
+            except (OSError, ValueError, TypeError, KeyError):
+                valid = False
+            if not valid:
                 _refuse("strict_host_probe_failed")
+        return {"observed_utc": datetime.now(timezone.utc).isoformat(), "backend": "darwin-sbpl",
+            "probe_program_sha256": hashlib.sha256(program.encode()).hexdigest(),
+            "draft_write": "allowed", "protected_authority_read": "denied", "workspace_write": "denied"}
+
+    def qualification(self):
+        """Repeat the actual kernel probe within the current draft-only boundary."""
+        before = self.action("draft")
+        measured = self._probe()
+        if self.action("draft") != before:
+            _refuse("strict_host_qualification_changed")
+        result = {"schema_version": "research-protected-host-qualification/v1", **measured,
+            "host_implementation": self.implementation, "action_id": before["action_id"],
+            "policy_id": before["policy_id"], "basis_id": before["basis_id"],
+            "boundary": "draft_worker", "state": "observed", "semantic_host_enforced": "unsupported",
+            "limitations": ["Only the selected SBPL draft worker read/write boundary was probed.",
+                "Evaluator services, independent credential custody and semantic delivery were not qualified."],
+            "authorized": False, "evidence_accepted": False}
+        from .host_qualification_contracts import PROTECTED, validate
+        return validate(PROTECTED, result)
 
     def action(self, operation, *, question_slugs=None, work_order=None):
         """Describe a scoped action without issuing a new parent work order."""

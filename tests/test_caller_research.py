@@ -109,7 +109,13 @@ def test_research_guidance_commands_execute_with_current_caller(workspace, run_p
     wrong_caller[wrong_caller.index("--agent-id") + 1] = "another"
     refused = run_package_command(wrong_caller)
     assert refused.returncode == 3 and refused.stderr == "", refused.stdout + refused.stderr
-    assert json.loads(refused.stdout)["error_code"] == "ONBOARDING_OWNERSHIP_CONFLICT"
+    from evidence_wiki.errors import EvidenceWikiError
+    from evidence_wiki.research_command_contracts import error_document
+    with Onboarding.open(allowed_roots=[workspace],allow=["research.heartbeat"]) as host:
+        with pytest.raises(EvidenceWikiError) as error:
+            host.research(workspace,"heartbeat",agent_id="another",run_id=run_id)
+    assert json.loads(refused.stdout) == error_document(error.value)
+    assert refused.returncode == error.value.exit_code
     assert heartbeat["argv"][heartbeat["argv"].index("--agent-id") + 1] == "caller"
     assert files(workspace) == before_refusal
 
@@ -129,6 +135,8 @@ def test_wrong_owner_cannot_mutate_caller_run(workspace, operation):
     with pytest.raises(Exception) as caught:
         getattr(controller, "run_" + operation)(workspace, controller.parse_args(args))
     assert caught.value.error_code == "RUN_CALLER_CONTEXT_CONFLICT"
+    assert caught.value.details["reason"] == "caller_run_owned_by_another_agent"
+    assert caught.value.recoverable is False
     assert files(workspace) == before
 
 
@@ -400,7 +408,8 @@ def test_cli_target_routes_to_current_advice_and_supplemental_commands(workspace
     assert value["schema_version"] == "evidence-research-guidance/v1"
     assert not value["cache"]["written"]
     assert main(["agent", "summary", "--require", "agent acquire", "--format", "json"]) == 0
-    assert len(json.loads(capsys.readouterr().out)["payload"]["operations"]) <= 64
+    from evidence_wiki.onboarding_schemas import LIMITS
+    assert len(json.loads(capsys.readouterr().out)["payload"]["operations"]) <= LIMITS["operations"]
     assert main(["agent", "research-schemas"]) == 0
     assert "agent ingest" in json.loads(capsys.readouterr().out)["commands"]
     assert files(workspace) == before

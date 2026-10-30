@@ -45,7 +45,7 @@ def initialize(root):
     command("questions", "add", "--target", root, "--from-file", request, "--format", "json")
 
 
-def run(root, fixture):
+def run(root, fixture, expected_api):
     root.mkdir(parents=True, exist_ok=False)
     target = root / "workspace"
     initialize(target)
@@ -66,7 +66,7 @@ def run(root, fixture):
     require("Northern observations" in json.dumps(retrieved) and source.read_bytes() == original, "DOCX retrieval/original bytes")
     require(owner("_docx_capture").extract(original)["structured"]["tables"][0]["rows"][1] == ["007", "0.10"], "DOCX exact cells")
     with Onboarding.open(allowed_roots=[root], allow=["migration_apply", "composition_apply", "fleet_apply", "transition_apply", "instructions_apply", "instructions_remove"]) as host:
-        require(host.bootstrap()["payload"]["installation"]["library_api_version"] == "14", "API generation")
+        require(host.bootstrap()["payload"]["installation"]["library_api_version"] == expected_api, "Frozen API generation")
         require(host.contracts()["mcp"]["protocol_version"] == "2024-11-05", "MCP discovery")
         candidate = shared_assets_root() / "domain-packs/general-science"
         request = {"schema_version": "evidence-pack-migration-request/v1", "target": str(target), "path": str(candidate),
@@ -150,8 +150,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--docx-fixture", type=Path, required=True)
+    parser.add_argument("--expected-api", required=True)
     args = parser.parse_args()
-    print(json.dumps(run(args.root.resolve(), args.docx_fixture.resolve()), sort_keys=True))
+    print(json.dumps(run(args.root.resolve(), args.docx_fixture.resolve(), args.expected_api), sort_keys=True))
 
 
 if __name__ == "__main__":

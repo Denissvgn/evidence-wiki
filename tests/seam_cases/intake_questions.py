@@ -124,6 +124,15 @@ def cases(workspace: Path) -> tuple[SeamCase, ...]:
             note="writes nothing, so both sides can run it against the one pristine workspace",
         ),
         SeamCase(
+            name="captured_document_preview",
+            argv=("--project-root", root, "--from-file", dry_run_batch, "--dry-run"),
+            call=lambda module: module.run_intake_document(
+                Path(root), DRY_RUN_BATCH, dry_run=True, from_file_label=Path(dry_run_batch).name),
+            expect=SUCCESS,
+            volatile=("generated_at",),
+            note="captured data reaches the canonical intake engine without reopening the input file",
+        ),
+        SeamCase(
             name="batch_creates_pages",
             argv=("--project-root", str(cli_target), "--from-file", intake_batch, "--format", "json"),
             call=lambda module: module.run_intake(str(seam_target), from_file=intake_batch),
@@ -140,6 +149,14 @@ def cases(workspace: Path) -> tuple[SeamCase, ...]:
             call=lambda module: module.run_intake(str(capped), from_file=cap_batch),
             expect=REFUSAL,
             note="INTAKE_TOTAL_CAP_EXCEEDED, a coded IntakeValidationError with details",
+        ),
+        SeamCase(
+            name="captured_document_cap_refusal",
+            argv=("--project-root", str(capped), "--from-file", cap_batch, "--format", "json"),
+            call=lambda module: module.run_intake_document(
+                capped, CAP_BATCH, dry_run=False, from_file_label=Path(cap_batch).name),
+            expect=REFUSAL,
+            note="captured data retains the canonical total-cap refusal before writes",
         ),
         SeamCase(
             name="handoff_signature_invalid",

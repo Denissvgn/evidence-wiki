@@ -389,3 +389,24 @@ def test_markdown_escaping_cannot_expand_past_the_delivery_bound(host):
     with pytest.raises(Exception, match="Strict evidence") as caught:
         CORE.render_markdown(result)
     assert caught.value.details["reason"] == "strict_output_bound_exceeded"
+
+
+@pytest.mark.parametrize("field", ["quote", "source_id"])
+def test_current_accepted_claims_do_not_publish_invalid_materialized_grounding(host, field):
+    review(host)
+    assert CORE.publication(host.root)["verdict"] == "ship"
+    question_path = host.root / f"wiki/questions/{QUESTION}.md"
+    _, front, body = question_path.read_text().split("---", 2)
+    metadata = yaml.safe_load(front)
+    metadata["grounding"][0][field] = "Invented quotation." if field == "quote" else "web:absent-source"
+    question_path.write_text("---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---" + body)
+    # A fresh authenticated review can still accept the unchanged inventory
+    # claim; the native publication owner must independently reject this page.
+    review(host)
+    with USAGE.current_view(host.root, host.config) as view:
+        current = CORE.evaluate(host.root, host.config, host.strict_policy, view=view)
+    assert all(row["accepted"] for row in current["claims"])
+    result = CORE.publication(host.root)
+    assert result["verdict"] == "blocked_on_sources"
+    assert result["questions"][0]["claims"] == []
+    assert "strict_release_not_eligible" in result["questions"][0]["gaps"]

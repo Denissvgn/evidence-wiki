@@ -123,7 +123,9 @@ def _matches(value: Any, schema: dict[str, Any], field: str = "/") -> None:
         _refuse("INVALID", field)
     kind = schema.get("type")
     types = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool, "null": type(None)}
-    if kind is not None and type(value) is not types[kind]:
+    if kind == "number" and (type(value) not in {int, float} or type(value) is float and not math.isfinite(value)):
+        _refuse("INVALID", field)
+    elif kind is not None and kind != "number" and type(value) is not types[kind]:
         _refuse("INVALID", field)
     if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
         _refuse("INVALID", field)
@@ -157,7 +159,9 @@ def _matches(value: Any, schema: dict[str, Any], field: str = "/") -> None:
             _refuse("LIMIT", field)
         if len(value) < schema.get("minLength", 0) or ("pattern" in schema and re.search(schema["pattern"], value) is None):
             _refuse("INVALID", field)
-    elif type(value) is int:
+    elif type(value) in {int, float}:
+        if type(value) is float and not math.isfinite(value):
+            _refuse("INVALID", field)
         if value < schema.get("minimum", value) or value > schema.get("maximum", value):
             _refuse("INVALID", field)
 

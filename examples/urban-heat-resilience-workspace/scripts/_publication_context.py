@@ -22,10 +22,19 @@ _holder = ModuleType(_key)
 _holder.active = ContextVar(_key, default=None)
 _holder.strict_internal = ContextVar(_key + "_strict", default=frozenset())
 _holder.strict_host = ContextVar(_key + "_host", default=None)
+_holder.live_read = ContextVar(_key + "_live_read", default=None)
 _shared = sys.modules.setdefault(_key, _holder)
 _active = _shared.active
 strict_internal = _shared.strict_internal
 strict_host = _shared.strict_host
+live_read = _shared.live_read
+
+
+def refuse_read_scope_write():
+    """Reject host-state effects while a native observation owns its read lock."""
+    scope = live_read.get()
+    if scope is not None:
+        scope.fail("usage_observation_is_read_only")
 
 
 def captured_view(root, config):
@@ -38,6 +47,10 @@ def captured_view(root, config):
 def captured_config(config):
     scope = _active.get()
     return scope is not None and config == scope[1]
+
+
+def capture_active():
+    return _active.get() is not None
 
 
 @contextmanager

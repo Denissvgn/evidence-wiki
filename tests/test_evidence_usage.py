@@ -293,3 +293,136 @@ def test_unavailable_reads_do_not_initialize_state(usage):
         with module.current_view(fixture.root, fixture.config):
             pytest.fail("uninitialized state accepted")
     assert {path.name for path in fixture.host.iterdir()} == {"authority.json"}
+
+
+def test_state_parser_has_a_separate_budget_for_each_event(usage):
+    module, _fixture = usage
+    document = {"schema_version": module.STATE_SCHEMA, "state_id": "sample",
+                "workspace_binding": "sample", "events": [[0] * 23000 for _ in range(12)]}
+    encoded = json.dumps(document).encode()
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module.json_document(encoded)
+    assert module._usage_state_document(encoded) == document
+    # Canonical serialization sorts events ahead of the scalar headers.
+    assert module._usage_state_document(json.dumps(document, sort_keys=True).encode()) == document
+
+
+def test_repeated_state_events_replay_through_existing_authority(usage):
+    module, fixture = usage
+    fixture.transact(module, "initialize")
+    body, files = fixture.source()
+    fixture.transact(module, "deposit", body, files)
+    for _ in range(11):
+        fixture.transact(module, "authorize", body)
+    restored = module.UsageState(fixture.root, "laboratory", state_bytes(fixture))
+    assert len(restored.events) == 13
+    assert restored.checkpoint == fixture.checkpoint
+    assert check(module, fixture, body["source_revision"])["eligible"]
+
+
+def test_state_parser_bounds_each_event_and_header(usage):
+    module, _fixture = usage
+    base = {"schema_version": module.STATE_SCHEMA, "state_id": "sample",
+            "workspace_binding": "sample", "events": []}
+    for key, value in [("events", [[0] * 250000]), ("state_id", [0] * 250000)]:
+        with pytest.raises(ValueError, match="invalid_evidence_json"):
+            module._usage_state_document(json.dumps({**base, key: value}).encode())
+    nested = 0
+    for _ in range(62):
+        nested = [nested]
+    module._usage_state_document(json.dumps({**base, "events": [nested]}).encode())
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._usage_state_document(json.dumps({**base, "events": [[nested]]}).encode())
+
+
+def test_state_parser_enforces_byte_and_event_bounds_before_decoding(usage, monkeypatch):
+    module, _fixture = usage
+    encoded = b'{"events":[],"schema_version":"s","state_id":"i","workspace_binding":"b"}'
+    monkeypatch.setattr(module, "MAX_STATE_BYTES", len(encoded))
+    assert module._usage_state_document(encoded)["events"] == []
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._usage_state_document(encoded + b" ")
+    monkeypatch.setattr(module, "MAX_STATE_BYTES", 4096)
+    monkeypatch.setattr(module, "MAX_EVENTS", 2)
+    encoded = encoded.replace(b'"events":[]', b'"events":[0,0]')
+    assert module._usage_state_document(encoded)["events"] == [0, 0]
+    # The extra event is refused before attempting to decode its invalid JSON.
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._usage_state_document(encoded.replace(b'[0,0]', b'[0,0,invalid]'))
+
+
+@pytest.mark.parametrize("encoded", [
+    b'{"schema_version":"s","state_id":"i","workspace_binding":"b","events":[],"events":[]}',
+    b'{"schema_version":"s","state_id":"i","workspace_binding":"b","events":[{"a":0,"a":1}]}',
+    b'{"schema_version":"s","state_id":"i","workspace_binding":"b","events":[NaN]}',
+    b'{"schema_version":"s","state_id":"i","workspace_binding":"b","events":[Infinity]}',
+    b'{"schema_version":"s","state_id":"i","workspace_binding":"b","events":[-Infinity]}',
+    b'{"schema_version":"s","state_id":"i","workspace_binding":"b","events":["\xff"]}',
+    b'{"events":[],}', b'{"events":[0,]}', b'{"events":[0 1]}',
+    b'{"events":[]', b'[]', b'{}',
+    b'{"events":[],"schema_version":"s","state_id":"i","workspace_binding":"b"} false',
+])
+def test_state_parser_refuses_malformed_documents(usage, encoded):
+    module, _fixture = usage
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._usage_state_document(encoded)
+
+
+
+def _state_value_node_count(value):
+    pending = [value]
+    count = 0
+    while pending:
+        item = pending.pop()
+        count += 1
+        if isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return count
+
+
+def test_state_writer_refuses_unreadable_initial_event(usage, monkeypatch):
+    module, fixture = usage
+    monkeypatch.setattr(module, "_MAX_STATE_VALUE_NODES", 1)
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        fixture.transact(module, "initialize")
+    assert not (fixture.host / "evidence-state.json").exists()
+
+
+def test_state_writer_refusal_preserves_readable_previous_generation(usage, monkeypatch):
+    module, fixture = usage
+    fixture.transact(module, "initialize")
+    before = state_bytes(fixture)
+    event = json.loads(before)["events"][0]
+    monkeypatch.setattr(module, "_MAX_STATE_VALUE_NODES", _state_value_node_count(event))
+    body, files = fixture.source()
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        fixture.transact(module, "deposit", body, files)
+    assert state_bytes(fixture) == before
+    restored = module.UsageState(fixture.root, "laboratory", before)
+    assert restored.checkpoint == fixture.checkpoint
+    assert len(restored.events) == 1
+
+
+def test_state_event_structure_budget_matches_reader(usage, monkeypatch):
+    module, fixture = usage
+    fixture.transact(module, "initialize")
+    encoded = state_bytes(fixture)
+    event = json.loads(encoded)["events"][0]
+    count = _state_value_node_count(event)
+    monkeypatch.setattr(module, "_MAX_STATE_VALUE_NODES", count)
+    module._bound_usage_state_value(event, 2)
+    assert module._usage_state_document(encoded)["events"] == [event]
+    monkeypatch.setattr(module, "_MAX_STATE_VALUE_NODES", count - 1)
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._bound_usage_state_value(event, 2)
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._usage_state_document(encoded)
+    monkeypatch.setattr(module, "_MAX_STATE_VALUE_NODES", 250_000)
+    nested = 0
+    for _ in range(62):
+        nested = [nested]
+    module._bound_usage_state_value(nested, 2)
+    with pytest.raises(ValueError, match="invalid_evidence_json"):
+        module._bound_usage_state_value([nested], 2)

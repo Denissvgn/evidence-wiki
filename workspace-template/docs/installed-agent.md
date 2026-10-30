@@ -8,9 +8,11 @@ commands or change the user's scope. Follow the user and repository rules.
 
 ## Load detail when needed
 
-`evidence-wiki agent summary --format json` returns bounded capabilities and
-version identities. `evidence-wiki agent resources --format json` lists the
-closed resource catalog. Retrieve one resource with
+`evidence-wiki agent summary --format json` returns capabilities, versions and a
+first resource page with `resource_bounds`. Negotiation and schema IDs cover the
+full catalog. `agent resources --offset 0 --limit 128 --format json` returns pages
+with `bounds`; advance by `returned` until the offset reaches `total`.
+`truncated` means this response omits part of the catalog. Retrieve content with
 `evidence-wiki agent resource ID --format json`; omit the format for raw content.
 IDs are exact names, never paths or URLs.
 `evidence-wiki contract` still returns the complete installation contract.
@@ -95,12 +97,10 @@ prose edits cannot create eligibility.
 Parent coordination is optional; read [orchestration](guide/orchestrator/v1)
 only when managing multiple workspaces. `orchestrate next` persists work orders.
 
-For calculated claims, read [computation](guide/computation/v1) and retrieve its
-schemas or examples from the catalog. The bounded declarative engine uses finite
-Decimal strings, declared rounding and an explicit clock with pinned timezone
-identity. Check/aggregate/evaluate/verify/schedule are read-only; write,
-apply-warnings and dispatch require explicit invocation, current result identity
-and a request ID. Catalog scripts are reference inputs; deploy copies the standalone runtime. Arithmetic lineage does not prove units, assumptions
-or source truth; calculated claims retain the independent review requirement.
-
-Guide size target: about 1,500 estimated tokens (UTF-8 bytes / 4, rounded up).
+For calculated claims, read [computation](guide/computation/v1). The declarative
+engine uses finite Decimal strings, declared rounding and a clock with pinned
+timezone identity. Check/aggregate/evaluate/verify/schedule are read-only;
+write, apply-warnings and dispatch require explicit invocation, current result
+identity and a request ID. Deploy copies the standalone runtime. Arithmetic
+lineage does not prove units, assumptions or source truth; independent review
+remains required.

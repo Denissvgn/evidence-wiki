@@ -459,5 +459,8 @@ class OrchestrateNamespace(Namespace):
 
     def _workspace_root(self) -> Path:
         """The workspace root, refusing once the owning handle is closed."""
+        from ..host_context import reject_unsupported
+
         self._workspace._check_open()
+        reject_unsupported("orchestrate.deployed_controller")
         return self._root

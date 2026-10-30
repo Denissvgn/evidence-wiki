@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 import yaml
 
+from tests._script_loader import load_isolated_module
 from tests._script_loader import load_module as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -92,7 +93,7 @@ class PackageCliTests(unittest.TestCase):
         return int(exit_code or 0), stdout.getvalue(), stderr.getvalue()
 
     def smoke_results(self, target: Path) -> dict:
-        smoke = load_script_module("evidence_wiki_package_cli_smoke", target / "scripts" / "smoke_validate_workspace.py")
+        smoke = load_isolated_module("evidence_wiki_package_cli_smoke", target / "scripts" / "smoke_validate_workspace.py")
         return smoke.run_checks(target)
 
     def test_assets_resolve_from_source_checkout(self):
@@ -328,7 +329,7 @@ class PackageCliTests(unittest.TestCase):
         payload = json.loads(self.run_cli("contract"))
 
         library_api = payload["library_api"]
-        self.assertEqual("14", library_api["version"])
+        self.assertEqual("64", library_api["version"])
         surface = library_api["surface"]
         self.assertIsInstance(surface, list)
         for operation in (

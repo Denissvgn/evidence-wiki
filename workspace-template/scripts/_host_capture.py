@@ -14,6 +14,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import SafeLoader
 
 SCHEMA = "evidence-host-capture/v1"
 MAX_BYTES = 524_288
@@ -23,6 +24,7 @@ FIELDS = frozenset({"schema_version", "capture_id", "tool_id", "tool_version", "
                     "capture_method", "content_format", "content_kind", "completeness", "completeness_note", "rights",
                     "scope", "request_id", "content_sha256", "content_bytes"})
 _SCRIPT_DIR = Path(__file__).resolve().parent
+_VALIDATION_MODULES = {}
 
 
 def schema():
@@ -80,6 +82,8 @@ def origin(value):
 
 
 def validate(value):
+    if type(value) is dict and value.get("schema_version") == "evidence-host-capture/v2":
+        return copy.deepcopy(load_workspace_module(_SCRIPT_DIR, "_capture_bridge", cache=_VALIDATION_MODULES).validate(value))
     require(isinstance(value, dict) and set(value) == FIELDS and value.get("schema_version") == SCHEMA, "capture_shape_invalid")
     for key in ("capture_id", "tool_id"):
         identifier(value[key])
@@ -117,42 +121,51 @@ def validate(value):
     return copy.deepcopy(value)
 
 
-def read(root: Path, relative: str, maximum=MAX_BYTES):
+def read(root: Path, relative: str, maximum=MAX_BYTES, *, read_input=None):
     require(isinstance(relative, str) and not Path(relative).is_absolute() and "\\" not in relative
             and all(part not in {"", ".", ".."} for part in relative.split("/")), "capture_path_invalid")
     path = root / relative
     try:
         info = path.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= maximum, "capture_file_unsafe_or_large")
-        revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
-        if os.name == "nt":
-            reader = load_workspace_module(_SCRIPT_DIR, "_windows_files")
-            raw = reader.read_legacy_file(root, relative, revision.observation(info), maximum)
+        if read_input is not None:
+            raw = read_input(root, relative, maximum)
         else:
-            raw = revision.read_observed_file(root, relative, revision.observation(info))
+            revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
+            if os.name == "nt":
+                reader = load_workspace_module(_SCRIPT_DIR, "_windows_files")
+                raw = reader.read_legacy_file(root, relative, revision.observation(info), maximum)
+            else:
+                raw = revision.read_observed_file(root, relative, revision.observation(info))
+        require(isinstance(raw, bytes), "capture_bytes_required")
         require(len(raw) <= maximum, "capture_bytes_bound")
         return raw
     except CaptureInvalid:
         raise
-    except Exception:
+    except Exception as error:
+        if read_input is not None and callable(getattr(error, "to_envelope", None)):
+            raise
         raise CaptureInvalid("capture_file_unavailable_or_changed") from None
 
 
 def sidecar(raw):
     require(isinstance(raw, bytes) and 0 < len(raw) <= MAX_BYTES, "capture_sidecar_bound")
-    class Loader(yaml.SafeLoader):
-        pass
-    def mapping(loader, node):
-        result = {}
-        for key_node, value_node in node.value:
-            key = loader.construct_object(key_node)
-            require(isinstance(key, str) and key not in result, "capture_sidecar_key_invalid")
-            result[key] = loader.construct_object(value_node)
-        return result
-    Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
-    try:
+
+    def parse(base):
+        class Loader(base):
+            pass
+
+        def mapping(loader, node):
+            result = {}
+            for key_node, value_node in node.value:
+                key = loader.construct_object(key_node)
+                require(isinstance(key, str) and key not in result, "capture_sidecar_key_invalid")
+                result[key] = loader.construct_object(value_node)
+            return result
+
+        Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
         depth = 0
-        for count, event in enumerate(yaml.parse(raw)):
+        for count, event in enumerate(yaml.parse(raw, Loader=Loader)):
             require(count < 4096 and not isinstance(event, yaml.AliasEvent), "capture_sidecar_bound")
             if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
                 depth += 1
@@ -162,11 +175,28 @@ def sidecar(raw):
         value = yaml.load(raw, Loader=Loader)  # noqa: S506 -- bounded SafeLoader subclass with duplicate-key refusal.
         require(isinstance(value, dict), "capture_sidecar_invalid")
         return value
+
+    try:
+        if SafeLoader is yaml.SafeLoader or any(marker in raw for marker in (b"\t", b"%YAML")):
+            return parse(yaml.SafeLoader)
+        try:
+            return parse(SafeLoader)
+        except yaml.YAMLError:
+            return parse(yaml.SafeLoader)
     except (yaml.YAMLError, TypeError, RecursionError, UnicodeError):
         raise CaptureInvalid("capture_sidecar_invalid") from None
 
 
-def inspect_record(root: Path, record):
+def inspect_record(root: Path, record, *, read_input=None):
+    """Inspect unchanged capture semantics using an optional caller-pinned reader.
+
+    The private reader must return exact bytes and enforce its own cumulative
+    capture budget. Default callers retain the legacy anchored read path.
+    """
+    if type(record.get("provenance")) is dict and record["provenance"].get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
+        from types import SimpleNamespace
+        native = SimpleNamespace(read=read, require=require, sidecar=sidecar)
+        return load_workspace_module(_SCRIPT_DIR, "_capture_bridge", cache=_VALIDATION_MODULES).inspect(root, record, native, read_input=read_input)
     provenance = record.get("provenance")
     require(isinstance(provenance, dict) and "host_capture" in provenance, "capture_metadata_missing")
     profile = validate(provenance["host_capture"])
@@ -175,10 +205,10 @@ def inspect_record(root: Path, record):
     relative = paths[0]
     require(relative.startswith("raw/") and Path(relative).suffix.lower() in SUFFIXES, "capture_raw_path_invalid")
     require((profile["content_format"] == "plain_text") == (Path(relative).suffix.lower() == ".txt"), "capture_format_mismatch")
-    raw = read(root, relative)
+    raw = read(root, relative, read_input=read_input)
     require(profile["content_bytes"] == len(raw) and profile["content_sha256"] == "sha256:" + hashlib.sha256(raw).hexdigest(),
             "capture_original_bytes_changed")
-    declared = sidecar(read(root, relative + ".provenance.yml"))
+    declared = sidecar(read(root, relative + ".provenance.yml", read_input=read_input))
     require(declared.get("host_capture") == profile, "capture_metadata_changed")
     for key, expected in (("checksum", profile["content_sha256"]), ("origin_url", profile["origin_url"]),
                           ("retrieved_at", profile["retrieved_at"]), ("license", profile["rights"]["license"]),
@@ -202,6 +232,8 @@ def inspect_record(root: Path, record):
 
 
 def normalized_issues(root, record, frontmatter, body):
+    if type(record.get("provenance")) is dict and record["provenance"].get("host_capture", {}).get("schema_version") == "evidence-host-capture/v2":
+        return load_workspace_module(_SCRIPT_DIR, "_host_capture_normalization", cache=_VALIDATION_MODULES).issues(root, record, frontmatter, body)
     try:
         require(root is not None, "capture_original_root_missing")
         inspected = inspect_record(root, record)
@@ -215,8 +247,8 @@ def normalized_issues(root, record, frontmatter, body):
             content = inspected["content"].replace("\r\n", "\n").replace("\r", "\n")
             require("## Extracted Text\n\n" + content + "\n\n## Figures and Tables" in body,
                     "capture_normalized_text_mismatch")
-        normalizer = load_workspace_module(_SCRIPT_DIR, "normalize_sources")
-        contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
+        normalizer = load_workspace_module(_SCRIPT_DIR, "normalize_sources", cache=_VALIDATION_MODULES)
+        contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract", cache=_VALIDATION_MODULES)
         source = normalizer.normalize_host_capture_record(root, copy.deepcopy(record))
         _, expected_body, error = contract.split_record(normalizer.render_markdown(source, frontmatter))
         require(error is None and body.strip() == expected_body.strip(), "capture_normalized_rendering_mismatch")

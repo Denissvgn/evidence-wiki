@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -44,7 +45,11 @@ def setup_observation(root, files):
     if raw is None:
         return {"state": "not_recorded", "trust": "local_unauthenticated"}
     try:
-        target = json_document(raw)["request"]["payload"]["target"]
+        document = json_document(raw)
+        if document.get("schema_version") == "evidence-research-requirements/v2":
+            from .requirements_operations import read_effective
+            document = read_effective(root, raw=raw)
+        target = document["request"]["payload"]["target"]
         writable = Path(target["writable_root"]).resolve()
         if writable / target["relative_path"] != root:
             raise ValueError("setup_target_mismatch")
@@ -65,13 +70,55 @@ def setup_observation(root, files):
         return {"state": "unavailable", "trust": "local_unauthenticated", "current_readiness": "not_inferred"}
 
 
+def _require_interpreter():
+    selected = os.environ.get("EVIDENCE_WIKI_PYTHON")
+    if selected and Path(selected).absolute() != Path(sys.executable).absolute():
+        refuse("caller_selected_interpreter_mismatch", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+
+
+def _requirements(root, files):
+    raw = files.get("docs/research-requirements.json")
+    document = json_document(raw) if raw is not None else None
+    if (document or {}).get("schema_version") == "evidence-research-requirements/v2":
+        from .requirements_operations import read_effective
+        document = read_effective(root, raw=raw)
+    return document
+
+
+def _default_run(root, integrations_qualified):
+    if integrations_qualified:
+        status = owner("workspace_status").run_status_report(root, no_cache=True)
+        selected = status.get("run_controller", {}).get("run_id")
+        if selected:
+            owner("run_controller").load_run_state(root, selected)
+
+
+@contextmanager
+def _reading_scope(observed):
+    """Keep native constructor admission, partial reads and closing together."""
+    usage = owner("_evidence_usage")
+    from ._review_dependency_inputs import current_inputs
+
+    holder = current_inputs()
+    held = None if holder is None else holder.observation_constructor(observed.root, observed.config, observed.capture)
+    try:
+        with (
+            held if held is not None else usage._observation_reads(observed.root, observed.config)
+            if observed.integrations_qualified and usage.configured(observed.config)
+            else nullcontext()
+        ):
+            yield
+    except ValueError as error:
+        if type(error).__name__ != "EvidenceInvalid":
+            raise
+        raise owner("_usage_gate").refusal(str(error)) from None
+
+
 class ResearchObservation:
     """Bracket all owner reads with a canonical revision; never populate status caches."""
 
     def __init__(self, target, *, run_id=None):
-        selected = os.environ.get("EVIDENCE_WIKI_PYTHON")
-        if selected and Path(selected).absolute() != Path(sys.executable).absolute():
-            refuse("caller_selected_interpreter_mismatch", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+        _require_interpreter()
         self.root = Path(target).expanduser().resolve(strict=True)
         self.root_identity = identity(self.root)
         self.revisions = owner("_evidence_revision")
@@ -80,6 +127,11 @@ class ResearchObservation:
         if not isinstance(self.config, dict):
             refuse("caller_configuration_invalid")
         self.integrations_qualified = owner("_caller_context").builtin_integrations(self.config)
+        with _reading_scope(self):
+            self._read(run_id)
+            self.finish()
+
+    def _read(self, run_id):
         self.policy = owner("_strict_evidence").resolve_policy(self.root, self.config)
         self.controls = optional(lambda: owner("_caller_context").capture(self.root))
         self.status = (
@@ -128,11 +180,7 @@ class ResearchObservation:
         if self.computation is not None:
             self.computation["observation_seconds"] = perf_counter() - calculation_started
         self.setup = setup_observation(self.root, self.capture.files)
-        self.requirements = (
-            json_document(self.capture.files["docs/research-requirements.json"])
-            if "docs/research-requirements.json" in self.capture.files
-            else None
-        )
+        self.requirements = _requirements(self.root, self.capture.files)
         choice = (self.requirements or {}).get("decisions", {}).get("framework")
         self.framework = {"selection": choice, "runtime_access": "not_probed", "transport_success_is_acceptance": False}
         if choice:

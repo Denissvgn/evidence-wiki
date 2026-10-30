@@ -2,6 +2,292 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add an explicit 48-hour execution profile and RunPolicy v4 for larger total
+  run budgets.
+
+- Offer an explicit two-hour batch observation window with fresh native closing
+  validation, while retaining existing observation profiles and authority limits.
+
+### Fixed
+
+- Keep dependency review material scoped to each claim and its premises after
+  question resolution, so edits to sibling claims do not invalidate unrelated
+  reviews. Current grounding and publication checks remain required.
+
+- Read bounded host evidence histories with a separate JSON budget for each
+  event, preserving state size, nesting, authentication and individual evidence
+  limits as reviews accumulate.
+
+- Bound each native effect in a long research run to the supported operation
+  timeout while preserving the original run deadline and recovery allowance.
+
+- Finish finite child cleanup before delivering a pending deadline alarm,
+  preserving the original timer and reporting any cleanup overrun.
+
+- Retain more successful large-document validations within a fixed serialized
+  key budget, preserving exact validation identity and detached return values.
+
+- Emit versioned host qualification reports for selective reviews while
+  preserving legacy report schemas, authentication checks and report bounds.
+
+- Preserve a trusted host's original operation deadline through in-process MCP
+  calls while retaining the existing server-owned cancellation limits.
+
+- Bind opt-in process cleanup to the original process object and retain proven
+  completion, preventing later signals to a reused process identifier.
+
+- Inspect and recover deeply nested mutation records without reducing the
+  accepted request's nesting allowance. Each retained child keeps its original
+  validation limits; fixed inspection wrappers retain the aggregate bounds.
+
+- Preserve complete bounded review data in authenticated execution journals.
+  Journal headers and collections retain canonical bytes, signatures and chain
+  references without consuming the child payload's nesting allowance.
+
+- Authenticate retained integration history before acquiring a short current
+  witness, while preserving closing source, authority and journal checks.
+
+- Refresh current reference conformance before a standalone integration brief
+  within the original operation allowance, retaining a separate host action.
+
+- Keep complete agent bootstrap JSON within its existing byte bound when host
+  qualification resources are present.
+
+- Keep calibrated evaluator assurance at `artifact_checked`; selecting a
+  `host_enforced` policy cannot promote reference metrics into host isolation.
+
+- The library contract now advertises all supported execution profiles through
+  v13. Library API `60` preserves the existing operation matrix and legacy
+  serialized profile meanings.
+
+- Native research task context now includes the self-contained integration guide.
+  Public report and recovery schemas enforce the native page limit of 64, and
+  host guidance specifies handle opening, profile literals, current eligibility,
+  retained refresh identities and finite host deadlines.
+
+### Added
+
+- Add opt-in claim dependency review bases and authenticated retained-review
+  eligibility. Source, policy, authority, computation and unclassified workspace
+  changes remain global invalidators; policy migrations require fresh reviews.
+
+- Add explicitly selected complete review context with transitive premises and
+  each owning question’s semantic context and counterevidence criteria. Current
+  native owners revalidate every delivery; strict review identity and legacy
+  delivery defaults remain unchanged. Unsupported investigation paths refuse
+  before dispatch.
+
+- Allow a trusted integration host to freeze bounded process scheduling for
+  current original reads, preserving serial defaults, original admission and
+  closing expiry checks.
+
+- Run repeated native reference integrations through direct Python,
+  current-caller and scoped MCP routes, retaining same-workspace evidence changes,
+  original outcomes and measured burden. Frozen improvement rules preserve
+  missing work, current witness expiry and scoped usefulness without inferring
+  adoption or authorizing capability expansion.
+
+- Decide release qualification automatically from pinned original conformance,
+  semantic, integration, cost, drift and uncertainty evidence. Frozen rules,
+  current-owner replay and exact citations preserve evidence classes and keep
+  fixture mechanics, bounded semantic assurance and observed business outcomes
+  separate. Decisions do not authorize or publish a release.
+
+- Compose bounded unattended qualification from original archive, acceptance,
+  installed transport, reference and cost evidence with exact candidate replay.
+  Separate product scenarios, expected abstentions and unresolved process stops
+  retain their original denominators and evidence meanings.
+
+- Add explicit bounded owner-private service factories for advanced public
+  host runtimes through Python, console commands and scoped stdio MCP startup.
+  Library API `63` and operation matrix `44` retain native grants and mark late
+  factory effects as uncertain.
+
+- Add dated current host observations joining native credential challenges,
+  owned execution, review contexts and evaluator attestations. A separate macOS
+  protected-host probe reports its draft-only kernel boundary. Library API `62`
+  and operation matrix `43` keep unsupported semantic host isolation and
+  unobserved remote model execution explicit.
+
+- Add preauthorized host backup recovery with an independent latest-head
+  commitment and key-free service descriptors. Canonical journaled upgrades
+  retain predecessor provenance, partial publications, original deadlines and
+  finite attempts while preserving unexplained user edits. Library API `61`
+  and operation matrix `42` advertise the host-only boundaries.
+
+- Keep installed public imports, resource catalogs, schema declarations and
+  noninteractive host examples bound to the selected package contract. Legacy
+  policy/profile serialization and optional host capabilities remain explicit.
+
+- Add optional host ingestion of authenticated usage, incident, payment and
+  human-work observations. Scoped reports separate deterministic, adjudicated,
+  simulated and external evidence, preserve partial coverage and unknowns,
+  and leave adoption or business value unobserved when unsupported.
+
+- Add frozen adversarial acceptance checks with exact test obligations,
+  retained process and owner evidence, independent reproduction support and
+  conservative pass/fail/abstain outcomes. Missing observations and expected
+  refusals remain distinct from successful answers or native authorization.
+
+- Add bounded integration-cost accounting with complete attempt inventories,
+  exact monetary buckets, declared repeat-use allocation and authenticated host
+  and native receipt adapters. Unknown provider usage and human or organizational
+  telemetry remain separate from known subtotals and execution observations.
+
+- Add a frozen autonomous journey-comparison harness with randomized interface
+  assignments, complete retained attempt accounting and generation sealing before
+  neutral final grading. Common answer conformance stays separate from native
+  approval; unobserved model usage, imported baselines and unmatched updates retain
+  their explicit limits.
+
+- Add opt-in calibrated semantic judging with independent Evidence, Scope/Units
+  and Counterevidence passes, exact original context, anchored dimension checks
+  and advisory adjudication under existing investigation budgets. Bounded public
+  reports retain expected units, unknowns, provenance and current qualification;
+  finite references and agent judgments remain distinct from source truth.
+
+- Generate integration guides and operation references from shared public
+  declarations, with a Documentation-agent/critic assembly recipe and bounded
+  inert repair proposals. A public research request builder shares native
+  argument validation so callers need no manual schema envelopes.
+
+- Provide versioned current-caller and scoped MCP host recipes with public
+  task context selection, separate generator instructions, native omission and
+  byte bounds, independent Planner/critic dispatch and terminal profile refusal.
+  Installed scripted and live host records keep usage, interventions and
+  qualification limits explicit.
+
+- Publish an installed unattended Python host example using public setup, source
+  admission, generation, independent review, bounded repair/abstention, current
+  export and refresh APIs. Fixture mechanics and authority stay separate from
+  explicitly selected live services; missing capabilities return terminal data
+  without prompts, credential provisioning or production qualification claims.
+
+- Expose the autonomous research journey through startup-scoped MCP tools sharing
+  public Python/CLI dispatch, explicit native runtime and machine policy. Setup,
+  intake, bounded research, current outputs, refresh and pending recovery need no
+  shell escape or elicitation. Cooperative cancellation retains effects and
+  original budgets; request probes close after completion. The legacy workspace
+  MCP contract remains separate.
+
+- Share autonomous research CLI dispatch with the public Python facade, with
+  explicit private host runtime selection, bounded terminal JSON, exact typed
+  errors and concise summaries. Caller research commands use scoped library
+  methods; progress report writes require a separate grant. No semantic prompts
+  or implicit credential setup occur, including with closed stdin.
+
+- Qualify native strict, assessment, packet and output bounds through a frozen
+  workload catalog, authenticated Benchmark selection, independent accounting
+  critique and deterministic performance rules. Fresh/warm/update measurements
+  report serialization, hardware, traced memory and RSS, with explicit partition
+  guidance. Missing or unknown measurements never qualify; scientific approval
+  remains separate. Offline scale gates also require complete quality evidence.
+
+- Expose finite host scheduled refresh requests with stored policy, stable notice
+  identities and signed event cursors. Current native checks detect missing hints;
+  queued changes coalesce and obsolete jobs cancel. Explicit host advancement
+  reserves work before dispatch and reconciles retained runs without budget reset
+  or background daemon creation.
+
+- Refresh decisions through a bounded authenticated planner and a new run linked
+  to retained terminal history. Permitted updates use existing acquisition owners;
+  unique material invalidation forces fresh drafts and mandatory reviews. Current
+  briefs own acceptance, while old accounting and unresolved failures remain visible.
+
+- Explain current strict claim dependencies and review eligibility with conservative
+  whole-workspace invalidation, current authority checks and optional local source
+  comparisons. Legacy assessment status does not confer strict approval.
+
+- Add bounded retained decision history with current permission checks and
+  authenticated paging. Historical claim, source, review and brief records
+  remain separate from current acceptance; missing retention is never recreated.
+
+- Add frozen local Markdown artifact destinations, exact scoped Release proposals,
+  current evidence checks at publication and protected receipt-only reconciliation.
+  Interrupted unchecked writes remain uncertain; historical delivery does not
+  renew current acceptance or authorize another publication.
+
+- Current structured research briefs and deterministic literal Markdown preserve every original outcome, reviewed finding/inference, evidence, limitation and unresolved question. Optional protected readability inspection reports only bounded field issues and uses existing scoped repair and fresh independent reviews.
+
+- Add bounded read-only per-original resolution with current native publication,
+  authenticated mandatory reviews and exact frozen policy checks. Partial derived
+  credit preserves original accounting, private review commitments stay withheld,
+  and lifecycle status remains separate from current eligibility and external actions.
+
+- Add current permission-filtered scoped repair progress with exact material
+  differences, native scientific calculation revalidation and explicit logical
+  review-slot binding for approved alternate services. Material changes require
+  fresh independent native review within the frozen run budgets.
+  Protected repair uses a declared bundled-adapter delivery ceiling and held
+  native source custody through stdin handoff; uncertain work retains its budget.
+
+- Add current provisioned review-service status and explicit immutable approved
+  alternate routes with shared role budgets, exact owned output/producer checks,
+  current target qualification and parent-only signing. Unknown work and semantic
+  failures never trigger service failover; no credential enrollment is performed.
+
+- Expose current strict review status, signed supersession and source revocation,
+  with current strict/coverage compatibility checks before new machine work.
+  Human-only or unknown contracts stop without changing policy or evidence.
+
+- Add protected blinded review pages and opt-in complete host delivery with frozen
+  packet/input bounds, current source rights, shared context identities and native
+  computation, mechanical and counter context. Missing decisive pages block review;
+  host delivery remains separate from worker understanding and accepted release.
+
+- Add current restart inspection and exact retained-effect reconciliation without
+  repeating model or fetch work, changing ownership or reopening terminal runs.
+
+- Integrate scoped coverage and counterevidence examination plus current native
+  calculation references with independently authenticated review and release.
+
+- Expose read-only per-claim native source and anchor diagnostics while keeping
+  mechanical matching, current usage, semantic review and accepted release distinct.
+
+- Add scoped authenticated acquisition choice and bounded native evidence workflows
+  with original request budget custody, current source reconciliation and exact replay.
+
+- Add a bounded host research cycle with authenticated scoped planner proposals,
+  current permitted worker evidence and durable terminal/replay accounting.
+
+- Expose bounded permission-filtered lexical/FTS search with exact excerpts and
+  source revisions, plus separately selected native index publication.
+
+- Normalize bounded native text, JSON, CSV and PDF captures with retained
+  structured/page anchors, producer currency and read-only current usability.
+
+- Expose current evidence-request readiness, compatible request links and checked
+  fulfillment/block/reopen operations over canonical native records and permissions.
+
+- Retain bounded text, structured and PDF host captures as immutable original
+  revisions, with approved-path reads and explicit recovery of interrupted
+  original/provenance publication.
+
+- Expose original research obligations and bounded append-only requirement
+  revisions through native staged transactions and protected historical proof.
+
+- Add bounded per-claim disagreement repair and separately qualified optional
+  investigation, preserving retry spend, claim identity and fresh review gates.
+
+- Add opt-in protected finite evaluator calibration, abstention and sensitivity
+  metrics, exact current domain/configuration/withdrawal checks and drift invalidation.
+
+- Add frozen task-role scopes, exact controller selections and fresh blinded
+  review packets, with native authenticated signing-controller correlation.
+
+- Add frozen role execution limits, authenticated bounded retries and configured
+  worker fallback without resetting run allowance; provide a deterministic
+  offline host with explicit fixture provenance.
+
+- Add explicit host-driven research sessions over canonical evidence owners,
+  with bounded generation, draft admission, independent review and current release.
+- Add authenticated execution accounting and redacted decision reports with
+  predeclared coverage, exact scoped costs and explicit uncertainty.
+- Support shared operation deadlines, bounded cancellation observations and
+  interrupted native normalization recovery without assuming rollback.
+
 ## 1.1.2 - 2026-09-30
 
 - Reject thin native HTML gateway, timeout and authentication shells while

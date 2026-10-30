@@ -55,8 +55,12 @@ def materialize(root: Path, config: dict[str, Any], revision: str,
 
 
 def publish_file(root: Path, relative: str, data: bytes, expected: str | None, *,
-                 before_publish: Callable[[], None] | None = None) -> bool:
-    artifact_path(relative)
+                 before_publish: Callable[[], None] | None = None,
+                 managed_placeholder: bool = False) -> bool:
+    if type(managed_placeholder) is not bool or managed_placeholder and relative != "skills/.gitkeep":
+        raise EvidenceInvalid("managed_upgrade_placeholder_invalid")
+    if not managed_placeholder:
+        artifact_path(relative)
     if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd or os.rename not in os.supports_dir_fd:
         raise EvidenceInvalid("usage_materialization_unsupported")
     descriptors = []

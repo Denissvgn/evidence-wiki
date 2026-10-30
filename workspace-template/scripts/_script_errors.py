@@ -10,6 +10,34 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 
 _REMEDIATIONS = {
+    'COVERAGE_INPUTS_CHANGED': 'Use the serialized coverage operation; recapture current inputs and prepare a fresh plan under its native lock.',
+    'COVERAGE_WRITE_UNCERTAIN': 'Inspect and reconcile the manifest desired state before another write; retain uncertain artifacts.',
+    'DRAFT_ADMISSION_INVALID': 'Use the current closed proposal contract and exact original/source bindings; retain unaccepted drafts.',
+    'DRAFT_ADMISSION_REFUSED': 'Retain the last valid inventory and supply current exact original/source scope through serialized admission.',
+    'DRAFT_ADMISSION_UNSUPPORTED': 'Select a supported original/source mapping in a new frozen run; preserve the existing inventory.',
+    'INVENTORY_LIMIT': 'Select a smaller configured raw scope or explicitly increase the permitted finite record cap.',
+    'INVENTORY_REQUEST_INVALID': 'Supply correctly typed inventory arguments and supported finite positive bounds.',
+    'INVENTORY_SCOPE_INVALID': 'Keep configured inventory, lock and activity-log paths inside the selected workspace.',
+    'OPERATION_CANCELLED': 'Preserve and reconcile earlier effects; cancellation does not establish rollback.',
+    'OPERATION_CANCEL_UNKNOWN': 'Preserve uncertain cancellation and effects; reconcile within finite bounds without assuming execution stopped.',
+    'OPERATION_CLOCK_REGRESSION': 'Restore a reliable host clock and reconcile against original stored deadlines; grant no fresh time.',
+    'OPERATION_CONTROL_INVALID': 'Supply a current trusted host control with a finite timeout and an explicit UTC deadline.',
+    'OPERATION_DEADLINE_EXCEEDED': 'Stop expired work and use separately bounded cleanup; do not renew the work deadline.',
+    'OPERATION_PROCESS_BOUNDARY_UNSUPPORTED': 'Select an enforceable native process boundary; do not use an unbounded fallback.',
+    'RUN_JOB_RESERVATION_INVALID': 'Reserve permitted work within frozen grants, budgets and the original deadline; do not renew its lease or policy.',
+    'RUN_JOB_RESERVATION_PENDING': 'Reconcile the retained job and keep uncertain usage reserved before considering further work.',
+    'RUN_JOURNAL_CHANGED': 'Recapture stable canonical bytes and reconcile the existing request before retrying.',
+    'RUN_JOURNAL_LIMIT': 'Preserve retained history and select a supported bounded run; do not truncate history to satisfy a cap.',
+    'RUN_JOURNAL_UNREADABLE': 'Restore readable canonical files from verified retained state; preserve history and reject worker-provided reconstruction.',
+    'RUN_JOURNAL_UNSAFE': 'Use ordinary, unaliased canonical files and safe native parent paths.',
+    'RUN_JOURNAL_UNSUPPORTED': 'Select a host supporting native anchored descriptor operations; do not bypass custody checks.',
+    'SOURCE_BOUNDED_EXECUTION_UNSUPPORTED': 'Use supported native bounded normalization or a separately qualified bounded host executor.',
+    'SOURCE_EXTRACTION_FAILED': 'Retain prior artifacts and diagnostics; correct the supported extraction condition within explicit bounds.',
+    'SOURCE_INPUT_LIMIT': 'Select smaller authorized inputs or a permitted finite allowance before a new operation.',
+    'SOURCE_NORMALIZATION_LIMIT': 'Select fewer supported sources or smaller payloads within finite normalization bounds.',
+    'SOURCE_NORMALIZATION_REQUEST_INVALID': 'Supply the closed normalization request with valid selectors, booleans and supported finite bounds.',
+    'SOURCE_SCOPE_INVALID': 'Keep source and generated paths in the workspace, preserve direct-original mappings, and avoid input/output overlap.',
+    'WORKSPACE_PATH_REFUSED': 'Select ordinary, unaliased in-scope paths on a supported native platform; preserve existing artifacts.',
     "COMPUTATION_BUSY": "Wait for the current computation writer to finish, inspect its result and request IDs, then retry without deleting locks or journals.",
     "COMPUTATION_REFUSED": "Inspect the computation reason, correct the declared inputs, expressions or clock selection, and evaluate again before applying any effect.",
     "RUN_CALLER_CONTEXT_CONFLICT": "Preserve the run and inspect its original owner, instructions and controls. Use that unchanged context or explicitly start new work after an authorized change; never rewrite the old binding.",
@@ -811,6 +839,32 @@ def classify_error_code(message: str) -> str:
 # the answer in one place, which is what made the divergence possible.
 NON_RECOVERABLE_CODES = frozenset(
     {
+        'COVERAGE_WRITE_UNCERTAIN',
+        'DRAFT_ADMISSION_INVALID',
+        'DRAFT_ADMISSION_REFUSED',
+        'DRAFT_ADMISSION_UNSUPPORTED',
+        'INVENTORY_LIMIT',
+        'INVENTORY_REQUEST_INVALID',
+        'INVENTORY_SCOPE_INVALID',
+        'OPERATION_CANCELLED',
+        'OPERATION_CANCEL_UNKNOWN',
+        'OPERATION_CLOCK_REGRESSION',
+        'OPERATION_CONTROL_INVALID',
+        'OPERATION_DEADLINE_EXCEEDED',
+        'OPERATION_PROCESS_BOUNDARY_UNSUPPORTED',
+        'RUN_JOB_RESERVATION_INVALID',
+        'RUN_JOB_RESERVATION_PENDING',
+        'RUN_JOURNAL_LIMIT',
+        'RUN_JOURNAL_UNREADABLE',
+        'RUN_JOURNAL_UNSAFE',
+        'RUN_JOURNAL_UNSUPPORTED',
+        'SOURCE_BOUNDED_EXECUTION_UNSUPPORTED',
+        'SOURCE_EXTRACTION_FAILED',
+        'SOURCE_INPUT_LIMIT',
+        'SOURCE_NORMALIZATION_LIMIT',
+        'SOURCE_NORMALIZATION_REQUEST_INVALID',
+        'SOURCE_SCOPE_INVALID',
+        'WORKSPACE_PATH_REFUSED',
         "CLAIM_HELD",
         "CLAIM_NOT_STALE",
         "CANDIDATE_STORE_INVALID",
@@ -999,7 +1053,7 @@ def is_refusal(exc: object) -> bool:
     return callable(getattr(exc, "to_envelope", None)) and isinstance(getattr(exc, "error_code", None), str)
 
 
-def emit_refusal(refusal: ScriptRefusal, *, json_mode: bool) -> int:
+def emit_refusal(refusal: object, *, json_mode: bool) -> int:
     """Render one refusal exactly as ``main`` always rendered it and return its exit code.
 
     This is the whole catch arm a wrapped ``main`` needs::
@@ -1011,18 +1065,60 @@ def emit_refusal(refusal: ScriptRefusal, *, json_mode: bool) -> int:
     below are the shape that predicate tests for, so a refusal that crossed a
     module-isolation boundary needs no conversion to be emitted.
     """
+    if not is_refusal(refusal):
+        raise TypeError("Expected a canonical refusal with an envelope and error code.")
+    supplied = refusal.to_envelope()
+    if type(supplied) is not dict:
+        raise TypeError("A canonical refusal envelope must be an object.")
+    envelope = dict(supplied)
+    code = envelope.get("error_code") or refusal.error_code
+    message = envelope.get("message")
+    if message is None:
+        message = getattr(refusal, "message", None)
+    if message is None:
+        message = str(refusal)
+    if type(code) is not str or not code or type(message) is not str:
+        raise TypeError("A canonical refusal requires string error code and message fields.")
+    recoverable = envelope.get("recoverable")
+    if recoverable is None:
+        recoverable = getattr(refusal, "recoverable", None)
+    if recoverable is None:
+        recoverable = default_recoverable(code)
+    remediation = envelope.get("remediation")
+    if remediation is None:
+        remediation = getattr(refusal, "remediation", None)
+    if remediation is None:
+        remediation = remediation_for(code)
+    if type(recoverable) is not bool or type(remediation) is not str:
+        raise TypeError("A canonical refusal requires boolean recoverability and string remediation.")
+    envelope.update(error_code=code, message=message, recoverable=recoverable, remediation=remediation)
+    if envelope.get("schema_version") is None:
+        envelope["schema_version"] = SCHEMA_VERSION
+    if envelope.get("details") is None:
+        details = getattr(refusal, "details", None)
+        if details is None:
+            envelope.pop("details", None)
+        else:
+            envelope["details"] = details
+    if "details" in envelope and type(envelope["details"]) is not dict:
+        raise TypeError("Canonical refusal details must be an object.")
+    exit_code = getattr(refusal, "exit_code", None)
+    if exit_code is None:
+        exit_code = envelope.get("exit_code", 2)
+    if type(exit_code) is not int:
+        raise TypeError("Canonical refusal exit code must be an integer.")
     if json_mode:
-        emit_error(
-            refusal.message,
-            json_mode=True,
-            error_code=refusal.error_code,
-            recoverable=refusal.recoverable,
-            remediation=refusal.remediation,
-            details=refusal.details,
-        )
+        print(json.dumps(envelope, indent=2, sort_keys=False), file=sys.stderr)
     else:
-        print(refusal.text_line, file=sys.stderr)
-    return refusal.exit_code
+        text_line = getattr(refusal, "text_line", None)
+        if text_line is None:
+            text_line = envelope.get("text_line")
+        if text_line is None:
+            text_line = f"refused ({code}): {message}"
+        if type(text_line) is not str:
+            raise TypeError("Canonical refusal text output must be a string.")
+        print(text_line, file=sys.stderr)
+    return exit_code
 
 
 def handle_system_exit(

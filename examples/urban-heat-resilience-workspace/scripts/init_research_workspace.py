@@ -48,6 +48,8 @@ def safe_registered_ids(phase: str) -> tuple[str, ...]:
         return registered_ids(phase)
     except Exception:  # noqa: BLE001 - a broken environment must not break deployment
         return ()
+from _evidence_authority import digest
+from _evidence_revision import observe_tree, read_observed_file
 from _provider_registry import (
     ACQUISITION_PROVIDER_IDS,
     DISCOVERY_ACCEPTED_IDS,
@@ -56,7 +58,9 @@ from _provider_registry import (
     ProviderNotRegisteredError,
     validate_provider_ids,
 )
+from _record_artifacts import exact_object
 from _script_errors import error_envelope, remediation_for
+from _usage_materialization import file_digest, publish_file
 from _workspace_locks import LockUnavailableError, workspace_lock, workspace_lock_contended
 from _workspace_module_loader import load_workspace_module
 from source_inventory import is_contained_nonsymlink
@@ -2641,6 +2645,7 @@ def initialize_workspace(options: InitOptions) -> None:
 
 
 UPGRADE_DEFAULT_PATHS = ("scripts",)
+UPGRADE_RECOVERY_MAX_FILES = 512
 UPGRADE_OPTIONAL_PATHS = ("skills", "docs")
 
 
@@ -3160,7 +3165,12 @@ def upgrade_workspace(
     paths: list[str],
     dry_run: bool,
     force_optional: bool = False,
+    transaction: Any = None,
 ) -> dict[str, Any]:
+    if transaction is not None:
+        if dry_run or force_optional:
+            raise SystemExit("Recovery upgrade requires an explicit write plan without optional force.")
+        return recover_upgrade_workspace(starter_root, target, paths, transaction)
     validate_starter_root(starter_root)
     if not is_research_workspace(target):
         raise SystemExit(
@@ -3214,6 +3224,237 @@ def upgrade_workspace(
                 pass
         raise
     return {"created": created_all, "updated": updated_all, "replaced": replaced_all, "starter_version": version}
+
+
+def _validate_upgrade_recovery(plan, journal, *, starter_root, target, paths):
+    """Validate complete retained upgrade history before any fallback mutation."""
+    import base64
+    if plan is not None:
+        exact_object(plan, {"schema_version", "generation", "paths", "config_sha256", "rows", "created", "updated",
+                            "starter_version", "max_attempts", "predecessors", "deadline_utc"})
+        if (plan["schema_version"] != "workspace-upgrade-recovery/v1" or plan["paths"] != paths
+                or type(plan["max_attempts"]) is not int or not 1 <= plan["max_attempts"] <= 3
+                or type(plan["rows"]) is not list or not 1 <= len(plan["rows"]) <= UPGRADE_RECOVERY_MAX_FILES):
+            raise ValueError("Invalid recovery plan")
+        digest(plan["config_sha256"])
+        names = []
+        for row in plan["rows"]:
+            exact_object(row, {"path", "before", "after", "inline"})
+            path = canonical_workspace_relative_path(row["path"], "recovery managed path")
+            if path not in {"log.md", "workspace-system.yml"} and not any(path.startswith(prefix + "/") for prefix in paths):
+                raise ValueError("Invalid recovery path")
+            names.append(path)
+            digest(row["after"])
+            if row["before"] is not None:
+                digest(row["before"])
+            if path in {"log.md", "workspace-system.yml"}:
+                raw = base64.b64decode(row["inline"], validate=True)
+                if len(raw) > 262_144 or file_digest(raw) != row["after"]:
+                    raise ValueError("Invalid inline recovery payload")
+            elif row["inline"] is not None:
+                raise ValueError("Unexpected inline recovery payload")
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate recovery paths")
+        expected = {path.relative_to(starter_root).as_posix() for directory in paths for path in iter_managed_files(starter_root, directory)}
+        expected.update(name for name in ("workspace-system.yml", "log.md") if (target / name).exists())
+        if set(names) != expected:
+            raise ValueError("Incomplete recovery write closure")
+        for row in plan["rows"]:
+            if row["before"] != row["after"] and (row["path"] not in plan["predecessors"] or plan["predecessors"][row["path"]] != row["before"]):
+                raise ValueError("Invalid predecessor provenance")
+    if journal is not None:
+        exact_object(journal, {"attempts_used", "completed", "pending", "status", "reason", "terminal"})
+        names = {row["path"] for row in plan["rows"]} if plan else set()
+        if (type(journal["attempts_used"]) is not int or not 0 <= journal["attempts_used"] <= 3
+                or type(journal["completed"]) is not list or len(journal["completed"]) != len(set(journal["completed"]))
+                or not set(journal["completed"]).issubset(names) or journal["pending"] is not None and journal["pending"] not in names
+                or journal["status"] not in {"prepared", "executing", "partial", "applied", "blocked_external"}
+                or type(journal["terminal"]) is not bool or journal["terminal"] != (journal["status"] in {"applied", "blocked_external"})
+                or journal["reason"] is not None and journal["reason"] not in {"publication_unknown", "attempt_limit", "package_or_plan_changed",
+                    "configuration_changed", "installed_inputs_changed", "unexplained_workspace_edit", "closing_package_changed",
+                    "closing_workspace_changed", "upgrade_preflight_refused"}):
+            raise ValueError("Invalid recovery journal")
+
+
+def _upgrade_recovery_result(status, terminal, recoverable, reason, attempts_used, plan_sha256):
+    """Validate detached result metadata before publishing terminal success."""
+    digest(plan_sha256)
+    if (status not in {"applied", "partial", "blocked_external"} or type(terminal) is not bool
+            or terminal != (status != "partial") or type(recoverable) is not bool or recoverable != (status != "applied")
+            or type(attempts_used) is not int or not 0 <= attempts_used <= 3 or reason is not None and type(reason) is not str):
+        raise ValueError("Invalid recovery result")
+    return {"status": status, "terminal": terminal, "recoverable": recoverable, "reason": reason,
+            "attempts_used": attempts_used, "plan_sha256": plan_sha256, "authorized": False, "evidence_accepted": False}
+
+
+def recover_upgrade_workspace(starter_root: Path, target: Path, paths: list[str], transaction: Any) -> dict[str, Any]:
+    """Apply a host-selected finite journal through the canonical upgrade owner.
+
+    The transaction is trusted host code, never a JSON callback or a workspace
+    discovery mechanism. Known predecessor hashes authorize replacements; an
+    interrupted publication can be observed as the exact planned successor.
+    """
+    import base64
+
+    if (target == starter_root or is_relative_to(target, starter_root)
+            or not is_research_workspace(target) or not paths
+            or len(paths) != len(set(paths)) or any(path not in {"scripts", *UPGRADE_OPTIONAL_PATHS} for path in paths)):
+        raise SystemExit("Recovery upgrade target or paths refused.")
+    validate_starter_root(starter_root)
+    validate_upgrade_compatibility(starter_root, target)
+
+    def read(root, relative, observed):
+        info = observed.get(relative)
+        return None if info is None else read_observed_file(root, relative, info)
+
+    def refusal(reason, journal):
+        result = _upgrade_recovery_result("blocked_external", True, True, reason, journal["attempts_used"], plan_sha256)
+        journal.update(status="blocked_external", reason=reason, terminal=True)
+        transaction.save_journal(journal)
+        return result
+
+    with workspace_lock(upgrade_lock_path(target), purpose="journaled workspace upgrade"), ExitStack() as held:
+        hold_orchestration_sessions(target, held)
+        plan, journal = transaction.load_plan(), transaction.load_journal()
+        _validate_upgrade_recovery(plan, journal, starter_root=starter_root, target=target, paths=paths)
+        if plan is not None and journal is None:
+            raise SystemExit("Recovery attempt history is missing; preserve the frozen intent.")
+        if plan is None and journal is not None and journal["terminal"]:
+            return {"status": journal["status"], "terminal": True, "recoverable": True,
+                    "reason": journal["reason"], "attempts_used": journal["attempts_used"],
+                    "authorized": False, "evidence_accepted": False}
+        if plan is None:
+            journal = {"attempts_used": 0, "completed": [], "pending": None,
+                       "status": "prepared", "reason": None, "terminal": False}
+            transaction.save_journal(journal)
+            before, source = observe_tree(target), observe_tree(starter_root)
+            files = {}
+            for directory in paths:
+                for path in iter_managed_files(starter_root, directory):
+                    relative = path.relative_to(starter_root).as_posix()
+                    files[relative] = read(starter_root, relative, source)
+            if len(files) > UPGRADE_RECOVERY_MAX_FILES - 2:
+                raise SystemExit("Recovery upgrade file bound exceeded.")
+            meta = read(target, "workspace-system.yml", before)
+            version = sync_starter_version(target, starter_root, True)
+            if meta is not None:
+                files["workspace-system.yml"] = re.sub(
+                    r'''(?m)^(\s*starter_version:\s*)(?:"[^"]*"|'[^']*'|[^#\r\n]+)(\s*(?:#.*)?)$''',
+                    lambda match: f'{match.group(1)}"{version}"{match.group(2)}', meta.decode(), count=1).encode() if version else meta
+                if version and yaml.safe_load(files["workspace-system.yml"])["workspace_system"]["starter_version"] != version:
+                    raise SystemExit("Recovery upgrade version marker cannot be migrated safely.")
+            created = [name for name in files if name not in before and name != "workspace-system.yml"]
+            updated = [name for name, raw in files.items() if name != "workspace-system.yml"
+                       and name in before and read(target, name, before) != raw]
+            log = read(target, "log.md", before)
+            if log is not None:
+                files["log.md"] = log
+            if log is not None and (created or updated or version):
+                prefix = "# Research Wiki Activity Log\n\n" if not log else "" if log.endswith(b"\n\n") else "\n" if log.endswith(b"\n") else "\n\n"
+                entry = (f"## [{datetime.now(timezone.utc).date().isoformat()}] upgrade | Refreshed starter-managed tooling\n\n"
+                         f"- Paths: {', '.join(paths)}.\n- Created: {len(created)} file(s); updated: {len(updated)} file(s).\n"
+                         "- Replaced optional files: 0 file(s).\n"
+                         + (f"- Starter version: `{version}`.\n" if version else ""))
+                files["log.md"] = log + (prefix + entry + "\n").encode()
+            rows = []
+            predecessors = transaction.predecessors
+            for relative, raw in sorted(files.items()):
+                previous = read(target, relative, before)
+                old_hash = None if previous is None else file_digest(previous)
+                new_hash = file_digest(raw)
+                if old_hash != new_hash and (relative not in predecessors or old_hash != predecessors[relative]):
+                    raise SystemExit("Recovery upgrade has an unexplained predecessor: " + relative)
+                if (old_hash != new_hash and relative.split("/")[0] in UPGRADE_OPTIONAL_PATHS
+                        and (optional_backup_path(target, Path(relative)).exists() or optional_backup_path(target, Path(relative)).is_symlink())):
+                    raise SystemExit("Recovery upgrade preserves existing replacement history: " + relative)
+                rows.append({"path": relative, "before": old_hash, "after": new_hash,
+                             "inline": base64.b64encode(raw).decode() if relative in {"log.md", "workspace-system.yml"} else None})
+            plan = {"schema_version": "workspace-upgrade-recovery/v1", "generation": transaction.generation(),
+                    "paths": paths, "config_sha256": file_digest(read(target, "research.yml", before)),
+                    "rows": rows, "created": created, "updated": updated, "starter_version": version,
+                    "max_attempts": transaction.max_attempts, "predecessors": predecessors,
+                    "deadline_utc": transaction.operation_control.deadline_utc}
+            if observe_tree(target) != before or observe_tree(starter_root) != source:
+                raise SystemExit("Recovery upgrade inputs changed during planning.")
+            transaction.save_plan(plan)
+        plan_sha256 = transaction.plan_sha256()
+        if journal is None:
+            journal = {"attempts_used": 0, "completed": [], "pending": None,
+                       "status": "prepared", "reason": None, "terminal": False}
+        if journal["terminal"]:
+            if journal["status"] == "applied":
+                current = observe_tree(target)
+                if (plan["generation"] != transaction.generation()
+                        or any((raw := read(target, row["path"], current)) is None or file_digest(raw) != row["after"] for row in plan["rows"])):
+                    return {"status": "blocked_external", "terminal": True, "recoverable": True,
+                            "reason": "historical_upgrade_not_current", "attempts_used": journal["attempts_used"],
+                            "plan_sha256": plan_sha256, "authorized": False, "evidence_accepted": False}
+            return {"status": journal["status"], "terminal": True, "recoverable": journal["status"] != "applied",
+                    "reason": journal["reason"], "attempts_used": journal["attempts_used"],
+                    "plan_sha256": plan_sha256, "authorized": False, "evidence_accepted": False}
+        if (plan["generation"] != transaction.generation() or plan["paths"] != paths
+                or plan["deadline_utc"] != transaction.operation_control.deadline_utc):
+            return refusal("package_or_plan_changed", journal)
+        if journal["attempts_used"] >= plan["max_attempts"]:
+            return refusal("attempt_limit", journal)
+        journal["attempts_used"] += 1
+        transaction.save_journal(journal)
+        try:
+            observed, source = observe_tree(target), observe_tree(starter_root)
+            if file_digest(read(target, "research.yml", observed)) != plan["config_sha256"]:
+                return refusal("configuration_changed", journal)
+            payloads = {}
+            # All conflicts are checked before the first publication in this attempt.
+            for row in sorted(plan["rows"], key=lambda row: (row["path"] in {"workspace-system.yml", "log.md"}, row["path"] == "log.md", row["path"])):
+                raw = base64.b64decode(row["inline"], validate=True) if row["inline"] is not None else read(starter_root, row["path"], source)
+                if raw is None or file_digest(raw) != row["after"]:
+                    return refusal("installed_inputs_changed", journal)
+                current = read(target, row["path"], observed)
+                actual = None if current is None else file_digest(current)
+                if actual not in {row["before"], row["after"]} or row["path"] in journal["completed"] and actual != row["after"]:
+                    return refusal("unexplained_workspace_edit", journal)
+                payloads[row["path"]] = raw
+            for row in sorted(plan["rows"], key=lambda row: (row["path"] in {"workspace-system.yml", "log.md"}, row["path"] == "log.md", row["path"])):
+                if row["before"] == row["after"]:
+                    continue
+                transaction.checkpoint()
+                journal.update(pending=row["path"], status="executing")
+                transaction.save_journal(journal)
+                guard = workspace_lock(target / ".locks/log.lock", purpose="journaled upgrade log publication") if row["path"] == "log.md" else nullcontext()
+                with guard:
+                    publish_file(target, row["path"], payloads[row["path"]], row["before"],
+                                 managed_placeholder=row["path"] == "skills/.gitkeep")
+                if row["path"] not in journal["completed"]:
+                    journal["completed"].append(row["path"])
+                journal["pending"] = None
+                transaction.save_journal(journal)
+            if plan["generation"] != transaction.generation():
+                return refusal("closing_package_changed", journal)
+            closing = observe_tree(target)
+            if any(file_digest(read(target, row["path"], closing)) != row["after"] for row in plan["rows"]):
+                return refusal("closing_workspace_changed", journal)
+            result = _upgrade_recovery_result("applied", True, False, None, journal["attempts_used"], plan_sha256)
+            transaction.checkpoint()
+            journal.update(status="applied", terminal=True, reason=None)
+            transaction.save_journal(journal)
+            return result
+        except (Exception, SystemExit):
+            retained = transaction.load_journal()
+            _validate_upgrade_recovery(plan, retained, starter_root=starter_root, target=target, paths=paths)
+            if retained is None:
+                return _upgrade_recovery_result("blocked_external", True, True, "attempt_history_unavailable",
+                                                journal["attempts_used"], plan_sha256)
+            if retained is not None and retained["terminal"]:
+                return _upgrade_recovery_result("blocked_external", True, True, "publication_unknown",
+                                                retained["attempts_used"], plan_sha256)
+            if retained is not None:
+                journal = retained
+            result = _upgrade_recovery_result("partial", False, True, "publication_unknown", journal["attempts_used"], plan_sha256)
+            journal.update(status="partial", reason="publication_unknown", terminal=False)
+            transaction.save_journal(journal)
+            if journal["attempts_used"] >= plan["max_attempts"]:
+                return refusal("attempt_limit", journal)
+            return result
 
 
 def print_upgrade_summary(

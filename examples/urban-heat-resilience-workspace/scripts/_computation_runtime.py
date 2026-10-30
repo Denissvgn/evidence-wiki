@@ -12,7 +12,6 @@ from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 
-import yaml
 from _computation_contract import (
     MAX_BYTES,
     MAX_GROUPS,
@@ -40,6 +39,7 @@ from _computation_schedule import evaluate_schedules, validate_clock
 from _evidence_revision import canonical_bytes, capture_workspace, content_id
 from _publication_context import authorized_capture, captured_view
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 _SIBLINGS = {}
@@ -434,7 +434,7 @@ def evaluate(project_root, *, as_of=None, config=None, capture=None, view=None, 
     capture = capture or capture_workspace(root)
     raw_config = capture.files.get("research.yml", b"").decode("utf-8")
     validate_yaml(raw_config)
-    actual_config = yaml.safe_load(raw_config)
+    actual_config = safe_load_current(raw_config)
     require(type(actual_config) is dict and (config is None or actual_config == config), "computation_configuration_changed")
     config = actual_config
     definition = load_definition(config)
@@ -453,7 +453,7 @@ def evaluate(project_root, *, as_of=None, config=None, capture=None, view=None, 
         ):
             result = Computation(materialized, capture, config, definition, inputs["selected"] if inputs else None).result(as_of, completed=completed)
         if current is not None:
-            current.revalidate(root, config)
+            current.revalidate(current.state.root if borrowed is current else root, config)
         require(capture_workspace(root).revision_id == capture.revision_id, "computation_inputs_changed")
         require(selected.producer_identity() == result["engine_id"], "computation_engine_changed")
         return result

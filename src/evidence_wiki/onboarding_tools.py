@@ -26,7 +26,9 @@ def specifications():
 
     add("bootstrap", "bootstrap", optional(obj(target=text, requirements=array(text, 32),
         assurance={"enum": ["artifact_checked", "host_enforced"]}, request_id=string(128)), {"target", "requirements", "assurance", "request_id"}))
-    for name in ("resources", "recipes", "contracts"):
+    add("resources", "resources", optional(obj(offset={"type": "integer", "minimum": 0},
+        limit={"type": "integer", "minimum": 1, "maximum": 128}), {"offset", "limit"}))
+    for name in ("recipes", "contracts"):
         add(name, name, obj())
     add("resource", "resource", obj(resource_id=string(256)))
     add("pack_list", "pack_list", optional(obj(target=text, catalog=text), {"target", "catalog"}))
@@ -38,14 +40,19 @@ def specifications():
         source_paths=array(text, 200), host_tools=opaque), {"source_ids", "source_paths", "host_tools"}))
     for name in ("plan", "check_plan", "apply", "revision_plan", "revision_apply", "migration_plan", "migration_apply",
                  "composition_plan", "fleet_plan", "fleet_apply", "transition_plan", "transition_apply",
-                 "instructions_plan", "instructions_apply", "instructions_remove"):
+                 "instructions_plan", "instructions_apply", "instructions_remove", "setup_status"):
         add(name, name, obj(value=opaque))
+    add("prepare", "prepare", optional(obj(objective=string(16384), host_scope=opaque, policy=opaque,
+        defaults=opaque, proposal=opaque, request_id=string(128)), {"host_scope", "policy", "defaults", "proposal", "request_id"}))
     add("composition_apply", "composition_apply", obj(value=opaque, output=text))
     add("capture", "capture", obj(target=text, value=opaque, path=text))
     add("revision_status", "revision_status", optional(obj(target=text, evaluate=boolean), {"evaluate"}))
     add("reevaluate", "reevaluate", obj(target=text, value=opaque))
     add("research_next", "research_next", optional(obj(target=text, agent_id=string(128), run_id=string(128)), {"agent_id", "run_id"}))
     add("research_export", "research_export", optional(obj(target=text, allow_partial=boolean, run_id=string(128)), {"allow_partial", "run_id"}))
+    add("research_acquire", "research_acquire", obj(target=text, agent_id=string(128), run_id=string(128), request_id=string(128), url=text))
+    add("research_progress", "research_progress", optional(obj(target=text, run_id=string(128), estimates=opaque), {"run_id", "estimates"}))
+    add("research_progress.write", "research_progress", optional(obj(target=text, output=text, run_id=string(128), estimates=opaque), {"run_id", "estimates"}))
     for operation in ("start", "resume", "heartbeat", "ingest"):
         schema = obj(target=text, agent_id=string(128), run_id=string(128))
         if operation == "ingest":
@@ -68,8 +75,10 @@ def manifest(allowed=READ):
 
 
 def contract():
+    from .research_tools import contract as research_contract
     return {"schema_version": "evidence-onboarding-tools/v1", "protocol_version": PROTOCOL_VERSION,
         "server": "serve-onboarding-mcp", "default_grants": sorted(READ), "mutation_grants": sorted(WRITE),
         "tools": manifest(READ | WRITE), "authority": "host-selected roots and explicit operation grants",
         "assurance": "scope is not OS isolation, provider authentication or host-enforced evidence",
-        "lifetime": "one installed generation and interpreter; EOF closes the handle; restart after installation changes"}
+        "lifetime": "one installed generation and interpreter; EOF closes the handle after bounded in-flight research settles; restart after installation changes",
+        "research": research_contract()}

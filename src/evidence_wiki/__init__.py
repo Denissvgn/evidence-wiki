@@ -10,7 +10,12 @@ facade tree into every CLI startup to serve callers that never touch it.
 
 from __future__ import annotations
 
+import sys as _sys
 from typing import TYPE_CHECKING, Any
+
+from . import _review_producer as _review_producer_owner
+
+_review_producer_owner.initialize_package(_sys.modules[__name__])
 
 __version__ = "1.1.2"
 
@@ -23,6 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
     from ._facades.diagnostics import fleet_status as fleet_status
     from ._facades.snapshots import verify_snapshot as verify_snapshot
     from .onboarding import Onboarding as Onboarding
+    from .runtime_configuration import HostRuntime as HostRuntime
     from .workspace import Workspace as Workspace
 
 # Attribute name -> (submodule to import, attribute on it, or ``None`` for the
@@ -38,8 +44,59 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only; never executed
 # below with a module and make ``evidence_wiki.contract()`` fail by import
 # order. The leading underscore keeps one meaning for the public name.
 _LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
+    "host_qualification": ("._host_qualification", "host_qualification"),
+    "HostBackupRecovery": (".operations_recovery", "HostBackupRecovery"),
+    "ProtectedBackupService": (".operations_recovery", "ProtectedBackupService"),
+    "recover_upgrade": (".operations_recovery", "recover_upgrade"),
+    "protected_head": (".operations_recovery", "protected_head"),
+    "OutcomeIngestion": (".outcome_observations", "OutcomeIngestion"),
+    "ObservationSource": (".outcome_observations", "ObservationSource"),
+    "ObservationVerifier": (".outcome_observations", "ObservationVerifier"),
+    "SemanticJudgingPlan": (".semantic_contracts", "SemanticJudgingPlan"),
+    "IntegrationDocumentation": (".integration_documentation", "IntegrationDocumentation"),
+    "research_request": (".research_command_contracts", "research_request"),
+    "AgentHostContext": (".agent_host_context", "AgentHostContext"),
     "Workspace": (".workspace", "Workspace"),
     "Onboarding": (".onboarding", "Onboarding"),
+    "HostRuntime": (".runtime_configuration", "HostRuntime"),
+    "RunPolicy": (".run_policy", "RunPolicy"),
+    "ResearchExecution": (".research_execution", "ResearchExecution"),
+    "OperationControl": (".operation_control", "OperationControl"),
+    "ExecutionProfile": (".agent_execution", "ExecutionProfile"),
+    "ArtifactDeliveryPlan": (".artifact_delivery_contracts", "ArtifactDeliveryPlan"),
+    "ArtifactDestination": (".artifact_delivery_contracts", "ArtifactDestination"),
+    "ExecutionRole": (".agent_execution", "ExecutionRole"),
+    "CalibrationAuthority": (".qualification_calibration", "CalibrationAuthority"),
+    "CalibrationSelection": (".calibration_registry", "CalibrationSelection"),
+    "CalibrationPlan": (".calibration_registry", "CalibrationPlan"),
+    "DisagreementPlan": (".disagreement_configuration", "DisagreementPlan"),
+    "CalibratedEvaluators": (".calibration_registry", "CalibratedEvaluators"),
+    "calibration_suite": (".qualification_calibration", "calibration_suite"),
+    "ExecutionRoleScope": (".execution_roles", "ExecutionRoleScope"),
+    "ExecutionRoleRegistry": (".execution_roles", "ExecutionRoleRegistry"),
+    "ReviewContext": (".review_context", "ReviewContext"),
+    "ServiceRepairBinding": (".service_repair_binding", "ServiceRepairBinding"),
+    "NativeInputHandoff": (".protected_handoff", "NativeInputHandoff"),
+    "ReadabilityPlan": (".readability_plan", "ReadabilityPlan"),
+    "ReadabilityInputHandoff": (".readability_plan", "ReadabilityInputHandoff"),
+    "ReadabilityCalibrationSelection": (".readability_plan", "ReadabilityCalibrationSelection"),
+    "ReviewServicePlan": (".review_service_policy", "ReviewServicePlan"),
+    "ReviewServiceRoute": (".review_service_policy", "ReviewServiceRoute"),
+    "ReviewApplicationLease": (".review_application_lease", "ReviewApplicationLease"),
+    "review_application_window": (".review_application_lease", "review_application_window"),
+    "ReviewDelivery": (".review_delivery", "ReviewDelivery"),
+    "ProtectedPages": (".review_page_operations", "ProtectedPages"),
+    "create_review_context": (".review_context", "create_review_context"),
+    "isolation_report": (".execution_roles", "isolation_report"),
+    "ExecutionRoleLimit": (".agent_execution", "ExecutionRoleLimit"),
+    "ExecutionSchedule": (".agent_execution", "ExecutionSchedule"),
+    "ExecutionAttempt": (".agent_execution", "ExecutionAttempt"),
+    "BoundedSubprocessExecutor": (".agent_execution", "BoundedSubprocessExecutor"),
+    "DeterministicOfflineExecutor": (".agent_execution", "DeterministicOfflineExecutor"),
+    "QualificationAuthority": (".agent_qualification", "QualificationAuthority"),
+    "QualifiedEvaluators": (".agent_qualification", "QualifiedEvaluators"),
+    "HostReviewSigner": (".agent_qualification", "HostReviewSigner"),
+    "SigningIdentity": (".agent_qualification", "SigningIdentity"),
     "contract": ("._contract", "contract"),
     "errors": (".errors", None),
     # Module-level rather than a handle method: it aggregates across many

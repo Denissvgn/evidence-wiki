@@ -7,7 +7,9 @@ import hashlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 import re
+import stat as stat_module
 import sys
 import threading
 from collections.abc import MutableMapping
@@ -17,6 +19,18 @@ from types import ModuleType
 _STEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _IMPORT_LOCK = threading.RLock()
 _MISSING = object()
+# A loader imported as an owner's sibling retains the trusted binding that was
+# installed during that import, including for later indirect sibling loads.
+_HOST_CONTEXT_BRIDGE = sys.modules.get("_host_context")
+if (_HOST_CONTEXT_BRIDGE is None
+        or _HOST_CONTEXT_BRIDGE is not sys.modules.get("evidence_wiki.host_context")):
+    _HOST_CONTEXT_BRIDGE = None
+
+
+def _trusted_bridge(bridge):
+    return (bridge is not None and bridge is sys.modules.get("evidence_wiki.host_context")
+            and bridge.trusted_review_bridge(bridge))
+
 
 # One validated content hash per script directory, remembered behind the stat
 # signature it was computed under. The identity a cache key carries is still the
@@ -30,7 +44,11 @@ class _SourceLoader(importlib.machinery.SourceFileLoader):
 
     def get_code(self, fullname: str):
         path = self.get_filename(fullname)
-        return self.source_to_code(self.get_data(path), path)
+        source = self.get_data(path)
+        bridge = _HOST_CONTEXT_BRIDGE or sys.modules.get("_host_context")
+        if _trusted_bridge(bridge):
+            return bridge.compiled_source_code(source, path)
+        return self.source_to_code(source, path)
 
 
 class _SiblingFinder(importlib.abc.MetaPathFinder):
@@ -54,15 +72,18 @@ def _tree_signature(script_dir: Path) -> tuple[tuple[str, int, int, int, int], .
     here -- that is the stated limit of a stat signature, not a content promise.
     """
     entries: list[tuple[str, int, int, int, int]] = []
-    for child in sorted(script_dir.glob("*.py"), key=lambda item: item.name):
-        try:
-            stat = child.stat()
-        except OSError:
-            continue
-        if not child.is_file():
-            continue
-        entries.append((child.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino))
-    return tuple(entries)
+    with os.scandir(script_dir) as children:
+        for child in children:
+            if not child.name.endswith(".py"):
+                continue
+            try:
+                observed = os.stat(child.path, follow_symlinks=True) if os.name == "nt" else child.stat(follow_symlinks=True)
+            except OSError:
+                continue
+            if not stat_module.S_ISREG(observed.st_mode):
+                continue
+            entries.append((child.name, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns, observed.st_ino))
+    return tuple(sorted(entries))
 
 
 def _content_tree_hash(script_dir: Path) -> str:
@@ -108,6 +129,7 @@ def load_workspace_module(
     stem: str,
     *,
     cache: MutableMapping[str, ModuleType] | None = None,
+    host_context_bridge: ModuleType | None = None,
 ) -> ModuleType:
     """Load ``<script_dir>/<stem>.py`` with target-root sibling isolation.
 
@@ -121,12 +143,20 @@ def load_workspace_module(
 
     if not isinstance(stem, str) or _STEM_RE.fullmatch(stem) is None:
         raise SystemExit(f"Invalid sibling workspace script name: {stem!r}")
+    if host_context_bridge is None:
+        host_context_bridge = _HOST_CONTEXT_BRIDGE
     root = script_dir.expanduser().resolve()
     path = (root / f"{stem}.py").resolve()
     if path.parent != root or not path.is_file():
         raise SystemExit(f"Missing sibling workspace script: {path}")
-    tree_hash = _tree_hash(root)
+    trusted_bridge = _trusted_bridge(host_context_bridge)
+    tree_hash = host_context_bridge.script_tree_hash(root) if trusted_bridge else _tree_hash(root)
     cache_key = f"{root}\0{stem}\0{tree_hash}"
+    if trusted_bridge:
+        host_context_bridge.register_review_native_generation(root, tree_hash, host_context_bridge)
+    if host_context_bridge is not None:
+        host_context_bridge.check_generation(root, tree_hash)
+        cache_key += f"\0bridge:{id(host_context_bridge)}"
     if cache is not None and cache_key in cache:
         return cache[cache_key]
 
@@ -136,15 +166,18 @@ def load_workspace_module(
         if child.is_file() and _STEM_RE.fullmatch(child.stem) is not None
     }
     unique_name = f"_evidence_wiki_{_identity(root, tree_hash)}_{stem}"
-    names_to_restore = sibling_names | {unique_name}
+    names_to_restore = sibling_names | {unique_name, "_host_context"}
 
-    with _IMPORT_LOCK:
+    import_lock = host_context_bridge.loading_lock() if host_context_bridge is not None else _IMPORT_LOCK
+    with import_lock:
         original_path = list(sys.path)
         finder = _SiblingFinder(root, sibling_names)
         saved_modules = {name: sys.modules.get(name, _MISSING) for name in names_to_restore}
         try:
             for name in names_to_restore:
                 sys.modules.pop(name, None)
+            if host_context_bridge is not None:
+                sys.modules["_host_context"] = host_context_bridge
             sys.path.insert(0, str(root))
             sys.meta_path.insert(0, finder)
             spec = importlib.util.spec_from_file_location(unique_name, path, loader=_SourceLoader(unique_name, str(path)))

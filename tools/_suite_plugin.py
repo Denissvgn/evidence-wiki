@@ -11,6 +11,7 @@ MAX_NODE_ID_UNITS = 1024
 
 _collected = []
 _executed = []
+_case_outcomes = {}
 
 
 def progress(event):
@@ -24,6 +25,7 @@ def progress(event):
 def pytest_collection_modifyitems(items):
     """Reject oversized IDs before reporting or executing payload-derived cases."""
     _collected[:] = [item.nodeid for item in items]
+    _case_outcomes.clear()
     oversized = [(node, len(node.encode("utf-16-le", errors="surrogatepass")) // 2)
                  for node in _collected]
     oversized = [(node, units) for node, units in oversized if units > MAX_NODE_ID_UNITS]
@@ -44,6 +46,10 @@ def pytest_runtest_logstart(nodeid, location):
 
 
 def pytest_runtest_logreport(report):
+    if report.failed:
+        _case_outcomes[report.nodeid] = "failed"
+    elif report.when == "call" or report.skipped:
+        _case_outcomes.setdefault(report.nodeid, report.outcome)
     event = {"event": "report", "nodeid": report.nodeid, "phase": report.when,
              "outcome": report.outcome, "seconds": report.duration}
     if report.failed:
@@ -66,5 +72,6 @@ def pytest_sessionfinish(session, exitstatus):
         memory["reason"] = "resource.getrusage unavailable on this platform"
     terminal = session.config.pluginmanager.get_plugin("terminalreporter")
     record = {"collected": _collected, "executed": _executed, "exit_code": int(exitstatus),
+              "case_outcomes": dict(_case_outcomes),
               "outcomes": {key: len(rows) for key, rows in terminal.stats.items()}, "memory": memory}
     Path(target).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8", newline="\n")

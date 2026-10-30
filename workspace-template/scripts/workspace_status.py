@@ -78,7 +78,7 @@ from _review_config import DEFAULT_ESCALATION_SCOPE, ESCALATION_SCOPE_QUESTION, 
 from _workspace_health import evaluate_workspace_health
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
-from _yaml_safe import safe_load
+from _yaml_safe import safe_load, safe_load_current
 
 SCHEMA_VERSION = "1.0"
 STATUS_CACHE_CONTRACT = 2
@@ -366,7 +366,7 @@ def load_yaml_mapping(path: Path, label: str) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"Missing {label}: {path}")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        document = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise SystemExit(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
@@ -2874,7 +2874,9 @@ def main(argv: list[str] | None = None) -> int:
             manual_url_deliveries_this_run=args.manual_url_deliveries_this_run,
             run_id=args.run_id,
         )
-    except ScriptRefusal as refusal:
+    except (Exception, SystemExit) as refusal:
+        if not is_refusal(refusal):
+            raise
         return emit_refusal(refusal, json_mode=json_mode)
 
     if args.format == "json":

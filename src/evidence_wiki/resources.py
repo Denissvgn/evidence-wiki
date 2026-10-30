@@ -20,7 +20,17 @@ DOMAIN_PACKS_DIR = "domain-packs"
 ORCHESTRATOR_DIR = "orchestrator"
 ORCHESTRATOR_SKILL = "research-orchestrate"
 REQUIRED_STARTER_ASSETS = (
+    "docs/agent-resources/research-review-delivery--v1.json",
+    "docs/agent-resources/research-review-page--v1.json",
+    "docs/agent-resources/research-paged-review--v1.json",
+    "docs/agent-resources/research-review-packet--v1.json",
+    "docs/agent-resources/research-host-assembled-review--v1.json",
+    "docs/agent-resources/research-complete-review-delivery--v1.json",
+    "docs/agent-resources/research-review-sections--v1.json",
+    "docs/agent-resources/research-blinded-review-input--v1.json",
     "scripts/_native_fs.py",
+    "scripts/_host_context.py",
+    "scripts/_owner_paths.py",
     "scripts/_windows_fs.py",
     "AGENTS.md",
     "CLAUDE.md",
@@ -32,6 +42,10 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/doctor.py",
     "scripts/_strict_contract.py",
     "scripts/_strict_evidence.py",
+    "scripts/_draft_admission_contract.py",
+    "scripts/_draft_admission.py",
+    "scripts/_claim_diagnostics.py",
+    "scripts/_draft_computation.py",
     "scripts/strict_evidence.py",
     "scripts/_computation_contract.py",
     "scripts/_computation_expression.py",
@@ -52,6 +66,8 @@ REQUIRED_STARTER_ASSETS = (
     "scripts/_coverage_revision.py",
     "scripts/_pack_selection.py",
     "scripts/_host_capture.py",
+    "scripts/_host_capture_normalization.py",
+    "scripts/_capture_bridge.py",
     "scripts/_html_usability_profile.py",
     "scripts/_normalized_contract.py",
     "scripts/_evidence_policies.py",
@@ -81,6 +97,7 @@ REQUIRED_STARTER_ASSETS = (
     "docs/workspace-application.md",
     "docs/caller-research.md",
     "scripts/_caller_context.py",
+    "scripts/_requirements_bridge.py",
     "docs/pack-authoring.md",
     "docs/pack-revisions.md",
     "docs/upgrade-adoption.md",
@@ -181,9 +198,13 @@ def _copy_traversable_tree(source: Traversable, target: Path) -> None:
 @contextmanager
 def assets_root() -> Iterator[Path]:
     """Yield a filesystem path containing the starter and domain packs."""
+    from . import _review_producer
+
+    _review_producer.initialize_assets()
     packaged_assets = resources.files(__package__).joinpath(ASSETS_DIR)
     packaged_path = Path(str(packaged_assets))
     if _is_assets_root(packaged_path):
+        _review_producer.note_assets_root(packaged_path)
         yield packaged_path
         return
 
@@ -193,11 +214,13 @@ def assets_root() -> Iterator[Path]:
             _copy_traversable_tree(packaged_assets, extracted_root)
             if not _is_assets_root(extracted_root):
                 raise RuntimeError("Packaged EvidenceWiki assets are incomplete")
+            _review_producer.note_assets_root(extracted_root)
             yield extracted_root
             return
 
     source_root = _source_checkout_assets_root()
     if source_root is not None:
+        _review_producer.note_assets_root(source_root)
         yield source_root
         return
 

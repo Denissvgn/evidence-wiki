@@ -22,6 +22,8 @@ env:
 jobs:
   compatibility:
     uses: ./.github/workflows/check-compatibility.yml
+    with:
+      hosted-windows-only: ${{ vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' }}
 
   test:
     name: ${{ matrix.platform.name }} / shard ${{ matrix.shard }}
@@ -33,19 +35,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-        platform:
-          - name: Ubuntu / Python 3.10
-            os: ubuntu-latest
-            python-version: "3.10.21"
-          - name: Ubuntu / Python 3.14
-            os: ubuntu-latest
-            python-version: "3.14.7"
-          - name: macOS / Python 3.12
-            os: macos-latest
-            python-version: "3.12.10"
-          - name: Windows / Python 3.12
-            os: windows-latest
-            python-version: "3.12.10"
+        platform: ${{ fromJSON(vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' && '[{"name":"Windows / Python 3.12","os":"windows-latest","python-version":"3.12.10"}]' || '[{"name":"Ubuntu / Python 3.10","os":"ubuntu-latest","python-version":"3.10.21"},{"name":"Ubuntu / Python 3.14","os":"ubuntu-latest","python-version":"3.14.7"},{"name":"macOS / Python 3.12","os":"macos-latest","python-version":"3.12.10"},{"name":"Windows / Python 3.12","os":"windows-latest","python-version":"3.12.10"}]') }}
 
     steps:
       - name: Check out repository
@@ -144,6 +134,7 @@ jobs:
   build:
     name: Build wheel and source archive
     runs-on: ubuntu-latest
+    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -178,70 +169,43 @@ jobs:
           overwrite: true
           retention-days: 7
 
+  installed-wheel:
+    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    needs: [build]
+    uses: ./.github/workflows/qualify-installation.yml
+    with:
+      artifact: wheel
+      candidate-name: ci-dist-${{ github.sha }}-${{ github.run_id }}
+      report-prefix: installed-check
+
+  installed-sdist:
+    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    needs: [build]
+    uses: ./.github/workflows/qualify-installation.yml
+    with:
+      artifact: sdist
+      candidate-name: ci-dist-${{ github.sha }}-${{ github.run_id }}
+      report-prefix: installed-check
+
   installed:
-    name: Validate installed ${{ matrix.artifact }}
-    needs: build
+    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    needs: [installed-wheel, installed-sdist]
     runs-on: ubuntu-latest
-    timeout-minutes: 110
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        artifact: [wheel, sdist]
+    timeout-minutes: 5
+    outputs:
+      wheel-report-sha256: ${{ needs.installed-wheel.outputs.report-sha256 }}
+      sdist-report-sha256: ${{ needs.installed-sdist.outputs.report-sha256 }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12.14"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-
-      - name: Install validation environment
+      - name: Require both independent installation producers
         shell: bash
         run: |
-          python -m venv .venv
-          .venv/bin/python -m pip install --editable ".[dev]"
-
-      - name: Download this run's candidate distributions
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          name: ci-dist-${{ github.sha }}-${{ github.run_id }}
-          path: dist/
-
-      - name: Run installed checks and parallel research scenarios
-        timeout-minutes: 100
-        shell: bash
-        run: |
-          .venv/bin/python tools/validate_installed_artifacts.py --dist-dir dist \
-            --artifact ${{ matrix.artifact }} --journey-workers 3 \
-            --command-timeout 900 --case-timeout 1200 --journey-timeout 5400 \
-            --heartbeat-seconds 30 --evidence-dir reports/installed-artifacts
-
-      - name: Store the successful installation report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: installed-check-${{ github.sha }}-${{ github.run_id }}-${{ matrix.artifact }}
-          path: reports/installed-artifacts/summary.json
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 7
-
-      - name: Retain installed qualification diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: installed-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.artifact }}
-          path: reports/installed-artifacts/
-          if-no-files-found: warn
-          retention-days: 90
+          test '${{ needs.installed-wheel.result }}' = success
+          test '${{ needs.installed-sdist.result }}' = success
 
   package:
     name: Build distributions
     needs: [compatibility, test, build, installed]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -303,6 +267,98 @@ jobs:
         env:
           VALIDATION_COMMIT: ${{ github.sha }}
           VALIDATION_RUN_ID: ${{ github.run_id }}
+          WHEEL_REPORT_SHA256: ${{ needs.installed.outputs.wheel-report-sha256 }}
+          SDIST_REPORT_SHA256: ${{ needs.installed.outputs.sdist-report-sha256 }}
         run: |
           .venv/bin/python -m tools.verify_installed_artifacts --dist-dir dist \
-            --evidence installed-checks --commit "$VALIDATION_COMMIT" --run-id "$VALIDATION_RUN_ID"
+            --evidence installed-checks --commit "$VALIDATION_COMMIT" --run-id "$VALIDATION_RUN_ID" \
+            --report-sha256 "$WHEEL_REPORT_SHA256" --report-sha256 "$SDIST_REPORT_SHA256"
+
+  linux-native:
+    name: Native Linux peer architecture contract
+    if: vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request'
+    runs-on: ${{ vars.LOCAL_CI_LINUX_ARCH == 'X64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Run the native peer selection
+        env:
+          PEER_ARCH: ${{ vars.LOCAL_CI_LINUX_ARCH == 'X64' && 'ARM64' || 'X64' }}
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install --editable ".[dev]"
+          .venv/bin/python tools/linux_architecture_probe.py --architecture "$PEER_ARCH" --output native-evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: native-linux-peer-${{ github.run_id }}
+          path: native-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  local-evidence:
+    name: Require authenticated local profiles and Linux pair
+    if: vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request'
+    needs: [linux-native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+    steps:
+      - name: Check out trusted base verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.14"
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3
+        with:
+          name: native-linux-peer-${{ github.run_id }}
+          path: native-peer/
+      - name: Verify exact local source, native peer and producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+          LOCAL_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          python -m venv .venv
+          .venv/bin/python tools/check_local_ci_status.py --repo "$GITHUB_REPOSITORY" \
+            --commit "$LOCAL_COMMIT" --base "$LOCAL_BASE" --native-peer native-peer/summary.json --output local-verification
+
+  required:
+    name: Required CI
+    if: ${{ always() }}
+    needs: [compatibility, test, package, local-evidence, linux-native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the selected complete policy
+        env:
+          LOCAL_MODE: ${{ vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' }}
+          COMPATIBILITY: ${{ needs.compatibility.result }}
+          WINDOWS_AND_FALLBACK: ${{ needs.test.result }}
+          FALLBACK_PACKAGE: ${{ needs.package.result }}
+          LOCAL_EVIDENCE: ${{ needs.local-evidence.result }}
+          NATIVE_PEER: ${{ needs.linux-native.result }}
+        run: |
+          test "$COMPATIBILITY" = success
+          test "$WINDOWS_AND_FALLBACK" = success
+          if [ "$LOCAL_MODE" = true ]; then
+            test "$LOCAL_EVIDENCE" = success
+            test "$NATIVE_PEER" = success
+          else
+            test "$FALLBACK_PACKAGE" = success
+          fi

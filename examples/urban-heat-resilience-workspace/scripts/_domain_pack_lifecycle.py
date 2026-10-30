@@ -39,6 +39,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from _pack_selection import selection_metadata
 from _workspace_locks import workspace_lock
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current
 
 STATE_SCHEMA_VERSION = "1.0"
 REFRESH_SCHEMA_VERSION = "1.0"
@@ -268,7 +269,7 @@ def load_mapping(path: Path, label: str) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", f"{label} is missing or is not a regular file")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        document = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except OSError as exc:
         raise LifecycleFailure("DOMAIN_PACK_STATE_INVALID", f"Could not read {label}: {exc}") from exc
     except yaml.YAMLError as exc:
@@ -280,7 +281,7 @@ def load_mapping(path: Path, label: str) -> dict[str, Any]:
 
 def _load_overlay_content(content: bytes, label: str) -> dict[str, Any]:
     try:
-        document = yaml.safe_load(content.decode("utf-8")) or {}
+        document = safe_load_current(content.decode("utf-8")) or {}
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
         raise LifecycleFailure("DOMAIN_PACK_INVALID", f"Invalid domain-pack overlay at {label}: {exc}") from exc
     if not isinstance(document, dict):

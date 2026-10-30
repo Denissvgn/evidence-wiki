@@ -63,6 +63,7 @@ from _provider_registry import (
 )
 from _script_errors import handle_system_exit, json_mode_requested
 from _workspace_health import evaluate_workspace_health
+from _yaml_safe import safe_load_current
 
 FORBIDDEN_TOP_LEVEL_DIRS = ("pilot-workspaces", "reports")
 FORBIDDEN_METADATA_TOKENS = ("llm-research", "autonomo", "pilot-workspaces", "domain_pack")
@@ -174,7 +175,7 @@ def load_yaml_file(project_root: Path, relative_path: str, label: str, results: 
         )
         return None
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        document = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         issue(
             results,

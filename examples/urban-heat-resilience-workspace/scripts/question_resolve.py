@@ -1635,6 +1635,8 @@ def transition_resolution(
             remove_fields,
             quoted_fields={"updated", "human_review_requested_at"},
         )
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
         question_claim.write_page_atomic(page_path, updated)
         result: dict[str, Any] = {
             "applied": True,
@@ -1705,13 +1707,19 @@ def render_revision_page(text: str, revision_id: str) -> str:
          "blocked_reason", "blocking_request_ids", "confidence", "evidence_strength", *GROUNDING_VERIFICATION_STAMPS))
 
 
-def reopen_for_revision(project_root, slug, revision_id, original):
+def reopen_for_revision(project_root, slug, revision_id, original, *, _expected_sha256=None):
     """Coverage migration has archived history; this owner alone resets the question."""
+    import hashlib
+
     claims = load_sibling_module("question_claim")
     path = claims.question_page_path(project_root, slug)
     guard = load_sibling_module("_pack_revision_guard")
     with claims.question_lock(path):
-        current = path.read_bytes().decode("utf-8")
+        current_raw = path.read_bytes()
+        current = current_raw.decode("utf-8")
+        if _expected_sha256 is not None:
+            guard.require("sha256:" + hashlib.sha256(current_raw).hexdigest() == _expected_sha256,
+                          "revision_question_changed")
         rendered = render_revision_page(original, revision_id)
         guard.require(current in {original, rendered}, "revision_question_changed")
         if current != rendered:
@@ -1887,6 +1895,8 @@ def transition_reopen(
             if source_id not in merged:
                 merged.append(source_id)
         now = question_claim.timestamp_utc()
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
         if contingent is not None:
             # Merged with whatever this action already claimed for the question, not
             # written over it. The page is frozen, so a second reopen recomputes `merged`
@@ -2483,6 +2493,7 @@ def run_answer(
     require_grounding: bool = False,
     coverage_manifest: str | None = None,
     grounding_file: str | None = None,
+    _before_write=None,
 ) -> dict[str, Any]:
     """Resolve a question as answered. Keyword arguments mirror the ``answer`` flags one for one."""
     return _run_command(
@@ -2501,6 +2512,7 @@ def run_answer(
             require_grounding=require_grounding,
             coverage_manifest=coverage_manifest,
             grounding_file=grounding_file,
+            _before_write=_before_write,
         ),
     )
 
@@ -2513,6 +2525,7 @@ def run_block(
     blocked_reason: str,
     request_id: list[str] | None = None,
     allow_unclaimed: bool = False,
+    _before_write=None,
 ) -> dict[str, Any]:
     """Resolve a question as blocked on missing evidence."""
     return _run_command(
@@ -2524,6 +2537,7 @@ def run_block(
             allow_unclaimed=allow_unclaimed,
             blocked_reason=blocked_reason,
             request_id=request_id,
+            _before_write=_before_write,
         ),
     )
 
@@ -2578,6 +2592,7 @@ def run_reopen(
     source_id: list[str],
     request_id: list[str] | None = None,
     require_decisive_scope: bool = False,
+    _before_write=None,
 ) -> dict[str, Any]:
     """Move a blocked question back to open once its evidence is delivered and normalized.
 
@@ -2595,6 +2610,7 @@ def run_reopen(
             source_id=source_id,
             request_id=request_id,
             require_decisive_scope=require_decisive_scope,
+            _before_write=_before_write,
         ),
     )
 

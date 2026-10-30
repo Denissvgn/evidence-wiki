@@ -60,11 +60,15 @@ def schemas():
 
 
 def index():
+    from ._contract import LIBRARY_API_VERSION
+
     return {"capability": "scoped-onboarding/v1", "api": "evidence_wiki.Onboarding.open",
         "server": "evidence-wiki serve-onboarding-mcp", "discovery": "evidence-wiki agent extensions",
         "guide": "guide/contracts/v1", "schema_ids": list(schemas()), "allowed_roots_maximum": 16,
         "authority": "explicit host roots and operation grants; ordinary local observations, no OS isolation claim",
-        "preserved_surfaces": ["Workspace", "serve-mcp"], "python_api_version": "14",
+        "preserved_surfaces": ["Workspace", "serve-mcp"], "python_api_version": LIBRARY_API_VERSION,
+        "research_capability": "scoped-research-tools/v1",
+        "research_runtime": "startup-selected public HostRuntime services or owner-private file; no client authority inputs",
         "commands": ["pack migration-plan", "pack migration-apply", "pack compose-plan", "pack compose",
             "pack fleet-plan", "pack fleet-apply", "agent transition-plan", "agent transition-apply",
             "agent recipes", "agent instructions-plan", "agent instructions-apply", "agent instructions-remove"],

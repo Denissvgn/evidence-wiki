@@ -62,9 +62,10 @@ class MutationFaultRecoveryTests(unittest.TestCase):
         invoke,
         *,
         fault_kind: str = "transient_io",
+        write_attribute: str = "write_text",
     ) -> None:
         owner = Path
-        attribute = "write_text" if boundary in {"before_temp_write", "after_temp_write"} else "replace"
+        attribute = write_attribute if boundary in {"before_temp_write", "after_temp_write"} else "replace"
         timing = "after" if boundary in {"after_temp_write", "after_replace"} else "before"
         with inject_once(
             owner,
@@ -129,6 +130,7 @@ class MutationFaultRecoveryTests(unittest.TestCase):
                     "manifest.jsonl",
                     lambda manifest=manifest: self.inventory.write_manifest(manifest, records),
                     fault_kind="quota_exhausted" if boundary == "before_temp_write" else "transient_io",
+                    write_attribute="write_bytes",
                 )
 
                 if boundary == "after_replace":
@@ -368,17 +370,19 @@ class MutationFaultRecoveryTests(unittest.TestCase):
                     "message": "Honest terminal verdict.",
                 }
 
-                if boundary in {"before_temp_write", "after_temp_write"}:
-                    owner, attribute = Path, "write_text"
-                    timing = "after" if boundary == "after_temp_write" else "before"
-                    matcher = path_matches_name(controller.RUN_STATE_FILENAME)
+                if boundary == "before_temp_write":
+                    owner, attribute, timing = controller._native_os, "write", "before"
+                    matcher = lambda _descriptor, data: b'"_pending_event"' in data
+                elif boundary == "after_temp_write":
+                    owner, attribute, timing = controller, "_run_fsync", "before"
+                    matcher = lambda _descriptor, phase: phase == "run_state_pending.file"
                 elif boundary == "during_event_append":
-                    owner, attribute, timing = Path, "replace", "before"
-                    matcher = path_matches_name(controller.EVENTS_FILENAME)
+                    owner, attribute, timing = controller, "_replace_run_file", "before"
+                    matcher = lambda _directory, _temporary, name: name == controller.EVENTS_FILENAME
                 else:
-                    owner, attribute = Path, "replace"
+                    owner, attribute = controller, "_replace_run_file"
                     timing = "after" if boundary == "after_replace" else "before"
-                    matcher = path_matches_name(controller.RUN_STATE_FILENAME)
+                    matcher = lambda _directory, _temporary, name: name == controller.RUN_STATE_FILENAME
                 with inject_once(
                     owner,
                     attribute,

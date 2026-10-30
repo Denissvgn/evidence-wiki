@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import platform
 import subprocess
@@ -257,35 +258,38 @@ def evaluate_release_budget(
     *,
     peak_memory_bytes: int,
     output_bytes: int,
+    quality: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     thresholds = profile.thresholds.as_dict()
     observed: dict[str, float | int] = {
-        "inventory_seconds": timings["inventory"],
-        "normalization_seconds": timings["normalization"],
-        "lint_seconds": timings["lint"],
-        "workspace_status_seconds": timings["workspace_status"],
-        "workspace_status_cached_seconds": timings["workspace_status_cached"],
-        "index_build_seconds": timings["index_build"],
-        "indexed_query_seconds": timings["indexed_query"],
-        "total_seconds": timings["total"],
+        "inventory_seconds": timings.get("inventory"),
+        "normalization_seconds": timings.get("normalization"),
+        "lint_seconds": timings.get("lint"),
+        "workspace_status_seconds": timings.get("workspace_status"),
+        "workspace_status_cached_seconds": timings.get("workspace_status_cached"),
+        "index_build_seconds": timings.get("index_build"),
+        "indexed_query_seconds": timings.get("indexed_query"),
+        "total_seconds": timings.get("total"),
         "peak_memory_bytes": peak_memory_bytes,
         "output_bytes": output_bytes,
     }
-    violations = [
-        {
-            "metric": metric,
-            "observed": observed[metric],
-            "threshold": threshold,
-        }
-        for metric, threshold in thresholds.items()
-        if observed[metric] > threshold
-    ]
+    unknown = [metric for metric, value in observed.items()
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0]
+    violations = [{"metric": metric, "observed": observed[metric], "threshold": threshold}
+        for metric, threshold in thresholds.items() if metric in unknown or observed[metric] > threshold]
+    required = {"counts_complete", "normalization_complete", "lint_clear", "status_complete", "query_complete"}
+    quality_complete = (type(quality) is dict and set(quality) == required and all(type(v) is bool for v in quality.values()))
+    quality_failures = sorted(key for key in required if not quality_complete or quality[key] is not True)
     return {
         "profile": profile.name,
-        "verdict": "pass" if not violations else "no_ship",
+        "verdict": "pass" if not violations and not quality_failures else "no_ship",
+        "complete": not unknown and quality_complete,
         "thresholds": thresholds,
         "observed": observed,
         "violations": violations,
+        "unknown_metrics": unknown,
+        "quality_failures": quality_failures,
+        "qualification_scope": "measured synthetic offline workspace pipeline; not strict evidence approval",
     }
 
 
@@ -556,6 +560,12 @@ def run_workspace_benchmark(config: BenchmarkConfig, root: Path, workspace_prese
             timings,
             peak_memory_bytes=peak_memory_bytes,
             output_bytes=output_bytes,
+            quality={"counts_complete": len(records) == config.sources and normalization["normalized_records"] == config.sources
+                and indexed_documents == config.sources+config.wiki_pages,
+                "normalization_complete": normalization["failed"] == 0 and not inventory_warnings and not normalization["warnings"],
+                "lint_clear": count_lint_issues(lint_results, "HIGH") == 0,
+                "status_complete": status_document["smoke"]["ok"] is True and status_document["readiness"]["verdict"] == "complete",
+                "query_complete": query_result["indexed_documents"] == indexed_documents and query_result["result_count"] > 0},
         )
         if config.profile is not None
         else None

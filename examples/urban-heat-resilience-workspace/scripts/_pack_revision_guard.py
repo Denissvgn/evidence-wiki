@@ -12,6 +12,7 @@ from _evidence_revision import capture_workspace, content_id, observation, read_
 from _record_artifacts import json_document
 from _script_errors import ScriptRefusal
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current as safe_load
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 _MODULES = {}
@@ -45,7 +46,7 @@ def controls(root):
     selected = {name: hashlib.sha256(raw).hexdigest() for name, raw in capture.files.items()
                 if name in names or name.startswith(("domain-packs/", "scripts/", "skills/", "docs/"))}
     try:
-        config = yaml.safe_load(capture.files["research.yml"])
+        config = safe_load(capture.files["research.yml"])
     except yaml.YAMLError:
         require(False, "revision_configuration_invalid")
     require(isinstance(config, dict), "revision_configuration_invalid")

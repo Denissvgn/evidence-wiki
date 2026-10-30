@@ -106,6 +106,32 @@ class ErrorRegistryCoverageTests(unittest.TestCase):
             with self.subTest(error_code=code):
                 self.assertIs(errors.ConfigError, errors.error_class_for(code))
 
+    def test_native_control_and_admission_envelopes_keep_their_typed_boundary(self):
+        cases = {
+            "DRAFT_ADMISSION_INVALID": errors.UsageError,
+            "DRAFT_ADMISSION_REFUSED": errors.ConfigError,
+            "DRAFT_ADMISSION_UNSUPPORTED": errors.ConfigError,
+            "WORKSPACE_PATH_REFUSED": errors.ConfigError,
+            "OPERATION_CONTROL_INVALID": errors.ConfigError,
+            "OPERATION_CLOCK_REGRESSION": errors.ConfigError,
+            "OPERATION_DEADLINE_EXCEEDED": errors.ConfigError,
+            "OPERATION_CANCEL_UNKNOWN": errors.ConfigError,
+            "OPERATION_CANCELLED": errors.ConfigError,
+            "OPERATION_PROCESS_BOUNDARY_UNSUPPORTED": errors.ConfigError,
+        }
+        for code, family in cases.items():
+            with self.subTest(error_code=code):
+                envelope = self.script_errors.error_envelope(code, "native boundary")
+                actual = errors.error_from_envelope(envelope)
+                self.assertIs(family, type(actual))
+                self.assertFalse(actual.recoverable)
+                self.assertEqual(2, actual.exit_code)
+                self.assertEqual(envelope["remediation"], actual.remediation)
+        from evidence_wiki.operation_control import checkpoint
+        with self.assertRaises(errors.ConfigError) as caught:
+            checkpoint(object(), "wrong-type")
+        self.assertEqual("OPERATION_CONTROL_INVALID", caught.exception.error_code)
+
 
 class ErrorEnvelopeToleranceTests(unittest.TestCase):
     def test_unknown_code_degrades_to_the_base_class_with_the_code_preserved(self):

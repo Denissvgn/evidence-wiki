@@ -16,12 +16,15 @@ import atexit
 import contextlib
 import hashlib
 import importlib.util
+import os
+import stat
 import sys
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from types import ModuleType
+from types import CodeType, ModuleType
 
-from . import resources
+from . import host_context, resources
 
 _SCRIPT_MODULE_CACHE: dict[str, ModuleType] = {}
 _LOADER_MODULE_CACHE: dict[str, ModuleType] = {}
@@ -58,6 +61,106 @@ _LOADER_HASH_MEMO: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
 # sibling caches make a warm operation take no loads at all, so concurrent
 # operations stay concurrent.
 _LOAD_LOCK = threading.RLock()
+_COMPILED_SOURCE_LOCK = threading.RLock()
+_COMPILED_SOURCE: OrderedDict[tuple[str, bytes, str | None, int], tuple[CodeType, int]] = OrderedDict()
+_COMPILED_SOURCE_BYTES = 0
+_COMPILED_SOURCE_MAX_ENTRIES = 512
+_COMPILED_SOURCE_MAX_BYTES = 32 * 1024 * 1024
+_SCRIPT_TREE_MEMO: OrderedDict[Path, tuple[tuple, tuple, str, int]] = OrderedDict()
+_SCRIPT_TREE_MEMO_BYTES = 0
+_SCRIPT_TREE_MEMO_MAX_ROOTS = 128
+_SCRIPT_TREE_MEMO_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _script_tree_signature(root: Path) -> tuple:
+    """Observe the loader's original name/size/time/inode signature freshly."""
+    entries = []
+    with os.scandir(root) as children:
+        for child in children:
+            if not child.name.endswith(".py"):
+                continue
+            try:
+                observed = os.stat(child.path, follow_symlinks=True) if os.name == "nt" else child.stat(follow_symlinks=True)
+            except OSError:
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                continue
+            entries.append((child.name, observed.st_size, observed.st_mtime_ns,
+                            observed.st_ctime_ns, observed.st_ino))
+    return tuple(sorted(entries))
+
+
+def _script_content_tree_hash(root: Path) -> str:
+    value = hashlib.sha256()
+    for child in sorted(root.glob("*.py"), key=lambda item: item.name):
+        if not child.is_file():
+            continue
+        value.update(child.name.encode("utf-8", errors="surrogatepass"))
+        value.update(b"\0")
+        value.update(hashlib.sha256(child.read_bytes()).digest())
+    return value.hexdigest()
+
+
+def script_tree_hash(root: Path) -> str:
+    """Share only an owner-computed code digest behind fresh original metadata.
+
+    This retains the copied loader's stat-signature limitations. No source bytes,
+    parsed configuration, permissions or current eligibility are remembered.
+    The private memo bounds payload bytes and root count; larger trees still hash
+    normally without being retained. No caller supplies computed cache material.
+    """
+    global _SCRIPT_TREE_MEMO_BYTES
+    root = Path(root).expanduser().resolve()
+    with _LOAD_LOCK:
+        owner_code = (_script_tree_signature.__code__, _script_content_tree_hash.__code__)
+        before = _script_tree_signature(root)
+        previous = _SCRIPT_TREE_MEMO.get(root)
+        if previous is not None and previous[0] == owner_code and previous[1] == before:
+            _SCRIPT_TREE_MEMO.move_to_end(root)
+            return previous[2]
+        if previous is not None:
+            _SCRIPT_TREE_MEMO_BYTES -= previous[3]
+            del _SCRIPT_TREE_MEMO[root]
+        digest = _script_content_tree_hash(root)
+        after = _script_tree_signature(root)
+        if after == before:
+            size = (sys.getsizeof(before) + sum(sys.getsizeof(row) +
+                    sum(sys.getsizeof(item) for item in row) for row in before) +
+                    len(str(root).encode("utf-8", errors="surrogatepass")) + sys.getsizeof(digest))
+            if size <= _SCRIPT_TREE_MEMO_MAX_BYTES:
+                while _SCRIPT_TREE_MEMO and (len(_SCRIPT_TREE_MEMO) >= _SCRIPT_TREE_MEMO_MAX_ROOTS or
+                        _SCRIPT_TREE_MEMO_BYTES + size > _SCRIPT_TREE_MEMO_MAX_BYTES):
+                    _key, dropped = _SCRIPT_TREE_MEMO.popitem(last=False)
+                    _SCRIPT_TREE_MEMO_BYTES -= dropped[3]
+                _SCRIPT_TREE_MEMO[root] = (owner_code, after, digest, size)
+                _SCRIPT_TREE_MEMO_BYTES += size
+        return digest
+
+
+def compiled_source_code(source: bytes, filename: str) -> CodeType:
+    """Reuse compilation only for exact source bytes, filename and interpreter flags.
+
+    The loader still reads and validates source and executes a fresh module.
+    No module globals, context, evidence, permissions or eligibility are cached.
+    """
+    global _COMPILED_SOURCE_BYTES
+    if type(source) is not bytes or type(filename) is not str:
+        raise TypeError("Source compilation requires bytes and a filename")
+    key = (filename, hashlib.sha256(source).digest(), sys.implementation.cache_tag, sys.flags.optimize)
+    with _COMPILED_SOURCE_LOCK:
+        found = _COMPILED_SOURCE.get(key)
+        if found is not None:
+            _COMPILED_SOURCE.move_to_end(key)
+            return found[0]
+        code = compile(source, filename, "exec", dont_inherit=True, optimize=sys.flags.optimize)
+        if len(source) <= _COMPILED_SOURCE_MAX_BYTES:
+            _COMPILED_SOURCE[key] = (code, len(source))
+            _COMPILED_SOURCE_BYTES += len(source)
+            while (len(_COMPILED_SOURCE) > _COMPILED_SOURCE_MAX_ENTRIES
+                    or _COMPILED_SOURCE_BYTES > _COMPILED_SOURCE_MAX_BYTES):
+                _discarded, (_, size) = _COMPILED_SOURCE.popitem(last=False)
+                _COMPILED_SOURCE_BYTES -= size
+        return code
 
 #: Marks a ``load_workspace_module`` binding this module has already wrapped.
 _SHARED_LOCK_MARKER = "_evidence_wiki_shared_load_lock"
@@ -92,11 +195,15 @@ def _loader_content_hash(path: Path) -> str:
 
 
 def _load_workspace_loader(script_dir: Path) -> ModuleType:
+    from . import _review_producer
+
     root = script_dir.expanduser().resolve()
+    _review_producer.note_assets_root(root.parent.parent)
     path = root / "_workspace_module_loader.py"
     if not path.is_file():
         raise SystemExit(f"Missing packaged script loader: {path}")
     content_hash = _loader_content_hash(path)
+    _review_producer.register_native(root, None, host_context, loader_hash=content_hash)
     key = f"{root}\0{content_hash}"
     if key in _LOADER_MODULE_CACHE:
         return _LOADER_MODULE_CACHE[key]
@@ -109,7 +216,7 @@ def _load_workspace_loader(script_dir: Path) -> ModuleType:
     try:
         # Timestamp-based pyc validation is weaker than this loader's content
         # identity. Compile the actual loader bytes even when an old pyc exists.
-        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # noqa: S102 -- trusted packaged code
+        exec(compiled_source_code(path.read_bytes(), str(path)), module.__dict__)  # noqa: S102 -- trusted packaged code
     finally:
         sys.modules.pop(module_name, None)
     for old_key in list(_LOADER_MODULE_CACHE):
@@ -146,6 +253,7 @@ def _share_load_lock(module: ModuleType) -> ModuleType:
 
     def load_workspace_module(*args: object, **kwargs: object) -> ModuleType:
         with _LOAD_LOCK:
+            kwargs["host_context_bridge"] = host_context
             return _share_load_lock(original(*args, **kwargs))
 
     load_workspace_module.__doc__ = getattr(original, "__doc__", None)
@@ -160,8 +268,21 @@ def _load_script(script_path: Path, module_name: str) -> ModuleType:
     del module_name  # retained for the stable internal call signature
     with _LOAD_LOCK:
         loader = _load_workspace_loader(script_path.parent)
-        module = loader.load_workspace_module(script_path.parent, script_path.stem, cache=_SCRIPT_MODULE_CACHE)
+        module = loader.load_workspace_module(script_path.parent, script_path.stem, cache=_SCRIPT_MODULE_CACHE,
+                                            host_context_bridge=host_context)
         return _share_load_lock(module)
+
+
+def owner_generation() -> tuple[Path, str]:
+    """Select the exact owner tree used by packaged in-process calls."""
+    root = shared_assets_root() / resources.STARTER_DIR / "scripts"
+    with _LOAD_LOCK:
+        _load_workspace_loader(root)
+        selected = root.resolve(), script_tree_hash(root)
+        from . import _review_producer
+
+        _review_producer.register_native(*selected, host_context)
+        return selected
 
 
 def load_packaged_script(assets_root: Path, stem: str) -> ModuleType:

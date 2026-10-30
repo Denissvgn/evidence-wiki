@@ -11,7 +11,9 @@ from . import __version__
 from ._agent_catalog import COMPUTATION_SCHEMAS, COMPUTATION_SCRIPTS, STRICT_SCHEMAS
 from .agent_resources import (
     _asset_tree,
+    _catalog,
     _read,
+    _resource_metadata,
     installation_metadata,
     resource_availability,
     resource_document,
@@ -20,8 +22,11 @@ from .agent_resources import (
 )
 from .errors import EvidenceWikiError, UsageError
 from .onboarding_contract import encode_document
+from .research_command_definitions import OPERATIONS as RESEARCH_COMMANDS
+from .research_command_definitions import WRITE_OPERATIONS as RESEARCH_WRITES
 
 SUMMARY_BYTES = 32_768
+SUMMARY_RESOURCE_PAGE_SIZE = 64
 RESEARCH_OPERATIONS = ("next", "start", "resume", "heartbeat", "acquire", "ingest", "research-export", "progress", "research-guide", "research-schemas")
 OPERATIONS = (
     ("agent", "read", False), ("agent summary", "read", False), ("agent resources", "read", False),
@@ -44,6 +49,8 @@ OPERATIONS = (
     ("agent apply", "write", False), ("agent setup-guide", "read", False), ("agent setup-schemas", "read", False),
     ("agent plan-schemas", "read", False), ("agent plan-guide", "read", False),
     *(("agent " + name, effect, True) for name, effect in (("next", "read"), ("start", "write"), ("resume", "read"), ("research-export", "read"), ("progress", "depends_on_options"))),
+    *(("agent "+name, "write" if name in RESEARCH_WRITES else "read", True) for name in RESEARCH_COMMANDS),
+    ("agent command-schemas", "read", False),
     ("agent research-guide", "read", False), ("agent research-schemas", "read", False),
     ("doctor", "temporary_write", True), ("status", "depends_on_options", True), ("questions add", "write", True),
     ("strict check", "read", True), ("strict prepare-review", "read", True),
@@ -68,7 +75,10 @@ def _checker(ids: tuple[str, ...], availability: dict[str, bool]) -> dict:
 
 def capabilities() -> dict:
     """Return a bounded capability payload without building the full contract."""
-    index = resource_index()
+    entries = _resource_metadata()
+    index = resource_index(limit=SUMMARY_RESOURCE_PAGE_SIZE)
+    if index["resources"] != entries[:SUMMARY_RESOURCE_PAGE_SIZE] or index["bounds"]["total"] != len(entries):
+        _refuse("resource_snapshot_changed")
     availability = resource_availability()
     if not all(availability.values()):
         _refuse("required_resource_missing")
@@ -81,8 +91,8 @@ def capabilities() -> dict:
 
     matrix = compatibility()
     return {
-        "installation": installation, "resources": index["resources"],
-        "schema_ids": [entry["id"] for entry in index["resources"] if entry["media_type"] == "application/schema+json"],
+        "installation": installation, "resources": index["resources"], "resource_bounds": index["bounds"],
+        "schema_ids": [entry["id"] for entry in entries if entry["media_type"] == "application/schema+json"],
         "operations": [{"name": name, "effect": effect, "workspace_required": workspace} for name, effect, workspace in OPERATIONS],
         "strict": {
             "capability": "strict-evidence/v1", "schemas": list(STRICT_SCHEMAS),
@@ -182,6 +192,8 @@ def _workspace_observation(target: str) -> tuple[str, dict]:
 def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
               assurance: str = "artifact_checked") -> dict:
     """Observe the explicit target and return guide/template identity, without writes."""
+    _, catalog = _catalog()
+    observed = {entry["id"]: entry for entry in _resource_metadata(catalog)}
     summary = capabilities()
     _negotiate(summary, requirements or [], assurance)
     if not summary["strict"]["checker"]["available"]:
@@ -190,7 +202,8 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
     template = resource_document("example/strict-policy/v1")
     research_guide = resource_document("guide/research/v1")
     policy = json.loads(template["content"])
-    observed = {entry["id"]: entry for entry in summary["resources"]}
+    if _catalog()[1] != catalog:
+        _refuse("resource_snapshot_changed")
     for document in (guide, template, research_guide):
         if observed[document["id"]] != {key: value for key, value in document.items() if key != "content"}:
             _refuse("resource_snapshot_changed")
@@ -202,7 +215,7 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
         "installation": summary["installation"], "python_version": platform.python_version(), "workspace": state,
         "guide": guide, "schema_ids": summary["schema_ids"],
         "supported_operations": [row["name"] for row in summary["operations"]],
-        "resources": summary["resources"], "environment": environment,
+        "resources": summary["resources"], "resource_bounds": summary["resource_bounds"], "environment": environment,
         "strict_selection": {
             "mode": "strict", "requested_assurance": assurance, "effective_assurance": None,
             "selection_scope": "new_workspace_template", "policy_id": policy["policy_id"],
@@ -211,9 +224,9 @@ def bootstrap(target: str = ".", *, requirements: list[str] | None = None,
             "route": "configure strict policy; check, independently review, export through strict owner",
             "reason": "template selected only; existing policy, authority and protected host not inspected",
         },
-        "limitations": ["Bootstrap does not initialize, validate readiness, run research or confer execution authority.",
-                        "This compact operation index is supplemented by agent research-schemas for caller heartbeat, acquisition and ingestion.",
-                        "No truth guarantee; framework modes need separate qualification and host enforcement needs protected execution."],
+        "limitations": ["Read-only markers; no readiness or execution grant.",
+                        "Research-schemas defines heartbeat, acquisition and ingestion.",
+                        "Truth, frameworks and host protection need separate qualification."],
     }
 
 
@@ -237,6 +250,19 @@ def main(argv: list[str] | None = None) -> int:
         from .extension_commands import main as extension_main
 
         return extension_main(argv[0], argv[1:])
+    if argv and argv[0] == "command-schemas":
+        from .research_command_contracts import schemas
+        if argv[1:] not in ([], ["--format", "json"]):
+            from .errors import UsageError
+            from .research_command_contracts import error_document
+            error = UsageError("RESEARCH_COMMAND_ARGUMENTS_INVALID", "Use command-schemas --format json.", recoverable=False)
+            print(json.dumps(error_document(error), separators=(",", ":")))
+            return error.exit_code
+        print(json.dumps(schemas(), ensure_ascii=False, separators=(",", ":")))
+        return 0
+    if argv and argv[0] in RESEARCH_COMMANDS:
+        from .autonomous_commands import main as autonomous_main
+        return autonomous_main(argv[0], argv[1:])
     if argv and argv[0] in RESEARCH_OPERATIONS:
         from .research_commands import main as research_main
 
@@ -266,11 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--require", action="append", default=[])
     parser.add_argument("--assurance", default="artifact_checked", choices=("artifact_checked", "host_enforced"))
     parser.add_argument("--request-id", default="bootstrap")
+    parser.add_argument("--offset", type=int)
+    parser.add_argument("--limit", type=int)
     try:
         args = parser.parse_args(argv)
         if ((args.operation == "resource") != bool(args.resource_id)
                 or args.operation != "bootstrap" and args.target is not None
-                or args.operation in {"resource", "resources"} and (args.require or args.assurance != "artifact_checked")):
+                or args.operation in {"resource", "resources"} and (args.require or args.assurance != "artifact_checked")
+                or args.operation != "resources" and (args.offset is not None or args.limit is not None)):
             _refuse("arguments", "ONBOARDING_INVALID")
         if args.operation == "bootstrap" and args.target and (not argv or argv[0].startswith("--")) and _workspace_observation(args.target)[0] == "present":
             _negotiate(capabilities(), args.require, args.assurance)
@@ -278,12 +307,13 @@ def main(argv: list[str] | None = None) -> int:
 
             return research_main("next", ["--target", args.target, "--format", args.format])
         if args.operation == "bootstrap":
-            kind, version, payload = "bootstrap", "2", bootstrap(args.target or ".", requirements=args.require, assurance=args.assurance)
+            kind, version, payload = "bootstrap", "3", bootstrap(args.target or ".", requirements=args.require, assurance=args.assurance)
         elif args.operation == "summary":
-            kind, version, payload = "capabilities", "1", capabilities()
+            kind, version, payload = "capabilities", "2", capabilities()
             _negotiate(payload, args.require, args.assurance)
         elif args.operation == "resources":
-            kind, version, payload = "resources", "1", resource_index()
+            kind, version, payload = "resources", "1", resource_index(
+                offset=0 if args.offset is None else args.offset, limit=128 if args.limit is None else args.limit)
             payload.pop("schema_version")
         else:
             kind, version, payload = "resource", "2", resource_document(args.resource_id)

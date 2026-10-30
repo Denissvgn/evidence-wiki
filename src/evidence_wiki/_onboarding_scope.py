@@ -9,6 +9,7 @@ from pathlib import Path
 from ._filesystem import os
 from ._pack_io import identity, json_document
 from ._script_host import shared_assets_root
+from .host_context import call_binding, current_context, protected_paths, require_actor
 from .pack_catalog import _outside_assets, _writer_flags
 from .planning_contracts import refuse
 
@@ -20,9 +21,22 @@ def scoped_operation(function):
     def scoped(self, *args, **kwargs):
         token = ACTIVE_SCOPE.set(self._scope)
         try:
-            return function(self, *args, **kwargs)
+            require_actor(kwargs.get("agent_id"))
+            with call_binding():
+                return function(self, *args, **kwargs)
         except OSError:
             refuse("onboarding_local_environment_unavailable", "ONBOARDING_ENVIRONMENT_INCOMPATIBLE")
+        except SystemExit as error:
+            from ._facades._base import _process_exit
+
+            raise _process_exit(error) from None
+        except Exception as error:
+            from ._facades._base import _translated
+
+            translated = _translated(error)
+            if translated is not None:
+                raise translated from None
+            raise
         finally:
             ACTIVE_SCOPE.reset(token)
     return scoped
@@ -77,16 +91,23 @@ class Scope:
             roots += [shared_assets_root() / name for name in ("workspace-template", "domain-packs", "orchestrator")]
         if not any(resolved.is_relative_to(root) for root in roots):
             refuse("onboarding_path_outside_host_scope", "ONBOARDING_AUTHORITY_REQUIRED")
-        for key in ("EVIDENCE_WIKI_AUTHORITY_FILE", "EVIDENCE_WIKI_STATE_DIR"):
-            if os.environ.get(key):
-                protected = Path(os.environ[key]).expanduser().resolve()
-                if resolved.is_relative_to(protected) or protected.is_relative_to(resolved):
-                    refuse("onboarding_path_overlaps_host_authority", "ONBOARDING_AUTHORITY_REQUIRED")
+        context = current_context()
+        if context is not None:
+            is_installation = installation and not write and any(
+                resolved.is_relative_to(shared_assets_root() / name)
+                for name in ("workspace-template", "domain-packs", "orchestrator")
+            )
+            if not is_installation:
+                context.require_path(resolved, write=write)
+        for selected in protected_paths():
+            protected = selected.expanduser().resolve()
+            if resolved.is_relative_to(protected) or protected.is_relative_to(resolved):
+                refuse("onboarding_path_overlaps_host_authority", "ONBOARDING_AUTHORITY_REQUIRED")
         if write:
             _outside_assets(resolved, additional_roots=(Path(__file__).parent,))
         return resolved
 
-    def setup(self, value):
+    def setup(self, value, *, write=True):
         from .planning_contracts import PLAN, REQUEST, decode
 
         raw = value
@@ -99,8 +120,8 @@ class Scope:
         payload = request["request"]["payload"]
         selected = payload["target"]
         # Setup writes its coordination state under the selected writable root too.
-        self.path(selected["writable_root"], write=True)
-        self.path(Path(selected["writable_root"]) / selected["relative_path"], write=True)
+        self.path(selected["writable_root"], write=write)
+        self.path(Path(selected["writable_root"]) / selected["relative_path"], write=write)
         for scope in payload["authority"]["source_scope"]:
             if not scope.startswith(("https://", "http://")):
                 self.path(scope, installation=True)

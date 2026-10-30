@@ -13,13 +13,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import re
 import sys
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from types import ModuleType
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -204,9 +206,11 @@ _SIBLING_CACHE: dict[str, ModuleType] = {}
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
+from _owner_paths import checked_path
 from _request_scope import FACET_SCOPE_KEY, normalize_scope
 from _workspace_locks import LockUnavailableError, workspace_lock
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current
 
 _script_errors = load_workspace_module(_SCRIPT_DIR, "_script_errors")
 ScriptRefusal = _script_errors.ScriptRefusal
@@ -340,8 +344,15 @@ def load_sibling_module(stem: str) -> ModuleType:
     return _SIBLING_CACHE[stem]
 
 
-def timestamp_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def timestamp_utc(_observed_at=None) -> str:
+    moment = datetime.now(timezone.utc) if _observed_at is None else observed_clock(_observed_at)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def observed_clock(value):
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise CoverageManifestError("VALUE_INVALID", "Coverage requires an explicit timezone-aware clock.")
+    return value.astimezone(timezone.utc)
 
 
 def load_config(project_root: Path) -> dict[str, Any]:
@@ -349,7 +360,7 @@ def load_config(project_root: Path) -> dict[str, Any]:
     if not path.exists():
         raise SystemExit(f"Missing config: {path}")
     try:
-        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        config = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise CoverageManifestError("CONFIG_INVALID", f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(config, dict):
@@ -568,7 +579,7 @@ def load_yaml_mapping(path: Path, *, error_code: str) -> dict[str, Any]:
     if not path.is_file():
         raise CoverageManifestError(error_code, f"Missing coverage manifest: {path}")
     try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        document = safe_load_current(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise CoverageManifestError(error_code, f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(document, dict):
@@ -907,8 +918,8 @@ def normalize_template_document(
     }
 
 
-def build_manifest(slug: str, coverage_profile: str | None, template: dict[str, Any] | None) -> dict[str, Any]:
-    now = timestamp_utc()
+def build_manifest(slug: str, coverage_profile: str | None, template: dict[str, Any] | None, *, _observed_at=None) -> dict[str, Any]:
+    now = timestamp_utc() if _observed_at is None else timestamp_utc(_observed_at)
     profile = coverage_profile or (template or {}).get("coverage_profile") or DEFAULT_COVERAGE_PROFILE
     if not isinstance(profile, str) or not profile.strip():
         raise CoverageManifestError("VALUE_INVALID", "--coverage-profile must be non-empty")
@@ -1152,6 +1163,7 @@ def update_evaluation_fields(
     *,
     update_timestamp: bool,
     policy_results_by_facet: dict[str, list[dict[str, Any]]] | None = None,
+    _observed_at=None,
 ) -> dict[str, Any]:
     policy_results_by_facet = policy_results_by_facet or {}
     for facet in all_facets(document):
@@ -1168,15 +1180,17 @@ def update_evaluation_fields(
     else:
         document["coverage_verdict"] = "pending"
     if update_timestamp:
-        document["updated_at"] = timestamp_utc()
+        document["updated_at"] = timestamp_utc() if _observed_at is None else timestamp_utc(_observed_at)
     return document
 
 
 def evaluate_manifest(
     document: dict[str, Any],
     policy_results_by_facet: dict[str, list[dict[str, Any]]] | None = None,
+    *, _observed_at=None,
 ) -> dict[str, Any]:
-    return update_evaluation_fields(document, update_timestamp=True, policy_results_by_facet=policy_results_by_facet)
+    return update_evaluation_fields(document, update_timestamp=True, policy_results_by_facet=policy_results_by_facet,
+                                    _observed_at=_observed_at)
 
 
 def evaluate_manifest_readonly(
@@ -1217,6 +1231,7 @@ def evaluate_policy_results_for_manifest(
     project_root: Path,
     config: dict[str, Any],
     document: dict[str, Any],
+    *, _observed_at=None,
 ) -> tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     helper = load_sibling_module("_evidence_policies")
     primitives = load_sibling_module("_policy_primitives")
@@ -1232,7 +1247,7 @@ def evaluate_policy_results_for_manifest(
             "CONFIG_INVALID", exc.message, remediation=exc.remediation, details=exc.details
         ) from exc
     inputs = helper.load_policy_inputs(project_root, config)
-    moment = datetime.now(timezone.utc)
+    moment = datetime.now(timezone.utc) if _observed_at is None else observed_clock(_observed_at)
     slug = document.get("question_slug")
     question_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     facets: list[dict[str, Any]] = []
@@ -1350,6 +1365,7 @@ def coverage_summary_for_question(
     config: dict[str, Any],
     slug: str,
     frontmatter: dict[str, Any] | None = None,
+    *, _observed_at=None,
 ) -> dict[str, Any]:
     frontmatter = frontmatter or {}
     coverage_required = frontmatter.get("coverage_required") is True
@@ -1404,7 +1420,8 @@ def coverage_summary_for_question(
         document = load_yaml_mapping(path, error_code="COVERAGE_MANIFEST_INVALID")
         policy_vocabularies = merged_policy_vocabularies(config)
         validate_manifest(document, expected_slug=slug, policy_vocabularies=policy_vocabularies)
-        policy_results, policy_results_by_facet = evaluate_policy_results_for_manifest(project_root, config, document)
+        policy_results, policy_results_by_facet = (evaluate_policy_results_for_manifest(project_root, config, document)
+            if _observed_at is None else evaluate_policy_results_for_manifest(project_root, config, document, _observed_at=_observed_at))
         evaluated = evaluate_manifest_readonly(document, policy_results_by_facet)
         validate_manifest(evaluated, expected_slug=slug, policy_vocabularies=policy_vocabularies)
     except CoverageManifestError as exc:
@@ -1593,7 +1610,303 @@ def resolved_project_root(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def run_evaluate(project_root: str | Path, *, slug: str) -> dict[str, Any]:
+def _checked_coverage_config(project_root: str | Path, slug: str) -> tuple[Path, dict[str, Any]]:
+    supplied = Path(project_root).expanduser().absolute()
+    root = checked_path(supplied, supplied, field="project_root", kind="directory")
+    checked_path(root, "research.yml", field="research_config", kind="file")
+    config = load_config(root)
+    slug = validate_slug(slug)
+    try:
+        directory = coverage_dir(root, config)
+        questions = wiki_questions_dir(root, config)
+        path = manifest_path(root, config, slug)
+    except (CoverageManifestError, SystemExit, ValueError, TypeError):
+        raise ScriptRefusal("WORKSPACE_PATH_REFUSED", "The configured coverage path cannot be used.",
+            exit_code=EXIT_INVALID, recoverable=False, details={"reason": "configured_path_invalid", "field": "coverage_paths"},
+            remediation="Use ordinary workspace-relative coverage and question paths without links or escapes.") from None
+    checked_path(root, directory, field="coverage_dir", kind="directory")
+    checked_path(root, path, field="coverage_manifest", kind="file")
+    checked_path(root, questions, field="questions_dir", kind="directory")
+    checked_path(root, questions / (slug + ".md"), field="question", kind="file")
+    requests = load_sibling_module("source_requests")
+    requests._checked_request_paths(root, config, question_slugs=[slug])
+    return root, config
+
+
+def run_init_inline(project_root: str | Path, *, slug: str, template: dict[str, Any] | None = None,
+                    coverage_profile: str | None = None, force: bool = False) -> dict[str, Any]:
+    """Root-friendly inline authoring; the canonical owner retains every write."""
+    if type(force) is not bool:
+        raise CoverageManifestError("VALUE_INVALID", "Coverage force must be a boolean.")
+    if coverage_profile is not None and (type(coverage_profile) is not str or not coverage_profile.strip()
+                                        or len(coverage_profile) > 4096):
+        raise CoverageManifestError("VALUE_INVALID", "Coverage profile must be a bounded non-empty string.")
+    if template is not None:
+        try:
+            pending, nodes, string_bytes = [(template, 0)], 0, 0
+            while pending:
+                item, depth = pending.pop()
+                nodes += 1
+                if depth > 16 or nodes > 65536:
+                    raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template exceeds its bound.")
+                if type(item) is dict:
+                    if len(item) > 128 or any(type(key) is not str for key in item):
+                        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template exceeds its bound.")
+                    pending.extend((child, depth + 1) for pair in item.items() for child in pair)
+                elif type(item) is list:
+                    if len(item) > 4096:
+                        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template exceeds its bound.")
+                    pending.extend((child, depth + 1) for child in item)
+                elif type(item) is str:
+                    string_bytes += len(item.encode("utf-8"))
+                    if len(item) > 65536 or string_bytes > 1_048_576:
+                        raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template exceeds its bound.")
+                elif type(item) is int and item.bit_length() > 64:
+                    raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template exceeds its bound.")
+                elif item is not None and type(item) not in (bool, int, float):
+                    raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template is not plain data.")
+            raw = json.dumps(template, ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if len(raw) > 1_048_576:
+                raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template exceeds its bound.")
+            template = json.loads(raw)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise CoverageManifestError("COVERAGE_TEMPLATE_INVALID", "Coverage template is not valid bounded data.") from None
+    try:
+        root, config = _checked_coverage_config(project_root, slug)
+        return run_init_document(root, config, slug=slug, template=template,
+                                 coverage_profile=coverage_profile, force=force)
+    except SystemExit as exc:
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
+    except OSError:
+        raise CoverageManifestError("COVERAGE_WRITE_UNCERTAIN", "Coverage authoring did not return a complete result.",
+            recoverable=False, details={"commit_outcome": "unknown"},
+            remediation="Inspect the manifest before retrying; a write may already have completed.") from None
+
+
+def _link_selectors(value: Any, label: str) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) > 256:
+        raise CoverageManifestError("VALUE_INVALID", "Coverage selectors must be a bounded list.", details={"field": label})
+    if any(type(item) is not str or not item.strip() or len(item) > 512 or "\0" in item for item in value):
+        raise CoverageManifestError("VALUE_INVALID", "Coverage selectors must be bounded non-empty strings.", details={"field": label})
+    return list(value)
+
+
+def run_link(project_root: str | Path, *, slug: str, facet_id: str,
+             accepted_source_ids: list[str] | None = None, blocking_request_ids: list[str] | None = None,
+             clear_accepted_source_ids: bool = False, clear_blocking_request_ids: bool = False) -> dict[str, Any]:
+    """Link through the existing facet writer and its postwrite scope backfill."""
+    if type(clear_accepted_source_ids) is not bool or type(clear_blocking_request_ids) is not bool:
+        raise CoverageManifestError("VALUE_INVALID", "Coverage clear flags must be booleans.")
+    if type(facet_id) is not str or not facet_id.strip() or len(facet_id) > 128 or "\0" in facet_id:
+        raise CoverageManifestError("VALUE_INVALID", "Coverage facet identifier must be a bounded non-empty string.")
+    arguments = SimpleNamespace(slug=slug, facet_id=facet_id,
+        accepted_source_id=_link_selectors(accepted_source_ids, "accepted_source_ids"),
+        blocking_request_id=_link_selectors(blocking_request_ids, "blocking_request_ids"),
+        clear_accepted_source_ids=clear_accepted_source_ids, clear_blocking_request_ids=clear_blocking_request_ids)
+    try:
+        root, config = _checked_coverage_config(project_root, slug)
+        load_sibling_module("source_requests")._checked_source_inputs(root, config, arguments.accepted_source_id)
+        return run_set_facet(root, config, arguments)
+    except SystemExit as exc:
+        raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
+    except OSError:
+        raise CoverageManifestError("COVERAGE_WRITE_UNCERTAIN", "Coverage linking did not return a complete result.",
+            recoverable=False, details={"commit_outcome": "unknown"},
+            remediation="Inspect the manifest and request scope before retrying; preserve any completed writes.") from None
+
+
+def _checked_policy_paths(project_root: Path, config: dict[str, Any]) -> None:
+    helper = load_sibling_module("_evidence_policies")
+    requests = load_sibling_module("source_requests")
+    try:
+        normalized = project_root / helper.normalized_dir_text(config)
+        coverage = project_root / helper.coverage_dir_text(config)
+        manifest = project_root / helper.manifest_path_text(config)
+        jurisdictions = project_root / helper.jurisdictions_path_text(config)
+    except (ValueError, TypeError):
+        requests._path_refused("policy_inputs")
+    checked_path(project_root, manifest, field="policy_manifest", kind="file")
+    for path, field in ((project_root / helper.DEFAULT_CANDIDATES_PATH, "discovery_candidates"), (jurisdictions, "jurisdictions")):
+        checked_path(project_root, path, field=field, kind="file")
+        if path.exists() and path.stat().st_size > 8 * 1024 * 1024:
+            requests._path_refused(field)
+    requests._checked_tree(project_root, normalized, "normalized_inputs", bound_bytes=True)
+    requests._checked_tree(project_root, coverage, "coverage_inputs", bound_bytes=True)
+    records = requests._checked_records(manifest, "policy_manifest", lambda: requests.iter_manifest_records(project_root, config))
+    source_ids = [record["id"] for record in records if isinstance(record.get("id"), str)]
+    requests._checked_source_inputs(project_root, config, source_ids)
+
+
+def recovery_inputs(capture, targets, new_directories=(), *, temporary=None, controls=None):
+    """Bind complete retained inputs while naming every allowed owner output."""
+    revision = load_sibling_module("_evidence_revision")
+    omitted = lambda name: name == ".locks" or name.startswith(".locks/") or name == "raw/.locks" or name.startswith("raw/.locks/")
+    controls = controls or {"files": [], "new_directories": []}
+    for name in controls["files"]:
+        if name in capture.files and capture.files[name] not in {b"", b"\0"}:
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage control inputs changed.")
+    files = {name: "sha256:" + hashlib.sha256(raw).hexdigest() for name, raw in capture.files.items()
+             if name not in targets and name != temporary and name not in controls["files"] and not omitted(name)}
+    directories = [name for name in capture.directories if name not in new_directories
+                   and name not in controls["new_directories"] and not omitted(name)]
+    return revision.content_id("evidence-coverage-recovery-inputs/v1", {"files": files, "directories": directories})
+
+
+def recovery_directories(capture, targets):
+    """Only exact missing output ancestors may appear during publication."""
+    selected = set()
+    for relative in targets:
+        for parent in Path(relative).parents:
+            name = parent.as_posix()
+            if name != "." and name not in capture.directories:
+                selected.add(name)
+    return sorted(selected)
+
+
+def recovery_private_view(view):
+    if view is None:
+        return None
+    return {"state_id": view.state.state_id, "checkpoint": view.state.checkpoint,
+            "authority_sha256": view.trust["content_hash"]}
+
+
+def recovery_materialized_inputs(root, config, capture):
+    """Remap only qualified inside-workspace aliases into the captured reader view."""
+    mapped = copy.deepcopy(config)
+    wiki = mapped.get("wiki")
+    if isinstance(wiki, dict) and isinstance(wiki.get("root"), str) and Path(wiki["root"]).is_absolute():
+        actual = load_sibling_module("_owner_paths").checked_path(root, wiki["root"], field="coverage_wiki", kind="directory")
+        wiki["root"] = actual.relative_to(root).as_posix()
+    sources = mapped.get("sources")
+    if isinstance(sources, dict) and any(isinstance(value, str) and Path(value).is_absolute()
+        for key, value in sources.items() if key in {"manifest_path", "source_requests_path", "coverage_dir", "normalized_dir"}):
+        raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage generated paths must remain workspace-relative.")
+    files = dict(capture.files)
+    files["research.yml"] = yaml.safe_dump(mapped, sort_keys=False).encode()
+    return mapped, load_sibling_module("_evidence_revision").WorkspaceRevision(MappingProxyType(files), capture.directories)
+
+
+def recovery_policy_results(root, config, capture, document, observed_at):
+    """Evaluate captured local inputs under one lock-held private policy view."""
+    usage = load_sibling_module("_evidence_usage")
+    publication = load_sibling_module("_publication_context")
+    with usage.current_view(root, config) if usage.configured(config) else nullcontext(None) as view:
+        binding = recovery_private_view(view)
+        frozen_view = usage.UsageView(view.state, view.trust, observed_at) if view is not None else None
+        mapped, captured_inputs = recovery_materialized_inputs(root, config, capture)
+        with captured_inputs.materialize() as captured, publication.authorized_capture(captured, mapped, frozen_view):
+            results, facets = evaluate_policy_results_for_manifest(captured, mapped, document, _observed_at=observed_at)
+        if recovery_private_view(view) != binding:
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage policy inputs changed.")
+        return results, facets, binding
+
+
+def prepare_evaluation(project_root, *, slug, _observed_at):
+    """Prepare the exact canonical evaluation before any manifest publication."""
+    root, config = _checked_coverage_config(project_root, slug)
+    slug = validate_slug(slug)
+    _checked_policy_paths(root, config)
+    revision = load_sibling_module("_evidence_revision")
+    capture = revision.capture_workspace(root)
+    path = manifest_path(root, config, validate_slug(slug))
+    relative = path.relative_to(root).as_posix()
+    prior = capture.files.get(relative)
+    if prior is None:
+        raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage inputs changed.")
+    document = yaml.safe_load(prior)
+    validate_manifest(document, expected_slug=slug, policy_vocabularies=merged_policy_vocabularies(config))
+    clock = observed_clock(_observed_at)
+    policies, facets, private_view = recovery_policy_results(root, config, capture, document, clock)
+    evaluate_manifest(document, facets, _observed_at=clock)
+    validate_manifest(document, expected_slug=slug, policy_vocabularies=merged_policy_vocabularies(config))
+    plan = {"schema_version": "evidence-coverage-plan/v1", "kind": "coverage.evaluate", "slug": slug,
+        "observed_at": clock.isoformat(), "configuration_sha256": revision.content_id("coverage-config", config),
+        "dependencies_sha256": recovery_inputs(capture, [relative]), "new_directories": [], "private_view": private_view,
+        "controls": {"files": [], "new_directories": []},
+        "outputs": [{"path": relative, "prior_sha256": "sha256:" + hashlib.sha256(prior).hexdigest(),
+                     "data": yaml.safe_dump(document, sort_keys=False).encode()}],
+        "report": report("evaluate", root, path, document, coverage_verdict=document["coverage_verdict"], policy_results=policies)}
+    current = revision.capture_workspace(root)
+    if recovery_inputs(current, [relative]) != plan["dependencies_sha256"] or current.files.get(relative) != prior:
+        raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage inputs changed.")
+    return plan
+
+
+def check_recovery_inputs(root, plan, *, publishing=None):
+    """Recheck the exact dependency closure and private observation at publication."""
+    revision = load_sibling_module("_evidence_revision")
+    capture = revision.capture_workspace(root)
+    targets = [row["path"] for row in plan["outputs"]]
+    temporary = None
+    if publishing is not None:
+        relative, data = publishing
+        candidates = [name for name, raw in capture.files.items() if Path(name).parent == Path(relative).parent
+            and re.fullmatch(r"\.normalized-[a-f0-9]{32}", Path(name).name) and raw == data]
+        if len(candidates) != 1:
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage inputs changed.")
+        temporary = candidates[0]
+    config = load_config(root)
+    for path in plan["controls"]["files"]:
+        load_sibling_module("_owner_paths").checked_path(root, path, field="coverage_control", kind="file")
+    for path in plan["controls"]["new_directories"]:
+        load_sibling_module("_owner_paths").checked_path(root, path, field="coverage_control_directory", kind="directory")
+    if (revision.content_id("coverage-config", config) != plan["configuration_sha256"]
+            or recovery_inputs(capture, targets, plan["new_directories"], temporary=temporary,
+                               controls=plan["controls"]) != plan["dependencies_sha256"]):
+        raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage inputs changed.")
+    usage = load_sibling_module("_evidence_usage")
+    with usage.current_view(root, config) if usage.configured(config) else nullcontext(None) as view:
+        if recovery_private_view(view) != plan["private_view"]:
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage policy inputs changed.")
+    return capture
+
+
+def commit_evaluation(project_root, *, slug, plan):
+    """Publish the planned bytes under the canonical inner lock and exact baselines."""
+    root, config = _checked_coverage_config(project_root, slug)
+    slug = validate_slug(slug)
+    _checked_policy_paths(root, config)
+    if (plan.get("schema_version") != "evidence-coverage-plan/v1" or plan.get("kind") != "coverage.evaluate"
+            or plan.get("slug") != slug or len(plan.get("outputs", [])) != 1):
+        raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage plan does not match this request.")
+    output = plan["outputs"][0]
+    path = manifest_path(root, config, slug)
+    if output["path"] != path.relative_to(root).as_posix():
+        raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage plan target changed.")
+    lock_path = root / ".locks" / ("coverage-evaluate-" + validate_slug(slug) + ".lock")
+    load_sibling_module("source_requests")._checked_lock_paths(root, lock_path, "coverage_evaluation_lock")
+    with load_sibling_module("_workspace_locks").workspace_lock(lock_path, timeout_seconds=0, purpose="coverage evaluation") as lock:
+        if not lock.locked or lock.backend not in {"fcntl", "win32", "msvcrt"}:
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "A native coverage lock is required.")
+        capture = check_recovery_inputs(root, plan)
+        if "sha256:" + hashlib.sha256(capture.files.get(output["path"], b"")).hexdigest() != output["prior_sha256"]:
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage target changed.")
+        document = yaml.safe_load(output["data"])
+        validate_manifest(document, expected_slug=slug, policy_vocabularies=merged_policy_vocabularies(config))
+        if document["updated_at"] != timestamp_utc(datetime.fromisoformat(plan["observed_at"])):
+            raise CoverageManifestError("COVERAGE_INPUTS_CHANGED", "Coverage clock changed.")
+        load_sibling_module("_usage_materialization").publish_file(root, output["path"], output["data"], output["prior_sha256"],
+            before_publish=lambda: check_recovery_inputs(root, plan, publishing=(output["path"], output["data"])))
+    return copy.deepcopy(plan["report"])
+
+
+def run_evaluate_checked(project_root: str | Path, *, slug: str, _plan=None) -> dict[str, Any]:
+    """API evaluation qualifies configured paths before the canonical writer."""
+    root, config = _checked_coverage_config(project_root, slug)
+    _checked_policy_paths(root, config)
+    try:
+        if _plan is not None:
+            return commit_evaluation(root, slug=slug, plan=_plan)
+        return run_evaluate(root, slug=slug, _config=config)
+    except OSError:
+        raise CoverageManifestError("COVERAGE_WRITE_UNCERTAIN", "Coverage evaluation did not return a complete result.",
+            recoverable=False, details={"commit_outcome": "unknown"},
+            remediation="Inspect the manifest before retrying; preserve any completed write.") from None
+
+
+def run_evaluate(project_root: str | Path, *, slug: str, _config: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return exactly the document ``main`` prints for ``evaluate --format json``.
 
     This is the library seam: a long-lived host calls it in-process instead of
@@ -1613,7 +1926,7 @@ def run_evaluate(project_root: str | Path, *, slug: str) -> dict[str, Any]:
     """
     root = resolved_project_root(project_root)
     try:
-        config = load_config(root)
+        config = load_config(root) if _config is None else _config
         question_slug = validate_slug(slug)
         path, document = load_manifest(root, config, question_slug)
         policy_results, policy_results_by_facet = evaluate_policy_results_for_manifest(root, config, document)
@@ -1635,8 +1948,14 @@ def run_evaluate(project_root: str | Path, *, slug: str) -> dict[str, Any]:
     )
 
 
-def run_revision(project_root: str | Path, request: dict[str, Any]) -> dict[str, Any]:
-    return load_sibling_module("_coverage_revision").migrate(project_root, request)
+def run_revision(project_root: str | Path, request: dict[str, Any], *, _plan=None) -> dict[str, Any]:
+    if isinstance(request, dict) and isinstance(request.get("slug"), str):
+        root, _config = _checked_coverage_config(project_root, request["slug"])
+        requests = load_sibling_module("source_requests")
+        requests._checked_lock_paths(root, root / ".locks/domain-pack-refresh.lock", "coverage_revision_lock")
+        load_sibling_module("_evidence_revision").capture_workspace(root)
+        return load_sibling_module("_coverage_revision").migrate(root, request, _plan=_plan)
+    return load_sibling_module("_coverage_revision").migrate(project_root, request, _plan=_plan)
 
 
 def render_text(result: dict[str, Any]) -> str:

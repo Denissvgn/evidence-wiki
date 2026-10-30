@@ -8,17 +8,19 @@ from pathlib import Path
 from ._onboarding_scope import Scope, scoped_operation
 from ._pack_io import canonical, json_document
 from .errors import ConfigError
+from .host_context import current_context
 from .pack_discovery import owner
 from .pack_migrations import _call
 from .planning_contracts import refuse
 from .runtime_identity import generation
 
 READ = frozenset({"bootstrap", "resources", "resource", "recipes", "inspect", "plan", "check_plan",
+    "prepare", "setup_status",
     "revision_plan", "revision_status", "migration_plan", "composition_plan", "fleet_plan", "transition_plan",
-    "research_next", "research_export", "computation.check", "computation.aggregate", "computation.evaluate",
+    "research_next", "research_export", "research_progress", "computation.check", "computation.aggregate", "computation.evaluate",
     "computation.verify", "computation.schedule", "instructions_plan", "contracts", "pack_list", "pack_show", "pack_decide"})
 WRITE = frozenset({"apply", "capture", "revision_apply", "migration_apply", "reevaluate", "composition_apply",
-    "fleet_apply", "transition_apply", "research.start", "research.resume", "research.heartbeat", "research.ingest",
+    "fleet_apply", "transition_apply", "research.start", "research.resume", "research.heartbeat", "research.ingest", "research_acquire", "research_progress.write",
     "computation.write", "computation.apply-warnings", "computation.dispatch", "instructions_apply", "instructions_remove", "pack_scaffold", "pack_derive"})
 
 _PROCESS_GENERATION = None
@@ -66,7 +68,7 @@ class Onboarding:
         return cls(allowed_roots, allow)
 
     def __enter__(self):
-        self._check("bootstrap")
+        self._check_lifetime()
         return self
 
     def __exit__(self, *args):
@@ -77,14 +79,20 @@ class Onboarding:
             self._scope.close()
             self.closed = True
 
-    def _check(self, operation):
+    def _check_lifetime(self):
         if self.closed:
             raise ConfigError("WORKSPACE_UNREADABLE", "Onboarding handle is closed.")
-        if operation not in self._allow:
-            refuse("onboarding_operation_not_granted", "ONBOARDING_AUTHORITY_REQUIRED")
         self._scope.verify()
         if generation() != self._generation:
             refuse("onboarding_generation_changed_restart_required", "ONBOARDING_PLAN_STALE")
+
+    def _check(self, operation):
+        self._check_lifetime()
+        if operation not in self._allow:
+            refuse("onboarding_operation_not_granted", "ONBOARDING_AUTHORITY_REQUIRED")
+        context = current_context()
+        if context is not None:
+            context.require_grant("onboarding." + operation)
 
     def _finish(self, value):
         self._scope.verify()
@@ -103,32 +111,36 @@ class Onboarding:
         if target is None:
             payload = agent.capabilities()
             agent._negotiate(payload, list(requirements), assurance)
-            kind, version = "capabilities", "1"
+            kind, version = "capabilities", "2"
         else:
             root = self._scope.path(target)
             payload = agent.bootstrap(str(root), requirements=list(requirements), assurance=assurance)
-            kind, version = "bootstrap", "2"
+            kind, version = "bootstrap", "3"
         result = {"schema_version": version + ".0", "kind": kind, "request_id": request_id, "payload": payload}
         return self._finish(json.loads(encode_document("onboarding/" + kind + "/v" + version, result)))
 
-    def resources(self):
+    @scoped_operation
+    def resources(self, *, offset=0, limit=128):
         from .agent_resources import resource_index
 
         self._check("resources")
-        return self._finish(resource_index())
+        return self._finish(resource_index(offset=offset, limit=limit))
 
+    @scoped_operation
     def resource(self, resource_id):
         from .agent_resources import resource_document
 
         self._check("resource")
         return self._finish(resource_document(resource_id))
 
+    @scoped_operation
     def recipes(self):
         from .capability_recipes import recipes
 
         self._check("recipes")
         return self._finish(recipes())
 
+    @scoped_operation
     def contracts(self):
         from .extension_contracts import contract
 
@@ -191,12 +203,51 @@ class Onboarding:
         self._pack_scope(target=base["target"], catalog=base["catalog"], path=base["path"])
         return self._finish(derive(raw, output=output))
 
+    @scoped_operation
     def inspect(self, target, *, source_ids=(), source_paths=(), host_tools=None):
         from .source_inspection import inspect
 
         self._check("inspect")
         root = self._scope.path(target)
         return self._finish(inspect(target=str(root), source_ids=list(source_ids), source_paths=list(source_paths), host_tools=host_tools))
+
+    @scoped_operation
+    def prepare(self, objective, *, host_scope=None, policy=None, defaults=None, proposal=None, request_id="research-request"):
+        """Compile a concise objective and its explicit host selections without effects."""
+        from .planning import compile_plan
+        from .request_compiler import compile_request
+        from .run_policy import RunPolicy
+        from .setup_application import research_compatibility
+        from .setup_contracts import PREPARATION, checked
+
+        self._check("prepare")
+        if type(policy) is dict:
+            policy = RunPolicy.from_dict(policy)
+        compiled = compile_request(objective, host_scope=host_scope, policy=policy, defaults=defaults,
+                                   proposal=proposal, request_id=request_id)
+        plan = None
+        if compiled["status"] == "compiled":
+            raw, _ = document(compiled["request"])
+            self._scope.setup(raw, write=False)
+            plan = compile_plan(raw)
+        ready = plan is not None and plan["setup_ready"]
+        result = {"schema_version": PREPARATION, "status": "prepared" if ready else "insufficient_context" if plan is None else "blocked",
+            "compilation": compiled, "plan": plan, "plan_ready": ready, "setup_ready": False,
+            "research_complete": False, "claims_verified": False, "authority_verified": False,
+            "actions_executed": False, "terminal": True,
+            "research_compatibility": research_compatibility(plan) if plan is not None else None,
+            "next_action": "check_and_apply" if ready else "stop_context" if plan is None else "stop_blocked"}
+        return self._finish(checked(result, PREPARATION))
+
+    @scoped_operation
+    def setup_status(self, value):
+        """Inspect exact setup ownership and recovery without writing or running checks."""
+        from .setup_application import status_plan
+
+        self._check("setup_status")
+        raw, _ = document(value)
+        self._scope.setup(raw, write=False)
+        return self._finish(status_plan(raw))
 
     @scoped_operation
     def plan(self, value):
@@ -213,7 +264,7 @@ class Onboarding:
 
         self._check("check_plan")
         raw, _ = document(value)
-        self._scope.setup(raw)
+        self._scope.setup(raw, write=False)
         return self._finish(check_plan(raw))
 
     @scoped_operation
@@ -265,6 +316,7 @@ class Onboarding:
     def migration_apply(self, value):
         return self._revision("migration_apply", value)
 
+    @scoped_operation
     def revision_status(self, target, *, evaluate=False):
         from .pack_revisions import status
 
@@ -272,6 +324,7 @@ class Onboarding:
         self._scope.builtin_workspace(target)
         return self._finish(_call(status, target, evaluate=evaluate))
 
+    @scoped_operation
     def reevaluate(self, target, value):
         from .pack_revision_contracts import REEVALUATION, decode
 
@@ -368,6 +421,7 @@ class Onboarding:
     def transition_apply(self, value):
         return self._transition("transition_apply", value)
 
+    @scoped_operation
     def research_next(self, target, *, agent_id=None, run_id=None):
         from .research_actions import guidance
 
@@ -375,7 +429,8 @@ class Onboarding:
         self._scope.builtin_workspace(target)
         return self._finish(guidance(target, agent_id=agent_id, run_id=run_id))
 
-    def research(self, target, operation, *, agent_id, run_id, request_id=None, source_id=None, source_path=None):
+    @scoped_operation
+    def research(self, target, operation, *, agent_id, run_id, request_id=None, source_id=None, source_path=None, needs_complete=True):
         from .research_operations import ingest, run_operation
 
         self._check("research." + operation)
@@ -383,13 +438,35 @@ class Onboarding:
         self._scope.path(target, write=True)
         if operation == "ingest":
             result = ingest(target, agent_id=agent_id, run_id=run_id, request_id=request_id,
-                            source_id=source_id, source_path=source_path)
+                            source_id=source_id, source_path=source_path, needs_complete=needs_complete)
         elif operation in {"start", "resume", "heartbeat"}:
             result = run_operation(target, operation, agent_id=agent_id, run_id=run_id)
         else:
             refuse("onboarding_research_operation_unknown")
         return self._finish(result)
 
+    @scoped_operation
+    def research_acquire(self, target, *, agent_id, run_id, request_id, url):
+        from .research_operations import acquire
+        self._check("research_acquire")
+        self._scope.builtin_workspace(target)
+        self._scope.path(target, write=True)
+        return self._finish(acquire(target, agent_id=agent_id, run_id=run_id, request_id=request_id, url=url))
+
+    @scoped_operation
+    def research_progress(self, target, *, run_id=None, estimates=None, output=None):
+        from .research_progress import progress, save_report
+        self._check("research_progress")
+        self._scope.builtin_workspace(target)
+        if output is not None:
+            self._check("research_progress.write")
+        result = progress(target, run_id=run_id, estimates=estimates)
+        if output is not None:
+            self._scope.path(output, write=True)
+            save_report(output, result, target=target)
+        return self._finish(result)
+
+    @scoped_operation
     def research_export(self, target, *, allow_partial=False, run_id=None):
         from .research_completion import completion
 
@@ -397,6 +474,7 @@ class Onboarding:
         self._scope.builtin_workspace(target)
         return self._finish(completion(target, allow_partial=allow_partial, run_id=run_id))
 
+    @scoped_operation
     def computation(self, target, operation="check", *, as_of=None, expected_result_id=None, request_id=None, cadence_id=None, dry_run=False):
         self._check("computation." + operation)
         root = self._scope.builtin_workspace(target)

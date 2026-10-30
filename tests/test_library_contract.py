@@ -129,6 +129,15 @@ class ContractParityTests(unittest.TestCase):
         self.assertTrue(rebuilt["library_api"]["surface"])
         self.assertTrue(rebuilt["artifact_schema_documents"]["orchestration_session"]["required"])
 
+    def test_research_profile_declares_explicit_host_execution_and_scoped_qualification(self):
+        profile = evidence_wiki.contract()["research_sessions"]
+        self.assertEqual("host_selected", profile["model_executor"])
+        self.assertIn("host-authenticated", profile["qualification"])
+        self.assertIn("unsupported", profile["acquisition"])
+        self.assertIn("explicit ResearchExecution", profile["advance_profile"])
+        profile["schemas"].clear()
+        self.assertEqual(10, len(evidence_wiki.contract()["research_sessions"]["schemas"]))
+
 
 class LibraryApiNegotiationBlockTests(unittest.TestCase):
     @classmethod
@@ -137,7 +146,7 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
 
     def test_the_block_is_version_gated_rather_than_introspected(self):
         self.assertEqual({"version", "surface", "matrix_version", "operations", "cli_only", "timeout_policy"}, set(self.block))
-        self.assertEqual("14", self.block["version"])
+        self.assertEqual("64", self.block["version"])
         self.assertEqual(contract_module.LIBRARY_API_VERSION, self.block["version"])
         # A JSON payload cannot carry the declaration tuple, so the surface has to
         # arrive as a list on both sides of the CLI boundary.
@@ -154,6 +163,23 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
                 self.assertTrue(name)
 
         expected = {
+            "HostRuntime.from_factory",
+            "host_backup_recovery.backup",
+            "host_backup_recovery.restore",
+            "recover_upgrade",
+            "protected_head",
+            "outcomes.ingest",
+            "outcomes.report",
+            "research_request",
+            "integration_documentation.reference",
+            "integration_documentation.render",
+            "integration_documentation.agent_input",
+            "integration_documentation.proposal",
+            "integration_documentation.resolve",
+            "integration_documentation.repair",
+            "agent_host_context.planner_input",
+            "agent_host_context.critic_input",
+            "agent_host_context.resolve",
             "workspace.open",
             "workspace.close",
             "workspace.versions",
@@ -162,12 +188,125 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "workspace.publish_selected",
             "workspace.doctor",
             "coverage.evaluate",
+            "coverage.init",
+            "coverage.link",
+            "coverage.revision",
             "grounding.verify",
             "normalize.verify",
+            "normalize.sources",
             "normalize.profiles",
             "normalize.validate_packet",
             "normalize.validate_execution",
             "normalize.validate_market",
+            "sources.inventory",
+            "sources.usability",
+            "sources.search",
+            "sources.build_index",
+            "sources.capture_bytes_document",
+            "sources.capture_path_document",
+            "sources.prepare_capture",
+            "sources.capture_revision",
+            "sources.resume_capture",
+            "source_requests.add",
+            "source_requests.list",
+            "source_requests.fulfill",
+            "source_requests.current",
+            "source_requests.prepare_acquisition",
+            "source_requests.reconcile_acquisition",
+            "source_requests.complete_acquisition",
+            "source_requests.link_current",
+            "source_requests.fulfill_current",
+            "questions.block_current",
+            "questions.reopen_current",
+            "strict.check",
+            "strict.admit",
+            "strict.diagnose",
+            "strict.prepare_review",
+            "strict.prepare_packet",
+            "strict.packet_schemas",
+            "strict.register_review",
+            "strict.export",
+            "strict.service_schemas",
+            "strict.repair_schemas",
+            "strict.resolution_schemas",
+            "strict.brief_schemas",
+            "research.session.review_services",
+            "host_qualification",
+            "strict_host.qualification",
+            "research.session.repair_progress",
+            "research.session.resolution",
+            "research.session.brief",
+            "research.session.prepare_delivery",
+            "research.session.deliver",
+            "research.session.delivery_status",
+            "research.session.reconcile_delivery",
+            "strict.review_status",
+            "strict.machine_compatibility",
+            "strict.supersede_review",
+            "strict.revoke_source",
+            "mutations.revision",
+            "mutations.prepare",
+            "mutations.submit",
+            "mutations.inspect",
+            "mutations.reconcile",
+            "research.current",
+            "research.requirements.current",
+            "research.changes",
+            "research.impact",
+            "research.command",
+            "research.command_schemas",
+            "research.semantic_schemas",
+            "research.session.semantic_report",
+            "research.performance_schemas",
+            "research.qualify_performance",
+            "research.schedule_refresh",
+            "research.refresh_schedule_schemas",
+            "research.schedule_refresh.current",
+            "research.schedule_refresh.poll",
+            "research.schedule_refresh.advance",
+            "research.refresh",
+            "research.refresh_schemas",
+            "research.session.refresh",
+            "research.history",
+            "research.requirements.prepare_revision",
+            "research.requirements.revise",
+            "research.next",
+            "research.recovery_status",
+            "research.reconcile_recovery",
+            "research.calculate",
+            "research.propose_calculation",
+            "research.run_cycle",
+            "research.session",
+            "research.session.current",
+            "research.session.recovery_status",
+            "research.session.reconcile_recovery",
+            "research.session.calculate",
+            "research.session.propose_calculation",
+            "research.session.assemble_review_packet",
+            "research.session.next",
+            "research.session.advance",
+            "research.session.run_until_terminal",
+            "research.session.run_cycle",
+            "research.session.acquire",
+            "research.session.acquire_evidence",
+            "research.session.choose_acquisition",
+            "research.session.run_acquisition",
+            "research.session.examine_coverage",
+            "research.session.examine_counterevidence",
+            "research.session.prepare_acquisition",
+            "research.session.host_job",
+            "research.session.pending",
+            "research.session.reconcile_pending",
+            "research.session.cancel_pending",
+            "research.session.intake_observation",
+            "research.session.report",
+            "research.session.close",
+            "research.telemetry.record",
+            "research.telemetry.report",
+            "research.telemetry.project",
+            "research.telemetry.deliver",
+            "research.telemetry.inspect",
+            "research.telemetry.retry",
             "usage.status",
             "usage.transact",
             "usage.check",
@@ -221,9 +360,26 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
         self.assertIn("artifact_schemas", payload)
 
     def test_every_declared_operation_resolves_and_has_one_boundary(self):
-        from evidence_wiki import Onboarding, Workspace, _facades
+        from evidence_wiki import (
+            AgentHostContext,
+            HostBackupRecovery,
+            IntegrationDocumentation,
+            Onboarding,
+            OutcomeIngestion,
+            Workspace,
+            _facades,
+        )
+        from evidence_wiki.refresh_scheduling import HostRefreshSchedule
+        from evidence_wiki.research_session import ResearchSession
+        from evidence_wiki.strict_host import StrictResearchHost
 
         owners = {
+            "HostRuntime": evidence_wiki.HostRuntime,
+            "strict_host": StrictResearchHost,
+            "host_backup_recovery": HostBackupRecovery,
+            "outcomes": OutcomeIngestion,
+            "integration_documentation": IntegrationDocumentation,
+            "agent_host_context": AgentHostContext,
             "workspace": Workspace, "coverage": _facades.CoverageNamespace,
             "grounding": _facades.GroundingNamespace, "normalize": _facades.NormalizeNamespace,
             "questions": _facades.QuestionsNamespace, "orchestrate": _facades.OrchestrateNamespace,
@@ -232,6 +388,15 @@ class LibraryApiNegotiationBlockTests(unittest.TestCase):
             "snapshots": _facades.SnapshotsNamespace,
             "temporal": _facades.TemporalNamespace,
             "assessments": _facades.AssessmentsNamespace,
+            "sources": _facades.SourcesNamespace,
+            "source_requests": _facades.SourceRequestsNamespace,
+            "strict": _facades.StrictNamespace,
+            "mutations": _facades.MutationsNamespace,
+            "research": _facades.ResearchNamespace,
+            "research.requirements": _facades.RequirementsNamespace,
+            "research.session": ResearchSession,
+            "research.schedule_refresh": HostRefreshSchedule,
+            "research.telemetry": _facades.TelemetryNamespace,
             "onboarding": Onboarding,
         }
         boundaries = self.block["operations"]

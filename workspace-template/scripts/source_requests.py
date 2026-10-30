@@ -97,7 +97,9 @@ import shlex
 import sys
 import uuid
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -142,6 +144,8 @@ from _delegation_gate import (
     live_pending_orders,
     require_sanctioned_mutation,
 )
+from _evidence_usage import current_view
+from _normalized_contract import STRUCTURED_VIEW_SUFFIX, safe_source_id, split_record
 from _orchestration_config import OrchestrationConfigError, is_delegated, orchestration_config
 from _order_claims import (
     OrderClaimError,
@@ -150,6 +154,7 @@ from _order_claims import (
     load_claims,
     record_fulfilment_claim,
 )
+from _owner_paths import checked_path
 from _request_kinds import BUILTIN_REQUEST_KINDS, RequestKindError, validate_kind
 from _request_scope import (
     RequestScopeError,
@@ -160,8 +165,8 @@ from _request_scope import (
     scope_equal,
     scope_match,
 )
-from _script_errors import emit_error, handle_system_exit, json_mode_requested, remediation_for
-from _usage_gate import require_host_intake
+from _script_errors import ScriptRefusal, emit_error, handle_system_exit, json_mode_requested, remediation_for
+from _usage_gate import normalized_relative, read_workspace_file, require_host_intake, source_decision
 from _workspace_locks import LockUnavailableError, workspace_lock
 from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_code
 
@@ -169,6 +174,8 @@ from source_failure_taxonomy import ATTEMPT_FAILURE_CODES, is_attempt_failure_co
 # validate against one definition. Kept as a module attribute because other scripts
 # and tests read source_requests.REQUEST_KINDS.
 REQUEST_KINDS = BUILTIN_REQUEST_KINDS
+MAX_PUBLIC_ARGUMENT_BYTES = 1_048_576
+MAX_PUBLIC_ITEMS = 256
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1859,9 +1866,9 @@ def relative_label(project_root: Path, path: Path) -> str:
         return path.as_posix()
 
 
-def run_add(args: argparse.Namespace) -> dict[str, Any]:
+def run_add(args: argparse.Namespace, *, _config: dict[str, Any] | None = None) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
-    config = load_config(project_root)
+    config = load_config(project_root) if _config is None else _config
     path = requests_path(project_root, config)
 
     # Both raise before the lock is taken, so an unusable kind or scope costs nothing.
@@ -1939,9 +1946,9 @@ def matches_scope_filter(record: dict[str, Any], scope_filter: dict[str, str]) -
     return all(record_scope.get(key) == value for key, value in scope_filter.items())
 
 
-def run_list(args: argparse.Namespace) -> dict[str, Any]:
+def run_list(args: argparse.Namespace, *, _config: dict[str, Any] | None = None) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
-    config = load_config(project_root)
+    config = load_config(project_root) if _config is None else _config
     path = requests_path(project_root, config)
 
     # Validated against the same registry `add` writes through, so a filter can never
@@ -2079,10 +2086,14 @@ def check_fulfill_scope(
             )
 
 
-def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
+def run_fulfill(args: argparse.Namespace, *, _config: dict[str, Any] | None = None,
+                _current_use=None) -> dict[str, Any]:
     project_root = Path(args.project_root).expanduser().resolve()
-    config = load_config(project_root)
-    require_host_intake(config)
+    config = load_config(project_root) if _config is None else _config
+    if _current_use is None:
+        require_host_intake(config)
+    else:
+        _current_use()
     path = requests_path(project_root, config)
 
     request_id = args.request_id.strip()
@@ -2160,6 +2171,11 @@ def run_fulfill(args: argparse.Namespace) -> dict[str, Any]:
             asserted_scope,
             require_scope=bool(getattr(args, "require_scope", False)),
         )
+
+        if getattr(args, "_before_write", None) is not None:
+            args._before_write()
+        if _current_use is not None:
+            _current_use()
 
         now = timestamp_utc()
         if contingent is not None:
@@ -2364,6 +2380,337 @@ def run_plan_fetch(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_routes": candidate_routes,
         "warnings": warnings,
     }
+
+
+def _argument_invalid(field: str, code: str = "REQUEST_ARGUMENT_INVALID") -> None:
+    raise ScriptRefusal(code, "Source request arguments are invalid.", recoverable=False,
+        details={"field": field}, remediation="Supply bounded strings, valid choices and explicit scope mappings.",
+        exit_code=EXIT_INVALID)
+
+
+def _argument_text(value: Any, field: str, maximum: int = 4096) -> str:
+    if type(value) is not str or not value.strip() or len(value) > maximum or "\0" in value:
+        _argument_invalid(field)
+    return value
+
+
+def _argument_list(value: Any, field: str, *, maximum: int = 4096) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_PUBLIC_ITEMS:
+        _argument_invalid(field)
+    return [_argument_text(item, field, maximum) for item in value]
+
+
+def _argument_scope(value: Any, field: str) -> list[str] | None:
+    if value is None:
+        return None
+    if type(value) is not dict or len(value) > MAX_PUBLIC_ITEMS:
+        _argument_invalid(field, "REQUEST_SCOPE_INVALID")
+    pairs = []
+    for key, item in value.items():
+        key = _argument_text(key, field, 128)
+        item = _argument_text(item, field)
+        if "=" in key:
+            _argument_invalid(field, "REQUEST_SCOPE_INVALID")
+        pairs.append(key + "=" + item)
+    # Preserve the canonical key, duplicate and whitespace rules.
+    parse_scope_pairs(pairs)
+    return pairs
+
+
+def _public_arguments(project_root: str | Path, **fields: Any) -> SimpleNamespace:
+    if not isinstance(project_root, (str, Path)) or not str(project_root) or "\0" in str(project_root):
+        _argument_invalid("project_root")
+    fields["project_root"] = str(project_root)
+    try:
+        raw = json.dumps(fields, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        _argument_invalid("arguments")
+    if len(raw) > MAX_PUBLIC_ARGUMENT_BYTES:
+        _argument_invalid("arguments")
+    return SimpleNamespace(**fields)
+
+
+def _path_refused(field: str) -> None:
+    raise ScriptRefusal("WORKSPACE_PATH_REFUSED", "The configured workspace path cannot be used.",
+        exit_code=EXIT_INVALID, recoverable=False, details={"field": field, "reason": "configured_path_invalid"},
+        remediation="Use ordinary workspace-relative paths without linked or escaped data, metadata or locks.")
+
+
+def _checked_lock_paths(project_root: Path, lock_path: Path, field: str) -> None:
+    for suffix in ("", ".holder.json", ".exclusive"):
+        checked_path(project_root, lock_path.with_name(lock_path.name + suffix), field=field, kind="file")
+    checked_path(project_root, lock_path.with_name(lock_path.name + ".exclusive.removal-guard"),
+                 field=field, kind="directory")
+
+
+def _checked_tree(project_root: Path, value: str | Path, field: str, *, bound_bytes: bool = False) -> None:
+    root = checked_path(project_root, value, field=field, kind="directory")
+    pending, count = [root], 0
+    total = 0
+    while pending:
+        directory = pending.pop()
+        checked_path(project_root, directory, field=field, kind="directory")
+        if not directory.exists():
+            continue
+        for child in directory.iterdir():
+            count += 1
+            if count > 4096:
+                _path_refused(field)
+            checked_path(project_root, child, field=field)
+            if child.is_dir():
+                pending.append(child)
+            elif bound_bytes:
+                size = child.stat().st_size
+                total += size
+                if size > 16 * 1024 * 1024 or total > 64 * 1024 * 1024:
+                    _path_refused(field)
+
+
+def _checked_records(path: Path, field: str, reader):
+    if not path.exists():
+        return []
+    if path.stat().st_size > 8 * 1024 * 1024:
+        _path_refused(field)
+    records = list(reader())
+    if len(records) > 4096:
+        _path_refused(field)
+    return records
+
+
+def _checked_source_inputs(project_root: Path, config: dict[str, Any], source_ids: list[str] | None) -> None:
+    sources = config.get("sources") if isinstance(config.get("sources"), dict) else {}
+    try:
+        normalized = project_root / validate_generated_sources_path(sources.get("normalized_dir", "sources/normalized"),
+                                                                   "sources.normalized_dir")
+    except (SystemExit, TypeError, ValueError):
+        _path_refused("normalized_dir")
+    checked_path(project_root, normalized, field="normalized_dir", kind="directory")
+    if not source_ids:
+        return
+    selected = set(source_ids)
+    for identifier in selected:
+        stem = safe_source_id(identifier)
+        checked_path(project_root, normalized / (stem + ".md"), field="normalized_record", kind="file")
+        checked_path(project_root, normalized / (stem + STRUCTURED_VIEW_SUFFIX), field="normalized_sidecar", kind="file")
+    records = _checked_records(manifest_path(project_root, config), "source_manifest",
+                               lambda: iter_manifest_records(project_root, config))
+    for record in records:
+        if record.get("id") not in selected:
+            continue
+        raw_paths = record.get("raw_paths", [])
+        if not isinstance(raw_paths, list) or len(raw_paths) > MAX_PUBLIC_ITEMS:
+            _path_refused("source_inputs")
+        for value in raw_paths:
+            if type(value) is not str:
+                _path_refused("source_inputs")
+            checked_path(project_root, value, field="source_input")
+            checked_path(project_root, value + ".provenance.yml", field="source_sidecar", kind="file")
+        metadata = [record, record.get("metadata"), record.get("provenance")]
+        additional = record.get("additional_provenance", [])
+        if not isinstance(additional, list) or len(additional) > MAX_PUBLIC_ITEMS:
+            _path_refused("source_metadata")
+        metadata.extend(additional)
+        for document in metadata:
+            if not isinstance(document, dict):
+                continue
+            for key in ("normalized_path", "metadata_path", "sidecar_path", "record_path"):
+                if key in document and document[key] is not None:
+                    if type(document[key]) is not str:
+                        _path_refused("source_metadata")
+                    checked_path(project_root, document[key], field="source_metadata", kind="file")
+
+
+def _checked_request_paths(project_root: Path, config: dict[str, Any], *, question_slugs: list[str] | None = None,
+                           source_ids: list[str] | None = None) -> None:
+    """Qualify actual configured paths for new APIs without altering CLI policy."""
+    try:
+        request_store = requests_path(project_root, config)
+        source_manifest = manifest_path(project_root, config)
+        coverage = coverage_dir_path(project_root, config)
+        questions = questions_directory(project_root, config)
+    except (SystemExit, ValueError, TypeError):
+        _path_refused("configured_stores")
+    checked_path(project_root, request_store, field="source_requests_path", kind="file")
+    checked_path(project_root, source_manifest, field="manifest_path", kind="file")
+    checked_path(project_root, coverage, field="coverage_dir", kind="directory")
+    checked_path(project_root, questions, field="questions_dir", kind="directory")
+    slugs = list(question_slugs or [])
+    records = _checked_records(request_store, "source_requests", lambda: load_requests(request_store))
+    for record in records:
+        linked = record.get("question_slugs", [])
+        if linked is None:
+            continue
+        if not isinstance(linked, list) or len(linked) > MAX_PUBLIC_ITEMS:
+            _path_refused("question_links")
+        if any(type(slug) is not str or SAFE_OUTPUT_ID_RE.fullmatch(slug.strip()) is None for slug in linked):
+            _path_refused("question_links")
+        slugs.extend(linked)
+    for slug in dict.fromkeys(slugs):
+        checked_path(project_root, questions / (slug.strip() + ".md"), field="question", kind="file")
+    checked_path(project_root, project_root / "log.md", field="log", kind="file")
+    _checked_lock_paths(project_root, source_requests_lock_path(request_store), "request_lock")
+    _checked_lock_paths(project_root, project_root / ".locks/log.lock", "log_lock")
+    for name in ("workspace-system.yml", ".evidence-wiki.yml", "domain-packs/.evidence-wiki-state.yml",
+                 "domain-packs/.evidence-wiki-transaction.yml"):
+        checked_path(project_root, name, field="workspace_metadata", kind="file")
+    _checked_tree(project_root, "runs", "control_tree")
+    _checked_source_inputs(project_root, config, source_ids)
+
+
+def _checked_request_config(project_root: str | Path, *, question_slugs: list[str] | None = None,
+                            source_ids: list[str] | None = None) -> tuple[Path, dict[str, Any]]:
+    supplied = Path(project_root).expanduser().absolute()
+    root = checked_path(supplied, supplied, field="project_root", kind="directory")
+    checked_path(root, "research.yml", field="research_config", kind="file")
+    config = load_config(root)
+    _checked_request_paths(root, config, question_slugs=question_slugs, source_ids=source_ids)
+    return root, config
+
+
+def _public_seam(*, write: bool):
+    def decorate(operation):
+        @wraps(operation)
+        def call(*args, **kwargs):
+            try:
+                return operation(*args, **kwargs)
+            except (DelegationGateError, RequestKindError, RequestScopeError) as exc:
+                raise ScriptRefusal(exc.error_code, exc.message, remediation=exc.remediation,
+                                    details=exc.details, exit_code=EXIT_INVALID) from exc
+            except LockUnavailableError as exc:
+                raise ScriptRefusal(exc.error_code, str(exc), details=exc.details,
+                                    exit_code=EXIT_INVALID) from exc
+            except SystemExit as exc:
+                raise ScriptRefusal.from_system_exit(exc, exit_code=EXIT_INVALID) from exc
+            except OSError:
+                code = "REQUEST_MUTATION_UNCERTAIN" if write else "REQUEST_INPUT_UNREADABLE"
+                details = {"commit_outcome": "unknown"} if write else {}
+                raise ScriptRefusal(code, "Source request operation did not return a complete result.",
+                    recoverable=False, details=details, exit_code=EXIT_INVALID,
+                    remediation="Inspect current request state before retrying; preserve retained owner records.") from None
+        return call
+    return decorate
+
+
+@_public_seam(write=True)
+def run_add_request(project_root: str | Path, *, kind: str, query_or_identifier: str, rationale: str,
+                    priority: str = "medium", question_slugs: list[str] | None = None,
+                    scope: dict[str, str] | None = None) -> dict[str, Any]:
+    """Record one request through the canonical engine, without parser or rendering."""
+    if type(priority) is not str or priority not in REQUEST_PRIORITIES:
+        _argument_invalid("priority", "REQUEST_PRIORITY_INVALID")
+    slugs = _argument_list(question_slugs, "question_slugs", maximum=128)
+    if any(SAFE_OUTPUT_ID_RE.fullmatch(value.strip()) is None for value in slugs or []):
+        _argument_invalid("question_slugs")
+    arguments = _public_arguments(project_root, kind=_argument_text(kind, "kind", 256),
+        query_or_identifier=_argument_text(query_or_identifier, "query_or_identifier"),
+        rationale=_argument_text(rationale, "rationale"), priority=priority, question_slugs=slugs,
+        scope=_argument_scope(scope, "scope"))
+    root, config = _checked_request_config(project_root, question_slugs=slugs)
+    arguments.project_root = str(root)
+    return run_add(arguments, _config=config)
+
+
+@_public_seam(write=False)
+def run_list_requests(project_root: str | Path, *, statuses: list[str] | None = None,
+                      kinds: list[str] | None = None, scope: dict[str, str] | None = None) -> dict[str, Any]:
+    """List requests with the same kind registry and scope matcher as the CLI."""
+    selected = _argument_list(statuses, "statuses", maximum=32)
+    if any(value not in REQUEST_STATUSES for value in selected or []):
+        _argument_invalid("statuses", "REQUEST_STATUS_INVALID")
+    arguments = _public_arguments(project_root, status=selected,
+        kind=_argument_list(kinds, "kinds", maximum=256), scope=_argument_scope(scope, "scope"))
+    root, config = _checked_request_config(project_root)
+    arguments.project_root = str(root)
+    return run_list(arguments, _config=config)
+
+
+@_public_seam(write=True)
+def run_link_request(project_root: str | Path, *, request_id: str, question_slugs: list[str],
+                     scope: dict[str, str] | None = None, _before_write=None) -> dict[str, Any]:
+    """Link an existing open request with exactly unchanged declared scope."""
+    arguments = _public_arguments(project_root,
+        request_id=_argument_text(request_id, "request_id", 128),
+        question_slugs=_argument_list(question_slugs, "question_slugs", maximum=128),
+        scope=_argument_scope(scope, "scope"))
+    root, config = _checked_request_config(project_root, question_slugs=question_slugs)
+    path = requests_path(root, config)
+    slugs = validate_question_slugs(root, config, question_slugs)
+    if not slugs:
+        _argument_invalid("question_slugs")
+    declared = parse_scope_pairs(arguments.scope)
+    with workspace_lock(source_requests_lock_path(path), purpose="source request mutation"):
+        records = load_requests(path)
+        target = next((row for row in records if row.get("request_id") == request_id), None)
+        if target is None or target.get("status") != "open":
+            raise SystemExit("Request linking requires an existing open request.")
+        if normalize_scope(target.get("scope")) != declared:
+            raise SystemExit("Request link scope must equal the retained declared scope.")
+        require_in_order_request_mutation(root, config, request_id)
+        missing = [slug for slug in slugs if slug not in (target.get("question_slugs") or [])]
+        if missing and live_pending_orders(root):
+            raise SystemExit("Existing request links are frozen by an active managed session.")
+        if _before_write is not None:
+            _before_write()
+        if not missing:
+            return {"schema_version": SCHEMA_VERSION, "action": "link", "updated": False,
+                "request": target, "requests_path": relative_label(root, path)}
+        now = timestamp_utc()
+        target["question_slugs"] = list(dict.fromkeys([*(target.get("question_slugs") or []), *missing]))
+        target["updated_at"] = now
+        _write_requests_unlocked(path, records)
+    append_log_entry(root / "log.md", f"## [{now.split('T', 1)[0]}] source-request | Linked source request\n\n"
+        f"- Request: `{request_id}`\n- Questions: {', '.join(missing)}.\n")
+    return {"schema_version": SCHEMA_VERSION, "action": "link", "updated": True,
+        "request": target, "requests_path": relative_label(root, path)}
+
+
+@_public_seam(write=True)
+def run_fulfill_current_request(project_root: str | Path, *, request_id: str, source_id: str,
+                                match_scope: dict[str, str] | None = None, _before_write=None) -> dict[str, Any]:
+    """Own authenticated current-use bookkeeping through the complete native commit."""
+    arguments = _public_arguments(project_root,
+        request_id=_argument_text(request_id, "request_id", 128),
+        source_id=_argument_text(source_id, "source_id", 512),
+        match_scope=_argument_scope(match_scope, "match_scope"), require_scope=True)
+    root, config = _checked_request_config(project_root, source_ids=[source_id])
+    arguments.project_root, arguments._before_write = str(root), _before_write
+    normalized_path = normalized_relative(config, source_id)
+    original = read_workspace_file(root, normalized_path)
+    metadata, _body, error = split_record(original.decode("utf-8"))
+    if error or metadata is None:
+        raise SystemExit("Current fulfillment requires a valid normalized record.")
+    manifest = next((row for row in iter_manifest_records(root, config) if row.get("id") == source_id), None)
+    if manifest is None:
+        raise SystemExit("Current fulfillment requires a manifest source.")
+    with current_view(root, config) as view:
+        def require_current():
+            view.revalidate(root, config)
+            if read_workspace_file(root, normalized_path) != original:
+                raise SystemExit("Current fulfillment source changed before bookkeeping.")
+            decision = source_decision(root, config, source_id, [manifest, metadata], view=view,
+                normalized=original, uses=["retrieval"], purpose="research")
+            if decision.get("eligible") is not True or decision.get("complete") is not True:
+                raise SystemExit("Current fulfillment source permission is unavailable.")
+        require_current()
+        return run_fulfill(arguments, _config=config, _current_use=require_current)
+
+
+@_public_seam(write=True)
+def run_fulfill_request(project_root: str | Path, *, request_id: str, source_id: str,
+                        match_scope: dict[str, str] | None = None, require_scope: bool = False,
+                        _before_write=None) -> dict[str, Any]:
+    """Preserve canonical scope checks, locking and delegated contingent claims."""
+    if type(require_scope) is not bool:
+        _argument_invalid("require_scope")
+    arguments = _public_arguments(project_root,
+        request_id=_argument_text(request_id, "request_id", 256), source_id=_argument_text(source_id, "source_id", 512),
+        match_scope=_argument_scope(match_scope, "match_scope"), require_scope=require_scope)
+    root, config = _checked_request_config(project_root, source_ids=[arguments.source_id.strip()])
+    arguments.project_root = str(root)
+    arguments._before_write = _before_write
+    return run_fulfill(arguments, _config=config)
 
 
 def render_text_report(report: dict[str, Any]) -> str:

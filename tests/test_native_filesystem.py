@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,39 @@ def test_adapter_does_not_modify_the_standard_os_module():
         assert os.open in os.supports_dir_fd and standard_os.open not in standard_os.supports_dir_fd
     else:
         assert os is standard_os
+
+
+@pytest.mark.parametrize("closing_changed", [False, True])
+def test_configuration_read_keeps_native_metadata_and_closing_change_checks(tmp_path, monkeypatch, closing_changed):
+    from evidence_wiki import _filesystem, _pack_io, _review_dependency_inputs
+    from evidence_wiki.workflow_contracts import WorkflowContractError
+
+    path = tmp_path / "research.yml"
+    raw = b"title: Current configuration\n"
+    path.write_bytes(raw)
+    original_stat, original_fstat = _filesystem.metadata_stat, _pack_io.metadata_fstat
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    reads = []
+
+    def native_metadata(observed, change=42):
+        return SimpleNamespace(**{name: getattr(observed, name) for name in fields}, native_change_time_ns=change)
+
+    def observe(selected, **kwargs):
+        reads.append(selected)
+        return native_metadata(original_stat(selected, **kwargs), 43 if closing_changed and len(reads) > 1 else 42)
+
+    monkeypatch.setattr(_filesystem, "metadata_stat", observe)
+    monkeypatch.setattr(_pack_io, "metadata_fstat", lambda descriptor: native_metadata(original_fstat(descriptor)))
+    holder = object.__new__(_review_dependency_inputs._Inputs)
+    holder._root = tmp_path
+    holder._context = SimpleNamespace(require_path=lambda selected: None)
+    if closing_changed:
+        with pytest.raises(WorkflowContractError) as refused:
+            holder._configuration()
+        assert refused.value.error_code == "RESEARCH_REVIEW_DEPENDENCY_INPUTS_CHANGED"
+    else:
+        assert holder._configuration() == raw
+    assert reads == [path, path]
 
 
 def test_batched_reads_observe_current_bytes_and_reject_links(tmp_path):
