@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ MAX_NODE_ID_UNITS = 1024
 _collected = []
 _executed = []
 _case_outcomes = {}
+_terminated = False
 
 
 def progress(event):
@@ -20,6 +22,29 @@ def progress(event):
     if target:
         with Path(target).with_suffix(".progress.jsonl").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(event) + "\n")
+
+
+def _ignore_signal(signum, frame):
+    """Not SIG_IGN: a caught signal resets on exec, so cleanup's own children stay stoppable."""
+
+
+def pytest_sessionstart(session):
+    """Unwind fixtures on a terminate signal; a terminated process claims no record."""
+    owner = os.getpid()
+
+    def terminate(signum, frame):
+        global _terminated
+        if os.getpid() != owner:
+            # A fork inherits this handler but must not unwind pytest's copied stack.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        signal.signal(signal.SIGTERM, _ignore_signal)
+        _terminated = True
+        session.shouldstop = "terminated at the process limit"
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, terminate)
 
 
 def pytest_collection_modifyitems(items):
@@ -58,8 +83,9 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    signal.signal(signal.SIGTERM, _ignore_signal)
     target = os.environ.get("EVIDENCE_WIKI_SUITE_RECORD")
-    if not target:
+    if not target or _terminated:
         return
     memory = {"process_peak_bytes": None, "child_peak_bytes": None,
               "scope": "per-process high-water marks, not aggregate concurrent memory"}

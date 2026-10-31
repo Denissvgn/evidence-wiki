@@ -1,7 +1,10 @@
 """The grouped suite gate retains failures and its complete execution inventory."""
 
 import json
+import os
 import shutil
+import signal
+import time
 from pathlib import Path
 
 import pytest
@@ -135,3 +138,177 @@ def test_timeout_retains_the_active_case_and_prior_failure(tmp_path):
     assert [row for row in rows if row["event"] == "started"][-1]["nodeid"].endswith("::test_waiting")
     assert not any(row["phase"] == "call" for row in rows
                    if row["event"] == "report" and row["nodeid"].endswith("::test_waiting"))
+
+
+def process_row(ppid, pgid, start="s", state="S"):
+    return {"state": state, "ppid": ppid, "pgid": pgid, "start": start, "command": "python"}
+
+
+def test_live_tree_follows_links_but_not_recycled_or_exited_processes():
+    tracked = {10: process_row(1, 1)}
+    table = {
+        10: process_row(1, 1),
+        11: process_row(10, 11),  # Detached child, still linked by its parent.
+        12: process_row(11, 12),  # Nested session under the detached child.
+        13: process_row(1, 11),  # Orphan that keeps the group of a tracked leader.
+        14: process_row(11, 14, state="Z"),  # Exited but unreaped: holds no resources.
+        20: process_row(1, 20),  # Unrelated.
+        21: process_row(20, 20),  # Unrelated member of an unrelated group.
+        22: process_row(1, 1),  # Shares only the group of pytest's parent.
+    }
+    assert set(GROUPS.live_tree(table, tracked)) == {10, 11, 12, 13}
+    # The leader exits and its group ID stays reserved by the orphan.
+    del table[11], table[12]
+    assert set(GROUPS.live_tree(table, tracked)) == {10, 13}
+    # A recycled PID is a new process, as are its children and group.
+    recycled = {10: process_row(1, 1), 11: process_row(1, 11, start="later"), 30: process_row(11, 11)}
+    assert set(GROUPS.live_tree(recycled, tracked)) == {10}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="The process table is read on POSIX only.")
+def test_process_table_reports_this_process_stably():
+    first, second = GROUPS.process_table(), GROUPS.process_table()
+    row = first[os.getpid()]
+    assert (row["ppid"], row["pgid"]) == (os.getppid(), os.getpgid(0))
+    assert row["start"] and row["command"]
+    assert second[os.getpid()]["start"] == row["start"]
+    assert not row["state"].startswith("Z")
+
+
+HOLDER_SOURCE = """
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).parents[1]
+HOLDER = ("import os,subprocess,sys,time\\n"
+          "os.write(os.open(sys.argv[1],os.O_WRONLY),(str(os.getpid())+chr(10)).encode())\\n"
+          "if sys.argv[2:]:\\n"
+          "    subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]],start_new_session=True)\\n"
+          "time.sleep(300)\\n")
+
+
+def start_detached_tree():
+    return subprocess.Popen([sys.executable, "-c", HOLDER, str(ROOT / "holders"), HOLDER],
+                            start_new_session=True, stdin=subprocess.DEVNULL)
+
+
+def wait_for_limit():
+    time.sleep(300)
+"""
+
+
+def timed_out_repo(tmp_path, body):
+    root = tmp_path / "repo"
+    (root / "tools").mkdir(parents=True)
+    (root / "tests").mkdir()
+    shutil.copyfile(ROOT / "tools/_suite_plugin.py", root / "tools/_suite_plugin.py")
+    (root / "tests/test_held.py").write_text(HOLDER_SOURCE + body, encoding="utf-8")
+    os.mkfifo(root / "holders")
+    return root, os.open(root / "holders", os.O_RDONLY | os.O_NONBLOCK)
+
+
+def holders_after_run(reader):
+    """End-of-file needs every write end closed, which only process exit does for a holder."""
+    data, closed = b"", False
+    deadline = time.monotonic() + 10
+    while not closed and time.monotonic() < deadline:
+        try:
+            chunk = os.read(reader, 4096)
+        except BlockingIOError:
+            time.sleep(0.05)
+            continue
+        data += chunk
+        closed = not chunk
+    os.close(reader)
+    pids = [int(value) for value in data.split()]
+    if not closed:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return pids, closed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Detached sessions and named pipes require POSIX.")
+def test_timeout_unwinds_fixtures_and_removes_orphaned_detached_descendants(tmp_path):
+    """Cleanup stops its direct child only, so a nested session outlives pytest as an orphan."""
+    root, reader = timed_out_repo(tmp_path, """
+def test_held():
+    child = start_detached_tree()
+    try:
+        wait_for_limit()
+    finally:
+        os.killpg(child.pid, signal.SIGTERM)
+        (ROOT / "cleanup-ran").write_text("yes")
+""")
+    (root / "tests/test_later.py").write_text("def test_later():\n    pass\n", encoding="utf-8")
+    output = tmp_path / "evidence"
+    code = GROUPS.main(["--root", str(root), "--output", str(output), "--group-size", "1", "--timeout", "10"])
+    pids, closed = holders_after_run(reader)
+    assert len(pids) == 2
+    assert closed, "a detached descendant outlived the timed-out group"
+    assert (root / "cleanup-ran").read_text() == "yes"
+    report = json.loads((output / "manifest.json").read_text())
+    assert code == 1 and report["status"] == "failed"
+    row, later = report["groups"]
+    assert later["exit_code"] == 0 and later["execution_complete"] and "timeout_cleanup" not in later
+    assert set(row) == {"label", "command", "exit_code", "seconds", "log", "record", "missing_record",
+                        "selection_matches", "execution_complete", "timeout_cleanup"}
+    assert row["exit_code"] == 124
+    assert not row["selection_matches"] and not row["execution_complete"]
+    assert not Path(row["record"]).exists()
+    cleanup = row["timeout_cleanup"]
+    assert cleanup["exited_in_grace"] and cleanup["survivors"] == []
+    assert [entry["pid"] for entry in cleanup["forced"]] == [pids[1]]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Detached sessions and named pipes require POSIX.")
+def test_timeout_kills_the_detached_tree_when_pytest_refuses_to_unwind(tmp_path):
+    root, reader = timed_out_repo(tmp_path, """
+def test_held():
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    start_detached_tree()
+    wait_for_limit()
+""")
+    output = tmp_path / "evidence"
+    output.mkdir()
+    row = GROUPS.run(root, output, "refused", ["tests"], timeout=10, grace=1)
+    pids, closed = holders_after_run(reader)
+    assert len(pids) == 2
+    assert closed, "a detached descendant outlived the forced stop"
+    assert row["exit_code"] == 124 and "missing_record" in row
+    cleanup = row["timeout_cleanup"]
+    assert not cleanup["exited_in_grace"] and cleanup["survivors"] == []
+    assert set(pids) < {entry["pid"] for entry in cleanup["forced"]}
+    assert row["seconds"] < 10 + 1 + 2 * GROUPS.KILL_CONFIRMATION
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Forked children require POSIX.")
+def test_forked_child_keeps_default_termination(tmp_path):
+    root = tmp_path / "repo"
+    (root / "tools").mkdir(parents=True)
+    (root / "tests").mkdir()
+    output = tmp_path / "evidence"
+    output.mkdir()
+    shutil.copyfile(ROOT / "tools/_suite_plugin.py", root / "tools/_suite_plugin.py")
+    (root / "tests/test_forked.py").write_text(
+        "import os, signal, time\n"
+        "def test_forked():\n"
+        "    reader, writer = os.pipe()\n"
+        "    pid = os.fork()\n"
+        "    if pid == 0:\n"
+        "        os.write(writer, b'ready')\n"
+        "        time.sleep(60)\n"
+        "        os._exit(0)\n"
+        "    os.read(reader, 5)\n"
+        "    os.kill(pid, signal.SIGTERM)\n"
+        "    status = os.waitpid(pid, 0)[1]\n"
+        "    assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == signal.SIGTERM\n", encoding="utf-8")
+    row = GROUPS.run(root, output, "forked", ["tests"], timeout=60)
+    assert row["exit_code"] == 0, Path(row["log"]).read_text()
+    assert row["result"]["executed"] == ["tests/test_forked.py::test_forked"]
