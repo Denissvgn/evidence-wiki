@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -18,6 +19,8 @@ COMBINED_MODULES = (
     "tests/test_script_loader.py", "tests/test_script_host.py", "tests/test_library_workspace.py",
     "tests/test_provider_contract.py", "tests/test_provider_plugins.py",
 )
+TIMEOUT_GRACE = 30.0
+KILL_CONFIRMATION = 5.0
 
 
 def source_identity(root: Path) -> dict:
@@ -46,8 +49,123 @@ def groups(nodes: list[str], limit: int) -> list[list[str]]:
     return result
 
 
+def process_table() -> dict[int, dict] | None:
+    """Read live processes; a start time tells a recycled PID apart. None means unknown."""
+    if os.name != "posix":
+        return None
+    table = {}
+    try:
+        if Path("/proc/self/stat").is_file():
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                command, fields = stat.split("(", 1)[1].rsplit(")", 1)
+                state, ppid, pgid, *rest = fields.split()
+                table[int(entry.name)] = {"state": state, "ppid": int(ppid), "pgid": int(pgid),
+                                          "start": rest[16], "command": command}
+            return table
+        listing = subprocess.run(["/bin/ps", "-axww", "-o", "pid=,ppid=,pgid=,state=,lstart=,ucomm="],  # noqa: S603 - fixed read-only process inventory.
+                                 env={"LC_ALL": "C"}, capture_output=True, encoding="utf-8", errors="replace",
+                                 timeout=10, check=False)
+        if listing.returncode:
+            return None
+        for line in listing.stdout.splitlines():
+            pid, ppid, pgid, state, *started = line.split(None, 9)
+            table[int(pid)] = {"state": state, "ppid": int(ppid), "pgid": int(pgid),
+                               "start": " ".join(started[:5]), "command": " ".join(started[5:])}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+    return table
+
+
+def live_tree(table: dict[int, dict], tracked: dict[int, dict]) -> dict[int, dict]:
+    """Extend tracked processes through parent and process-group links; return those running."""
+    def current(pid):
+        return pid in tracked and pid in table and table[pid]["start"] == tracked[pid]["start"]
+
+    grew = True
+    while grew:
+        grew = False
+        for pid, row in table.items():
+            # A process-group ID stays reserved while a member lives, even after its leader exits.
+            in_group = row["pgid"] in tracked and (row["pgid"] not in table or current(row["pgid"]))
+            if not current(pid) and (current(row["ppid"]) or in_group):
+                tracked[pid] = row
+                grew = True
+    return {pid: row for pid, row in table.items() if current(pid) and not row["state"].startswith("Z")}
+
+
+def stop_process_tree(process: subprocess.Popen, grace: float) -> dict:
+    """Let pytest unwind, then kill everything still linked to it and record what remains.
+
+    Detached children have their own sessions, so neither pytest's exit nor its process group
+    reaches them, and an orphan loses the parent link that names it. The table is therefore read
+    from the limit onward, before any link is lost. A process orphaned earlier cannot be named.
+    """
+    started = time.perf_counter()
+    tracked: dict[int, dict] = {}
+
+    def observe():
+        table = process_table()
+        if table is None:
+            return None
+        if process.returncode is None and process.pid in table:
+            tracked.setdefault(process.pid, table[process.pid])
+        return live_tree(table, tracked)
+
+    forced: dict[int, dict] = {}
+    try:
+        observe()
+        process.terminate()
+        deadline = time.monotonic() + grace
+        while process.poll() is None and time.monotonic() < deadline:
+            observe()
+            time.sleep(0.2)
+        exited = process.poll() is not None
+        # Freeze until the set stops growing so that nothing can fork away from the kill.
+        deadline = time.monotonic() + KILL_CONFIRMATION
+        while time.monotonic() < deadline:
+            fresh = {pid: row for pid, row in (observe() or {}).items() if pid not in forced}
+            if not fresh:
+                break
+            for pid in fresh:
+                _send(pid, signal.SIGSTOP)
+            forced.update(fresh)
+        for pid in forced:
+            _send(pid, signal.SIGKILL)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    try:
+        process.wait(timeout=KILL_CONFIRMATION)
+    except subprocess.TimeoutExpired:
+        pass
+    deadline = time.monotonic() + KILL_CONFIRMATION
+    survivors = observe()
+    while survivors and time.monotonic() < deadline:
+        time.sleep(0.05)
+        survivors = observe()
+    return {"grace_seconds": grace, "seconds": time.perf_counter() - started, "exited_in_grace": exited,
+            "forced": _described(forced), "survivors": None if survivors is None else _described(survivors)}
+
+
+def _send(pid: int, number: int) -> None:
+    try:
+        os.kill(pid, number)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _described(rows: dict[int, dict]) -> list[dict]:
+    return [{"pid": pid, "command": row["command"]} for pid, row in sorted(rows.items())]
+
+
 def run(root: Path, output: Path, label: str, targets: list[str], *, coverage: bool = False,
-        collect: bool = False, timeout: float = 1800) -> dict:
+        collect: bool = False, timeout: float = 1800, grace: float = TIMEOUT_GRACE) -> dict:
     log, record = output / f"{label}.log", output / f"{label}.json"
     command = [sys.executable, "-m"]
     command += ["coverage", "run", "-m", "pytest"] if coverage else ["pytest"]
@@ -62,15 +180,24 @@ def run(root: Path, output: Path, label: str, targets: list[str], *, coverage: b
     environment = dict(os.environ, EVIDENCE_WIKI_SUITE_RECORD=str(record))
     environment["PYTHONPATH"] = os.pathsep.join((str(root), str(root / "src"), environment.get("PYTHONPATH", "")))
     started = time.perf_counter()
+    cleanup = None
     with log.open("w", encoding="utf-8", newline="\n") as stream:
+        process = subprocess.Popen(command, cwd=root, env=environment, stdout=stream,  # noqa: S603 - explicit pytest argv.
+                                   stderr=subprocess.STDOUT)
         try:
-            completed = subprocess.run(command, cwd=root, env=environment, stdout=stream,  # noqa: S603 - explicit pytest argv.
-                                       stderr=subprocess.STDOUT, timeout=timeout, check=False)
-            code = completed.returncode
+            code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             code = 124
+            cleanup = stop_process_tree(process, grace)
+        except BaseException:
+            stop_process_tree(process, grace)
+            raise
     result = {"label": label, "command": command, "exit_code": code,
               "seconds": time.perf_counter() - started, "log": str(log), "record": str(record)}
+    if cleanup is not None:
+        result["timeout_cleanup"] = cleanup
+        if cleanup["survivors"] is None or cleanup["survivors"]:
+            print(f"{label}: timeout cleanup left {cleanup['survivors'] or 'an unknown process set'}", flush=True)
     if record.is_file():
         result["result"] = json.loads(record.read_text(encoding="utf-8"))
     else:
