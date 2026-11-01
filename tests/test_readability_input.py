@@ -13,9 +13,11 @@ from evidence_wiki import execution_accounting as accounting
 from evidence_wiki import readability_execution as execution
 from evidence_wiki import research_execution, resolution_evidence
 from evidence_wiki import resolution_operations as resolution
+from evidence_wiki.cli import main
 from evidence_wiki.disagreement_configuration import DisagreementPlan
 from evidence_wiki.errors import UsageError
 from evidence_wiki.mutation_contracts import canonical, detached
+from evidence_wiki.research_session import _load
 from evidence_wiki.resolution_projection import _project
 from evidence_wiki.resolution_rules import blockers
 from evidence_wiki.run_policy import RunPolicy
@@ -76,6 +78,75 @@ def test_identity_admission_rejects_copy_wrong_subject_replay_and_extra_effect(c
                 value.transfer(lease.session, lease.attempt)
     finally:
         execution._INPUT_DISPATCH.reset(token)
+
+
+def test_admission_decodes_again_only_when_retained_bytes_change(custody, monkeypatch):
+    lease, _payload, _clock, _probe = custody
+    records = execution.native.retained(lease.session)
+    value = execution._InputDispatch(lease.session, "guarded", lease.attempt, records)
+    witness, decoded = ["first"], []
+
+    def retained(*_):
+        decoded.append(witness[0])
+        return records
+
+    monkeypatch.setattr(execution.native, "retained", retained)
+    monkeypatch.setattr(execution.native, "retained_witness", lambda *_: witness[0])
+    value.require(lease.session, lease.attempt)
+    value.require(lease.session, lease.attempt)
+    assert decoded == ["first"]
+    # An event outside the retained records changes the bytes but not the decode.
+    witness[0] = "second"
+    value.require(lease.session, lease.attempt)
+    value.require(lease.session, lease.attempt)
+    assert decoded == ["first", "second"]
+    witness[0] = "third"
+    monkeypatch.setattr(execution.native, "retained", lambda *_: [])
+    for _ in range(2):
+        with pytest.raises(UsageError):
+            value.require(lease.session, lease.attempt)
+
+
+def test_admission_never_trusts_bytes_that_changed_during_their_decode(custody, monkeypatch):
+    lease, _payload, _clock, _probe = custody
+    records = execution.native.retained(lease.session)
+    value = execution._InputDispatch(lease.session, "guarded", lease.attempt, records)
+    # The second read differs, so bytes that return to the first prove nothing yet.
+    reads, decoded = iter(["before", "after", "before", "before", "before"]), []
+
+    def retained(*_):
+        decoded.append(True)
+        return records
+
+    monkeypatch.setattr(execution.native, "retained", retained)
+    monkeypatch.setattr(execution.native, "retained_witness", lambda *_: next(reads))
+    value.require(lease.session, lease.attempt)
+    value.require(lease.session, lease.attempt)
+    assert len(decoded) == 2
+    value.require(lease.session, lease.attempt)
+    assert len(decoded) == 2
+
+
+def test_retained_witness_binds_exact_state_journal_and_binding(tmp_path):
+    root = tmp_path / "workspace"
+    assert main(["init", "--target", str(root), "--project-name", "Witness",
+        "--project-description", "Exact retained bytes.", "--domain-pack", "general-science"]) == 0
+    controller = _load(root, "run_controller")
+    session = SimpleNamespace(root=root, run_id="witnessed-run", binding={"request_binding": "one"})
+    state, events = controller.run_state_path(root, session.run_id), controller.events_path(root, session.run_id)
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"state\n")
+    events.write_bytes(b"event\n")
+    witness = execution.native.retained_witness(session)
+    assert witness[1:] == (b"state\n", b"event\n") and witness == execution.native.retained_witness(session)
+    state.write_bytes(b"other\n")
+    assert execution.native.retained_witness(session) != witness
+    state.write_bytes(b"state\n")
+    events.write_bytes(b"event\nevent\n")
+    assert execution.native.retained_witness(session) != witness
+    events.write_bytes(b"event\n")
+    session.binding = {"request_binding": "two"}
+    assert execution.native.retained_witness(session) != witness
 
 
 @pytest.fixture

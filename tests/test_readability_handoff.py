@@ -60,6 +60,8 @@ def custody(issued, profile, monkeypatch, tmp_path):
     journal._observer_key = b"o" * 32
     retained = journal.seal_record(session, "execution_attempt", "guarded.intent", row, records=[])
     monkeypatch.setattr(handoff.native, "retained", lambda *_: [retained])
+    # This journal has no bytes on disk, so every comparison decodes.
+    monkeypatch.setattr(handoff.native, "retained_witness", lambda *_: object())
     monkeypatch.setattr(handoff.native, "_document", lambda *_: {"state": {"current": "answering"}})
     native_owner = handoff.native.owner
     native_usage = native_owner("_evidence_usage")

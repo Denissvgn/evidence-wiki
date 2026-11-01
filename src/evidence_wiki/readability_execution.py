@@ -46,6 +46,7 @@ class _InputDispatch:
         self.lease = None
         self._origin = self
         self._parent_lease = None
+        self._retained_witness = None
 
     def __copy__(self):
         refuse("input_dispatch_not_fresh")
@@ -55,9 +56,15 @@ class _InputDispatch:
 
     def require(self, session, attempt):
         if (self._origin is not self or session is not self.session or self.request_id != self.attempt.job["id"]
-                or self.request_id != self.attempt.attempt_id or attempt.document() != self.attempt.document() or self.invalidated
-                or canonical_records(native.retained(session)) != self.records):
+                or self.request_id != self.attempt.attempt_id or attempt.document() != self.attempt.document() or self.invalidated):
             refuse("input_dispatch_identity_changed")
+        witness = native.retained_witness(session)
+        if witness != self._retained_witness:
+            if canonical_records(native.retained(session)) != self.records:
+                refuse("input_dispatch_identity_changed")
+            # Equal bytes around one complete decode prove them; later equal bytes need no decode.
+            if native.retained_witness(session) == witness:
+                self._retained_witness = witness
 
     def transfer(self, session, attempt):
         self.require(session, attempt)
