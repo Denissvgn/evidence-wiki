@@ -250,10 +250,13 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
 
     def test_ci_declares_native_windows_macos_and_ubuntu_jobs(self):
         workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        # The hosted fallback is the complete matrix, the expression's last literal.
+        expression = next(line for line in workflow.splitlines() if line.strip().startswith("platform: ${{ fromJSON("))
+        platforms = json.loads(expression.rsplit("'", 2)[1])
 
         for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
-            self.assertIn(f"os: {runner}", workflow)
-        self.assertIn('python-version: "3.10.21"', workflow)
+            self.assertIn(runner, {platform["os"] for platform in platforms})
+        self.assertIn("3.10.21", {platform["python-version"] for platform in platforms})
         self.assertIn("Install and verify optional Poppler compatibility backend", workflow)
         self.assertIn("sudo apt-get install --yes --no-install-recommends poppler-utils", workflow)
         self.assertIn("pdftotext -v", workflow)

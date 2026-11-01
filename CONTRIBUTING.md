@@ -114,7 +114,7 @@ remains active before activation and on main. Release qualification retains its
 complete release/manual checks instead of duplicating them on every PR.
 
 A complete selective native review runs for hours, so it stays out of the
-grouped test suite. Run it separately with a recipe measured on the current
+grouped suite. Run it separately with a recipe measured on the current
 candidate:
 
 ```bash

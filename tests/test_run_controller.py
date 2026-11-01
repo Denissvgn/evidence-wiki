@@ -389,6 +389,8 @@ class RunControllerTests(unittest.TestCase):
     def test_event_liveness_orders_dst_offsets_by_utc_instant(self):
         controller = self.load_controller()
         run_id = "run-2026-11-01T000000Z-dst-order"
+        # These must stay later than the start event, which carries the real time.
+        day = f"{datetime.now(timezone.utc).year + 1}-11-01"
         with tempfile.TemporaryDirectory() as tmpdir:
             target = self.init_workspace(Path(tmpdir))
             self.start_run(controller, target, run_id)
@@ -398,7 +400,7 @@ class RunControllerTests(unittest.TestCase):
                 {
                     "event_id": "evt-dst-first",
                     "event_type": "operator.note",
-                    "occurred_at": "2026-11-01T01:45:00-04:00",
+                    "occurred_at": f"{day}T01:45:00-04:00",
                     "agent_id": "agent-pm",
                     "data": {},
                 },
@@ -408,16 +410,16 @@ class RunControllerTests(unittest.TestCase):
                 {
                     "event_id": "evt-dst-second",
                     "event_type": "operator.note",
-                    "occurred_at": "2026-11-01T01:15:00-05:00",
+                    "occurred_at": f"{day}T01:15:00-05:00",
                     "agent_id": "agent-pm",
                     "data": {},
                 },
             )
 
-            self.assertEqual("2026-11-01T06:15:00Z", controller.latest_event_at(target, run_id))
+            self.assertEqual(f"{day}T06:15:00Z", controller.latest_event_at(target, run_id))
             self.assertEqual(
-                controller.parse_timestamp("2026-11-01T01:45:00-04:00"),
-                controller.parse_timestamp("2026-11-01T05:45:00Z"),
+                controller.parse_timestamp(f"{day}T01:45:00-04:00"),
+                controller.parse_timestamp(f"{day}T05:45:00Z"),
             )
 
     def test_adopt_requires_stale_run_and_preserves_previous_owner(self):
