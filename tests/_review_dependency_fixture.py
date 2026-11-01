@@ -132,8 +132,13 @@ def fixture_document():
     }
 
 
-def execute(directory, *, mode="selective_reuse", cases=None, refresh=False):
-    """An isolated child owns every native worker and its closed launch guard."""
+def execute(directory, *, mode, cases=None, refresh=False, route=(), wait_seconds=None):
+    """An isolated child owns every native worker and its closed launch guard.
+
+    Selective reuse outgrows the plain route's job window and record bound, so it needs the extended route.
+    """
+    if mode == "selective_reuse" and not route:
+        raise ValueError("selective_reuse_requires_extended_route")
     directory = Path(directory)
     directory.mkdir(mode=0o700)
     supplied = directory / "fixture.json"
@@ -154,6 +159,7 @@ def execute(directory, *, mode="selective_reuse", cases=None, refresh=False):
         command.extend(["--case", case_id])
     if refresh:
         command.append("--refresh")
+    command.extend(route)
     with (directory / "stdout.log").open("wb") as stdout, (directory / "stderr.log").open("wb") as stderr:
         child = subprocess.Popen(
             command,
@@ -170,7 +176,7 @@ def execute(directory, *, mode="selective_reuse", cases=None, refresh=False):
             selected = cases or INITIAL_CASES
             budgets = [case_watchdog(selected[offset:offset + 8])["watchdog_seconds"]
                 for offset in range(0, len(selected), 8)]
-            child.wait(timeout=sum(budgets) + 660)
+            child.wait(timeout=wait_seconds or sum(budgets) + 660)
             assert guard.confirm_completed(), "Native acceptance process group remained active."
         finally:
             if child.returncode is None or not guard.confirm_completed():
