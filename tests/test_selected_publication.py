@@ -1,11 +1,13 @@
 """Selected publication remains coherent, scoped, and read-only."""
 
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
@@ -225,6 +227,33 @@ class SelectedPublicationTests(unittest.TestCase):
             self.assert_refusal("EVIDENCE_REVISION_LIMIT", lambda: REVISION.capture_workspace(self.root))
         with patch.object(REVISION, "MAX_ENTRIES", 1):
             self.assert_refusal("EVIDENCE_REVISION_LIMIT", lambda: REVISION.capture_workspace(self.root))
+
+
+@unittest.skipIf(sys.platform == "win32", "Requires POSIX change times and unprivileged symbolic links")
+class ProducerIdentityTests(unittest.TestCase):
+    def test_identity_stays_a_content_hash_behind_the_stat_signature(self):
+        def expected(content):
+            return SELECTED.content_id("evidence-publication-producer/v1", [
+                {"path": "script.py", "sha256": hashlib.sha256(content).hexdigest()}])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            script = root / "script.py"
+            script.write_bytes(b"first = 1\n")
+            info = script.stat()
+            with patch.object(SELECTED, "SCRIPT_DIR", root), patch.object(SELECTED, "_REMEMBERED_PRODUCER", None):
+                self.assertEqual(expected(b"first = 1\n"), SELECTED.producer_identity())
+                self.assertEqual(SELECTED._tree_signature(root), SELECTED._REMEMBERED_PRODUCER[0][1])
+                self.assertEqual(expected(b"first = 1\n"), SELECTED.producer_identity())
+                # Only the change time reveals this rewrite, so it must move past the file clock's resolution.
+                time.sleep(0.05)
+                script.write_bytes(b"other = 2\n")
+                os.utime(script, ns=(info.st_atime_ns, info.st_mtime_ns))
+                self.assertEqual(expected(b"other = 2\n"), SELECTED.producer_identity())
+                # The signature skips entries it cannot stat, and those must still refuse.
+                (root / "dangling.py").symlink_to(root / "missing.py")
+                with self.assertRaises(OSError):
+                    SELECTED.producer_identity()
 
 
 if __name__ == "__main__":

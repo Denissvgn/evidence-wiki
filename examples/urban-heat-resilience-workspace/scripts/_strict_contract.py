@@ -26,6 +26,7 @@ RESULT_SCHEMA_V3 = "evidence-strict-result/v3"
 SELECTIVE_MODE = "claim_dependencies_v1"
 _DEPENDENCY_CACHE = {}
 _COMPUTATION_CACHE = {}
+_VALIDATION_SHAPES = None
 MAX_BYTES = 1_048_576
 MAX_CLAIMS = 100
 CHECKS = ("support", "source_suitability", "scope", "time", "units", "counterevidence")
@@ -81,13 +82,13 @@ def document(value, schema):
             require(len(item) <= 65536, "strict_string_bound_exceeded")
             string_bytes += len(item.encode("utf-8"))
             require(string_bytes <= MAX_BYTES, "strict_document_bound_exceeded")
-    validate_shape(value, _legacy_schema_documents()[schema])
+    validate_shape(value, _validation_shapes()[schema])
     data = canonical_bytes(value)
     require(len(data) <= MAX_BYTES, "strict_document_bound_exceeded")
     value = json_document(data)
     exact_object(value, FIELDS[schema])
     require(value["schema_version"] == schema, "strict_schema_unsupported")
-    validate_shape(value, _legacy_schema_documents()[schema])
+    validate_shape(value, _validation_shapes()[schema])
     return value
 
 
@@ -349,6 +350,14 @@ def _legacy_schema_documents():
                   "x-evidence-wiki-limits": {"bytes": MAX_BYTES, "claims": MAX_CLAIMS, "depth": 16, "nodes": 65536},
                   **value} for key, value in documents.items()}
     return result
+
+
+def _validation_shapes():
+    """One read-only set per module instance; these shapes hold no workspace input."""
+    global _VALIDATION_SHAPES
+    if _VALIDATION_SHAPES is None:
+        _VALIDATION_SHAPES = _legacy_schema_documents()
+    return _VALIDATION_SHAPES
 
 
 def schema_documents():

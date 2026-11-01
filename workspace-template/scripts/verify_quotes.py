@@ -58,6 +58,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 from _script_errors import ScriptRefusal, emit_refusal, is_refusal, json_mode_requested
 from _workspace_module_loader import load_workspace_module
+from _yaml_safe import safe_load_current
 
 _SIBLING_CACHE: dict[str, ModuleType] = {}
 
@@ -209,7 +210,7 @@ def split_page(text: str) -> tuple[dict[str, Any], str]:
     if closing is None:
         return {}, text
     try:
-        frontmatter = yaml.safe_load("\n".join(lines[1:closing])) or {}
+        frontmatter = safe_load_current("\n".join(lines[1:closing])) or {}
     except yaml.YAMLError as exc:
         raise VerifyQuotesError("PAGE_INVALID", f"Invalid frontmatter YAML: {exc}") from exc
     body = "\n".join(lines[closing + 1 :])

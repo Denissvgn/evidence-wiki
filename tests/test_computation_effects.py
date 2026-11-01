@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests._computation_fixture import aggregation, definition, workspace
 from tests._script_loader import load_isolated_module
@@ -145,3 +146,36 @@ def test_warning_intake_is_explicit_and_deduplicated(tmp_path):
     pages = list((tmp_path / "wiki/questions").glob("*.md"))
     assert len(pages) == 1
     assert "BEGIN UNTRUSTED EVIDENCE: Context" in pages[0].read_text()
+
+
+def test_requirement_and_status_read_interrupted_effects_from_their_one_capture(tmp_path, monkeypatch):
+    result, _destination = prepared(tmp_path)
+    service = EFFECTS.sibling("_computation_service")
+    effects = service.sibling("_computation_effects")
+    config = yaml.safe_load((tmp_path / "research.yml").read_text())
+    earlier = effects.capture_workspace(tmp_path)
+    publisher = EFFECTS.sibling("_usage_materialization")
+    original = publisher.publish_file
+
+    def interrupt(root, relative, *args, **kwargs):
+        if relative == "wiki/outputs/totals.md":
+            raise OSError("Interrupted output")
+        return original(root, relative, *args, **kwargs)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(publisher, "publish_file", interrupt)
+        with pytest.raises(OSError, match="Interrupted output"):
+            EFFECTS.apply(tmp_path, "write", expected_result_id=result["result_id"], request_id="output-1")
+    assert effects.pending(tmp_path, earlier) == []
+    assert effects.pending(tmp_path) == ["output-1"]
+    with monkeypatch.context() as scoped:
+        scoped.setattr(effects, "capture_workspace", lambda _root: pytest.fail("The requirement already holds a capture."))
+        with pytest.raises(Exception) as refused:
+            service.required(tmp_path, config)
+    assert refused.value.details["reason"] == "computation_recovery_required"
+    actual, captures = service.capture_workspace, []
+    monkeypatch.setattr(service, "capture_workspace", lambda root: captures.append(root) or actual(root))
+    blocked = service.status(tmp_path, config)
+    assert blocked["status"] == "blocked" and blocked["reasons"] == ["computation_recovery_required"]
+    assert blocked["result_id"] == service.evaluate(tmp_path, config=config)["result_id"]
+    assert len(captures) == 1
