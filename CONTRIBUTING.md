@@ -113,6 +113,14 @@ probe and the small authenticated-results verifier. The full hosted fallback
 remains active before activation and on main. Release qualification retains its
 complete release/manual checks instead of duplicating them on every PR.
 
+A complete selective native review runs for hours, so it stays out of the
+grouped test suite. Run it separately with a recipe measured on the current
+candidate:
+
+```bash
+.venv/bin/python tools/qualify_selective_review.py --output <new-directory> --extended-recipe <recipe.json> --execution-profile eight-hour
+```
+
 Manual native execution assumes the owner trusts the candidate code. Do not run
 untrusted contributions on a development workstation with access to signing
 keys or other credentials; use a disposable isolated host for those candidates.
