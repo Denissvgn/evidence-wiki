@@ -73,20 +73,27 @@ def producer_identity() -> str:
     """Bind the trusted script implementation independently of workspace copies.
 
     The identity is always a content hash. A stat signature only decides whether
-    it must be rehashed, and is remembered only if it held across the hash. The
-    directory clock covers entries the signature skips, which still refuse here.
+    it must be rehashed, and is remembered only if it held across the hash. Every
+    ``*.py`` name is part of the signature, so an entry the stat signature skips
+    still forces a rehash, which refuses it.
     """
     global _REMEMBERED_PRODUCER
-    signature = os.stat(SCRIPT_DIR).st_mtime_ns, _tree_signature(SCRIPT_DIR)
+    signature = _producer_signature()
     if _REMEMBERED_PRODUCER is not None and _REMEMBERED_PRODUCER[0] == signature:
         return _REMEMBERED_PRODUCER[1]
     identity = content_id("evidence-publication-producer/v1", [
         {"path": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for path in sorted(SCRIPT_DIR.glob("*.py"))
     ])
-    if (os.stat(SCRIPT_DIR).st_mtime_ns, _tree_signature(SCRIPT_DIR)) == signature:
+    if _producer_signature() == signature:
         _REMEMBERED_PRODUCER = (signature, identity)
     return identity
+
+
+def _producer_signature():
+    with os.scandir(SCRIPT_DIR) as children:
+        names = tuple(sorted(child.name for child in children if child.name.endswith(".py")))
+    return os.stat(SCRIPT_DIR).st_mtime_ns, _tree_signature(SCRIPT_DIR), names
 
 
 def logical_paths(value: Any, temporary_root: Path) -> Any:

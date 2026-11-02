@@ -255,6 +255,37 @@ class ProducerIdentityTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     SELECTED.producer_identity()
 
+    def test_remembered_identity_never_hides_an_entry_the_stat_signature_skips(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "script.py").write_bytes(b"first = 1\n")
+            with patch.object(SELECTED, "SCRIPT_DIR", root), patch.object(SELECTED, "_REMEMBERED_PRODUCER", None):
+                SELECTED.producer_identity()
+                self.assertIsNotNone(SELECTED._REMEMBERED_PRODUCER)
+                clock = root.stat()
+                (root / "dangling.py").symlink_to(root / "missing.py")
+                os.utime(root, ns=(clock.st_atime_ns, clock.st_mtime_ns))
+                self.assertEqual(clock.st_mtime_ns, root.stat().st_mtime_ns)
+                with self.assertRaises(OSError):
+                    SELECTED.producer_identity()
+
+    def test_identity_is_not_remembered_when_an_entry_appears_during_its_hash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "script.py").write_bytes(b"first = 1\n")
+            clock = root.stat()
+            hashed = SELECTED.content_id
+
+            def appearing(*args):
+                (root / "dangling.py").symlink_to(root / "missing.py")
+                os.utime(root, ns=(clock.st_atime_ns, clock.st_mtime_ns))
+                return hashed(*args)
+
+            with patch.object(SELECTED, "SCRIPT_DIR", root), patch.object(SELECTED, "_REMEMBERED_PRODUCER", None), \
+                    patch.object(SELECTED, "content_id", appearing):
+                SELECTED.producer_identity()
+                self.assertIsNone(SELECTED._REMEMBERED_PRODUCER)
+
 
 if __name__ == "__main__":
     unittest.main()
