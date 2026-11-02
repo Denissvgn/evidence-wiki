@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory
 
 from . import execution_accounting as accounting
 from ._facades._base import _process_exit, _translated
+from ._ordered_clock import ordered
 from ._review_dependency_inputs import bound_session
 from ._review_dependency_json import canonical, detached, digest
 from .agent_execution import ExecutionAttempt, ExecutionError
@@ -289,7 +290,7 @@ def deadline(session, document=None):
     document = _document(session) if document is None else document
     started = datetime.fromisoformat(document["started_at"].replace("Z", "+00:00"))
     updated = datetime.fromisoformat(document["updated_at"].replace("Z", "+00:00"))
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     if now < max(started, updated):
         refuse("CLOCK_REGRESSED")
     return started + timedelta(seconds=session.policy.to_dict()["budgets"]["seconds"])
@@ -410,7 +411,7 @@ def current(session):
             raise
         try:
             config = owner("_strict_evidence").configuration(session.root)
-            owner("_evidence_authority").load_trust(session.root, config, datetime.now(timezone.utc))
+            owner("_evidence_authority").load_trust(session.root, config, ordered(datetime.now(timezone.utc)))
         except (Exception, SystemExit):
             from .review_service_blocking import current as blocked_current
             return blocked_current(session)
@@ -451,7 +452,7 @@ def _observe_current_owned(session):
     usage = dict(view["usage"])
     if projection is not None:
         measured = projection["usage"]
-        usage.update(seconds=(datetime.now(timezone.utc) - datetime.fromisoformat(document["started_at"].replace("Z", "+00:00"))).total_seconds(),
+        usage.update(seconds=(ordered(datetime.now(timezone.utc)) - datetime.fromisoformat(document["started_at"].replace("Z", "+00:00"))).total_seconds(),
             model_calls=measured["model_calls"], tool_calls=measured["tool_calls"], tokens=measured["tokens"],
             cost_limit=measured["cost"])
         strict = observed.strict.get("result", {})
@@ -673,7 +674,7 @@ def _owner_action(session, view, records, *, resuming=False):
             return _terminal_action(session, view, "blocked_external", "qualification_unknown")
     if not view["authority"]["terminal_grants_available"]:
         return _terminal_action(session, view, "blocked_external", "authority_unavailable")
-    if records and datetime.now(timezone.utc) >= deadline(session):
+    if records and ordered(datetime.now(timezone.utc)) >= deadline(session):
         return _terminal_action(session, view, "stop_budget", "budget_exhausted")
     if not resuming and view["execution"]["steps_used"] >= session.execution.profile.total_steps:
         return _terminal_action(session, view, "stop_budget", "budget_exhausted")
@@ -693,7 +694,7 @@ def _owner_action(session, view, records, *, resuming=False):
             attempt = session.execution.attempt(prior["attempt"])
             observation = session.execution.authenticate(_latest_observation(records, attempt.attempt_id), attempt)
             pending_end = application_deadline(session, attempt, prior, observation)
-        if (datetime.now(timezone.utc) >= datetime.fromisoformat(pending_end)
+        if (ordered(datetime.now(timezone.utc)) >= datetime.fromisoformat(pending_end)
                 and (not scheduled or pending["state"] in {"running", "dispatch_unknown", "succeeded"})):
             return _terminal_action(session, view, "stop_budget", "budget_exhausted")
         if pending["state"] in {"running", "dispatch_unknown"}:
@@ -713,7 +714,7 @@ def _owner_action(session, view, records, *, resuming=False):
                 strict_basis_id=_review_basis(prepared), view=view, records=records)
             if target["action"] != "select":
                 return _terminal_action(session, view, "blocked_external", "executor_unavailable")
-            if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+            if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > ordered(datetime.now(timezone.utc)):
                 return {"operation": "reconcile", "attempt_id": pending["attempt_id"], "reason": "retry_backoff",
                     "retry_after_utc": target["retry_after_utc"]}
             return {"operation": "evaluate", "purpose": "retry", "retry_purpose": "evaluate",
@@ -748,7 +749,7 @@ def _owner_action(session, view, records, *, resuming=False):
                 ready = datetime.fromisoformat(continuation["retry_after_utc"])
                 if ready >= deadline(session):
                     return _terminal_action(session, view, "stop_budget", "budget_exhausted")
-                if ready > datetime.now(timezone.utc):
+                if ready > ordered(datetime.now(timezone.utc)):
                     return {**continuation, "operation": "reconcile", "attempt_id": pending["attempt_id"],
                         "retry_operation": continuation["operation"], "reason": "retry_backoff"}
                 return continuation
@@ -900,7 +901,7 @@ def _owner_action(session, view, records, *, resuming=False):
                         strict_basis_id=basis, view=view, records=records)
                     if target["action"] != "select":
                         return _terminal_action(session, view, "blocked_external", "executor_unavailable")
-                    if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+                    if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > ordered(datetime.now(timezone.utc)):
                         return {"operation": "reconcile", "attempt_id": target["predecessor_attempt_id"], "reason": "retry_backoff",
                             "retry_after_utc": target["retry_after_utc"]}
                     return {"operation": "evaluate", "purpose": "retry" if "predecessor_attempt_id" in target else "evaluate",
@@ -1123,7 +1124,7 @@ def reserve(session, request_id, action, view):
             existing_attempt = _attempt_rows(retained(session)).get(request_id)
             if existing_attempt is None and (target["action"] != "select" or target["config_ref"] != config_ref):
                 refuse("SERVICE_SELECTION_REQUIRED")
-            if existing_attempt is None and "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+            if existing_attempt is None and "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > ordered(datetime.now(timezone.utc)):
                 refuse("SERVICE_BACKOFF_REQUIRED")
         required_role = "critic" if purpose == "counterevidence" else "adjudicator" if purpose in {"adjudicate", "semantic_adjudicate"} else required_profile(session, config_ref, action.get("service_slot_ref"))["role"]
         if scope is not None and scope.task_role != required_role:
@@ -1294,7 +1295,7 @@ def reserve(session, request_id, action, view):
     if projection["usage_unknown"] or projection["overrun"]:
         refuse("BUDGET_EXHAUSTED")
     end = deadline(session)
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     application_fields = {}
     if (session.execution.profile.review_application_lease is not None and operation == "evaluate"
             and purpose == "evaluate" and scope is not None and review_context is not None
@@ -1443,7 +1444,7 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
         end = deadline(session)
         if effect_deadline is not None:
             end = min(end, datetime.fromisoformat(effect_deadline))
-        operation_start = datetime.now(timezone.utc)
+        operation_start = ordered(datetime.now(timezone.utc))
         seconds = (end - operation_start).total_seconds()
         if not recovering and (projection["usage_unknown"] or projection["overrun"] or projection["remaining"]["tool_calls"] < 1 or seconds <= 0):
             refuse("BUDGET_EXHAUSTED")
@@ -1457,7 +1458,7 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
                 effect_precondition()
             append(session, "execution_native", child_id(identifier, "intent"), {"operation": operation,
                 "arguments": arguments, "reservation": reservation})
-    control = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=session.execution.profile.cleanup_timeout_seconds)
+    control = OperationControl(deadline_utc=(ordered(datetime.now(timezone.utc)) + timedelta(seconds=session.execution.profile.cleanup_timeout_seconds)
         if recovering else min(end, operation_start + timedelta(seconds=86400))).isoformat(),
         timeout_seconds=min(86400, max(0.001, seconds)) if not recovering else session.execution.profile.cleanup_timeout_seconds)
     started = time.monotonic()
@@ -1478,7 +1479,7 @@ def _native_call(session, identifier, operation, arguments, invoke, *, recover=N
     if recovering:
         if error is not None:
             raise error
-        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(reservation["issued_at"].replace("Z", "+00:00"))).total_seconds()
+        elapsed = (ordered(datetime.now(timezone.utc)) - datetime.fromisoformat(reservation["issued_at"].replace("Z", "+00:00"))).total_seconds()
     with gate(session):
         state_only = recovering and type(result) is dict and result.get("proof_kind") == "exact_canonical_question_postcondition"
         publication_unknown = operation == "artifact.deliver" and (error is not None or type(result) is not dict
@@ -1748,7 +1749,7 @@ def _model_review_observed(session, attempt, observation):
 def _verify_review_controller(session, attempt, envelope):
     """Compare native authenticated principals with the dispatched controller."""
     authority = owner("_evidence_authority")
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     config = owner("verify_quotes").load_config(session.root)
     trust = authority.load_trust(session.root, config, now)
     authenticated = authority.verify_attestation(envelope, "evaluator", trust, now)
@@ -1838,7 +1839,7 @@ def _validate_application_owned(session, attempt, observation, application, *, a
         observed = ResearchObservation(session.root, run_id=session.run_id)
         require_current(session, row, attempt, view, prepared, packets, observed)
         observed.finish()
-    if (datetime.now(timezone.utc) >= datetime.fromisoformat(application_end)
+    if (ordered(datetime.now(timezone.utc)) >= datetime.fromisoformat(application_end)
             or _semantic_required(session, attempt) and view["qualification"]["state"] != "qualified"):
         refuse("RESULT_INELIGIBLE")
     unchanged = view["basis_id"] == attempt.job["basis_id"]
@@ -1860,7 +1861,7 @@ def _validate_application_owned(session, attempt, observation, application, *, a
                     if stored is not None and stored.get("receipt") is not None:
                         receipt = stored["receipt"]
                         owned_progress = owned_progress or receipt.get("status") in {"committed", "reconciled"} and receipt.get("after_revision") == revision
-    if (not (unchanged or owned_progress) or datetime.now(timezone.utc) >= datetime.fromisoformat(application_end)
+    if (not (unchanged or owned_progress) or ordered(datetime.now(timezone.utc)) >= datetime.fromisoformat(application_end)
             or observation["state"] != "succeeded" or not observation["final_accounting"]
             or _semantic_required(session, attempt) and view["qualification"]["state"] != "qualified"
             or view["execution"]["accounting"]["overrun"]):
@@ -2020,7 +2021,7 @@ def _apply_owned(session, attempt_id):
                     application = _review_application(session, row, attempt, observation,
                         {"attempt_id": attempt_id, "operation": "evaluate", "original_id": row["original_id"]}, view, prepared)
             session._check("advance", write=True)
-            if datetime.now(timezone.utc) >= datetime.fromisoformat(application_deadline(session, attempt, row, observation)):
+            if ordered(datetime.now(timezone.utc)) >= datetime.fromisoformat(application_deadline(session, attempt, row, observation)):
                 refuse("RESULT_INELIGIBLE")
             append(session, "execution_application", child_id(attempt_id, "application"), application)
     else:
@@ -2041,7 +2042,7 @@ def _apply_owned(session, attempt_id):
     if application is None:
         with gate(session):
             view = current(session)
-            if (view["basis_id"] != attempt.job["basis_id"] or datetime.now(timezone.utc) >=
+            if (view["basis_id"] != attempt.job["basis_id"] or ordered(datetime.now(timezone.utc)) >=
                     datetime.fromisoformat(application_deadline(session, attempt, row, observation)) or observation["state"] != "succeeded"
                     or not observation["final_accounting"]
                     or _semantic_required(session, attempt) and view["qualification"]["state"] != "qualified"):
@@ -2235,7 +2236,7 @@ def _external(session, method, attempt, *, cleanup=False):
         timeout = session.execution.profile.cleanup_timeout_seconds
     else:
         remaining = (min(deadline(session), datetime.fromisoformat(attempt.job["deadline_utc"]))
-            - datetime.now(timezone.utc)).total_seconds()
+            - ordered(datetime.now(timezone.utc))).total_seconds()
         timeout = max(0, remaining) if method == "invoke" else min(max(0, remaining), session.execution.profile.cleanup_timeout_seconds)
     if timeout <= 0:
         return None, "host_wait_expired"
@@ -2546,8 +2547,8 @@ def _complete_advance(session, request_id, expected_basis_id, action, attempt, i
         elif operation == "resolve":
             _resolve(session, action["original_id"])
         elif operation == "reconcile" and action.get("reason") == "retry_backoff":
-            remaining = min((datetime.fromisoformat(action["retry_after_utc"]) - datetime.now(timezone.utc)).total_seconds(),
-                (deadline(session) - datetime.now(timezone.utc)).total_seconds(), session.execution.profile.cleanup_timeout_seconds)
+            remaining = min((datetime.fromisoformat(action["retry_after_utc"]) - ordered(datetime.now(timezone.utc))).total_seconds(),
+                (deadline(session) - ordered(datetime.now(timezone.utc))).total_seconds(), session.execution.profile.cleanup_timeout_seconds)
             if remaining > 0:
                 time.sleep(remaining)
     except (Exception, SystemExit) as error:
@@ -2619,7 +2620,7 @@ def run_until_terminal(session, *, request_id, expected_basis_id, max_steps, ope
         if result["terminal"]:
             return result
         if result["action"] == "reconcile" and not result["historical"]:
-            remaining = (deadline(session) - datetime.now(timezone.utc)).total_seconds()
+            remaining = (deadline(session) - ordered(datetime.now(timezone.utc))).total_seconds()
             if remaining > 0:
                 time.sleep(min(0.02, remaining))
     return result
@@ -2678,7 +2679,7 @@ def control_pending(session, *, request_id, cancel=False):
         if cancel:
             append(session, "execution_cancel", child_id(request_id, "cancel"), {"attempt_id": attempt.attempt_id,
                 "reason": "cancellation_requested"})
-        historical = datetime.now(timezone.utc) >= datetime.fromisoformat(attempt.job["deadline_utc"])
+        historical = ordered(datetime.now(timezone.utc)) >= datetime.fromisoformat(attempt.job["deadline_utc"])
         if historical and not cancel:
             old = any(row["kind"] == "execution_historical_poll" and row["data"]["attempt_id"] == attempt.attempt_id for row in records)
             if old:

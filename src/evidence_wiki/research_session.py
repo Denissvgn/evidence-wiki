@@ -8,6 +8,7 @@ from functools import wraps
 from pathlib import Path
 
 from ._facades._base import _process_exit, _translated, call_seam
+from ._ordered_clock import ordered
 from ._review_dependency_json import canonical, detached, digest
 from .errors import EvidenceWikiError
 from .host_context import checked_operation, current_context
@@ -495,7 +496,7 @@ class ResearchSession:
                 saved = validate_document(PENDING, record["receipt"])
                 self._finish(controller._session_state(self.root, self.run_id), saved["fallback_reason"] or "pending_work_terminal")
                 return saved
-        now = datetime.now(timezone.utc).isoformat()
+        now = ordered(datetime.now(timezone.utc)).isoformat()
         updated = receipt if receipt["terminal"] else observe(receipt, observed_utc=now)
         if not updated["terminal"]:
             if operation == "cancel":
@@ -846,7 +847,7 @@ class ResearchSession:
         if controller_ref is None:
             refuse("HOST_CAPABILITY_UNAVAILABLE")
         document = self._run()
-        now = datetime.now(timezone.utc)
+        now = ordered(datetime.now(timezone.utc))
         started = datetime.fromisoformat(document["started_at"].replace("Z", "+00:00"))
         last_observed = datetime.fromisoformat(document["updated_at"].replace("Z", "+00:00"))
         if now < max(started, last_observed):

@@ -12,6 +12,11 @@
 
 ### Fixed
 
+- Keep execution timestamps ordered when the host clock steps back by up to
+  one second, as virtualized hosts do when they resynchronize, so a valid
+  observation is no longer refused as a clock regression. Larger regressions
+  are still refused.
+
 - Report a provider no installed distribution registers from `evidence-wiki
   init` with its own error code and install or repair remediation, matching
   the starter's initializer script instead of a generic workspace error.

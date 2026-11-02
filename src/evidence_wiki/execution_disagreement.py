@@ -11,6 +11,7 @@ import json
 import re
 from datetime import datetime, timezone
 
+from ._ordered_clock import ordered
 from ._review_dependency_json import canonical, detached, digest
 from .agent_execution import ExecutionError, validate_observation
 from .disagreement import CRITERIA, _hash, _ref, disagreement_action
@@ -491,7 +492,7 @@ def driver_action(session, projection, *, gates, original_id, presentation_defec
                 strict_basis_id=projection["strict_basis_id"], view=current(session), records=retained(session))
             if target["action"] != "select":
                 _fail("service_first_pass_unavailable")
-            if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > datetime.now(timezone.utc):
+            if "retry_after_utc" in target and datetime.fromisoformat(target["retry_after_utc"]) > ordered(datetime.now(timezone.utc)):
                 return {"operation": "reconcile", "attempt_id": target["predecessor_attempt_id"],
                     "reason": "retry_backoff", "retry_after_utc": target["retry_after_utc"]}
             result.update(operation="evaluate", purpose="retry" if "predecessor_attempt_id" in target else "evaluate",

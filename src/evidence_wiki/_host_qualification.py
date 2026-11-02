@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 
+from ._ordered_clock import ordered
 from ._review_dependency_json import canonical, digest
 from .agent_execution import BoundedSubprocessExecutor, ExecutionError, _utc
 from .errors import ConfigError, EvidenceWikiError
@@ -85,7 +86,7 @@ def host_qualification(session):
             "attestation_state": "not_observed", "attestation_ref": None,
             "attestation_principal": None, "attestation_key_id": None,
             "application_state": "not_observed", "context_reason": None,
-            "lease_state": "expired" if _utc(attempt.job["deadline_utc"]) <= datetime.now(timezone.utc) else "current"}
+            "lease_state": "expired" if _utc(attempt.job["deadline_utc"]) <= ordered(datetime.now(timezone.utc)) else "current"}
         receipt = None
         prepared = None
         if any(item["kind"] == "execution_observation" and item["data"]["attempt_id"] == attempt.attempt_id for item in records):
@@ -152,7 +153,7 @@ def host_qualification(session):
                     proof = resolve_original(review, purpose="reuse")
                     proof.assert_review_envelope(envelope)
                     if (review["basis_id"] != native["claim_basis_id"] or review["observation"] != native["observation"]
-                            or not 0 <= (datetime.now(timezone.utc) - _utc(review["reviewed_at"])).total_seconds() <= prepared["snapshot"]["policy"]["max_review_age_seconds"]
+                            or not 0 <= (ordered(datetime.now(timezone.utc)) - _utc(review["reviewed_at"])).total_seconds() <= prepared["snapshot"]["policy"]["max_review_age_seconds"]
                             or _utc(review["reviewed_at"]) > _utc(envelope["authentication"]["issued_at"])):
                         _refuse("attestation_current_context_mismatch")
                     row.update(context_state="current_selective_semantics", context_reason=None,
@@ -163,7 +164,7 @@ def host_qualification(session):
                 native = next((item for item in prepared["result"]["claims"] if item["claim"]["id"] == retained["claim_id"]), None)
                 if (review.get("snapshot") != prepared["snapshot"] or review.get("basis_id") != prepared["result"]["basis_id"]
                         or native is None or review.get("observation") != native["observation"]
-                        or not 0 <= (datetime.now(timezone.utc) - _utc(review["reviewed_at"])).total_seconds() <= prepared["snapshot"]["policy"]["max_review_age_seconds"]
+                        or not 0 <= (ordered(datetime.now(timezone.utc)) - _utc(review["reviewed_at"])).total_seconds() <= prepared["snapshot"]["policy"]["max_review_age_seconds"]
                         or _utc(review["reviewed_at"]) > _utc(envelope["authentication"]["issued_at"])
                         or any(envelope["payload"].get(key) != prepared["registration"].get(key)
                             for key in ("schema_version", "state_id", "workspace_binding", "action"))):
@@ -202,7 +203,7 @@ def host_qualification(session):
         _refuse("native_configuration_changed")
     if credentials["authority_id"] is not None:
         authority = driver.owner("_evidence_authority")
-        trust = authority.load_trust(session.root, configuration, datetime.now(timezone.utc))
+        trust = authority.load_trust(session.root, configuration, ordered(datetime.now(timezone.utc)))
         if authority.authority_basis(trust) != credentials["authority_id"]:
             _refuse("native_authority_changed")
     if (before["basis_id"] != after["basis_id"] or records != after_records
@@ -218,7 +219,7 @@ def host_qualification(session):
     native_observed = bool(required and required <= represented and credentials["state"] == "ready")
     package = Path(__file__).resolve().parent
     generation = session.binding["owner_generation"]
-    result = {"schema_version": report_schema, "observed_utc": datetime.now(timezone.utc).isoformat(),
+    result = {"schema_version": report_schema, "observed_utc": ordered(datetime.now(timezone.utc)).isoformat(),
         "run_id": session.run_id, "binding_id": digest(session.binding), "basis_id": after["basis_id"],
         "policy_id": session.policy.policy_id, "execution_profile_sha256": session.execution.profile.sha256,
         "registry_sha256": session.execution.qualifications.sha256, "journal_head_ref": digest_record(records[-1]) if records else None,

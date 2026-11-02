@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from . import execution_accounting as accounting
 from . import execution_session as native
+from ._ordered_clock import ordered
 from .agent_execution import BoundedSubprocessExecutor, ExecutionAttempt, _utc
 from .brief_projection import project, substance
 from .calibration_registry import CalibratedEvaluators
@@ -229,7 +230,7 @@ def input_constraints(session, view, records, proofs, admission):
             or view["usage"]["seconds"] >= budgets["seconds"]
             or any(view["usage"][key] is None or view["usage"][key] > budgets[key] for key in ("claims", "sources"))
             or any(view["usage"][key] is None or view["usage"][key] > limit for key, limit in counters.items())
-            or datetime.now(timezone.utc) >= min(native.deadline(session), _utc(admission.attempt.job["deadline_utc"]))):
+            or ordered(datetime.now(timezone.utc)) >= min(native.deadline(session), _utc(admission.attempt.job["deadline_utc"]))):
         refuse("input_dispatch_budget_or_deadline_exhausted")
     claims = [claim for question in (view["canonical_release"]["publication"] or {}).get("questions", [])
         if proofs.get(question["slug"], {}).get("eligible") for claim in question["claims"]]
@@ -264,7 +265,7 @@ def qualification(session, observed, *, application_attempt_id=None):
             and (probe_id is None or row["request_id"] == probe_id)]
         if probe_id is not None and len(probes) != 1:
             probes = []
-    now = datetime.now(timezone.utc).isoformat()
+    now = ordered(datetime.now(timezone.utc)).isoformat()
     if application_attempt_id is not None:
         applications = [row["data"] for row in records if row["kind"] == "execution_application"
             and row["data"].get("operation") == "readability" and row["data"]["attempt_id"] == application_attempt_id]
@@ -377,7 +378,7 @@ def closing_vector(session, observed):
             return {"report": _state("refused"), "qualification_ref": None, "application_ref": None, "authority_ref": None}
         config = native.owner("_strict_evidence").configuration(session.root)
         authority = native.owner("_evidence_authority")
-        trust = authority.load_trust(session.root, config, datetime.now(timezone.utc))
+        trust = authority.load_trust(session.root, config, ordered(datetime.now(timezone.utc)))
         result.update(qualification_ref=qualified["qualification_ref"], application_ref=digest(app),
             authority_ref=authority.authority_basis(trust))
     return result
@@ -391,7 +392,7 @@ def qualification_vector(session, observed):
     if result["state"] == "qualified":
         config = native.owner("_strict_evidence").configuration(session.root)
         authority = native.owner("_evidence_authority")
-        trust = authority.load_trust(session.root, config, datetime.now(timezone.utc))
+        trust = authority.load_trust(session.root, config, ordered(datetime.now(timezone.utc)))
         value["authority_ref"] = authority.authority_basis(trust)
     return value
 
@@ -466,7 +467,7 @@ def _next_from_owned(session, view, records, observed):
             if not final["final_accounting"] or final["reason"] not in {"executor_unavailable", "service_credentials_unavailable"}:
                 return native._terminal_action(session, view, "blocked_external", "executor_unavailable")
             ready = _utc(final["observed_utc"]) + timedelta(seconds=plan.backoff_seconds)
-            if datetime.now(timezone.utc) < ready:
+            if ordered(datetime.now(timezone.utc)) < ready:
                 return {"operation": "reconcile", "attempt_id": rows[-1]["attempt"]["attempt_id"],
                     "retry_after_utc": ready.isoformat(), "reason": "retry_backoff"}
     return {"operation": "evaluate", "purpose": "readability", "original_id": session.binding["original_ids"][0],
@@ -536,7 +537,7 @@ def _prepare_reservation(session, request_id, action, view, observed):
     cap = profile.document()["job_budgets"]
     cap = {key: min([cap[key], *(row[key] for row in remaining)]) for key in ("model_calls", "tool_calls", "tokens")}
     cap["cost"] = str(min([Decimal(profile.cost_limit), *(Decimal(row["cost"]) for row in remaining)]))
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     timeout = min(plan.timeout_seconds, int((native.deadline(session) - now).total_seconds()),
         *(int(Decimal(row["seconds"])) for row in remaining))
     if cap["model_calls"] < 1 or cap["tokens"] < 1 or timeout < 1:
@@ -681,7 +682,7 @@ def prepare_step(session, request_id, expected_basis_id):
                 owner_inputs = observed._native_observation
             _commit_current(session, witness, owner_inputs, view)
             job = attempt_record["attempt"]["job"]
-            if datetime.now(timezone.utc) >= min(native.deadline(session), _utc(job["deadline_utc"])):
+            if ordered(datetime.now(timezone.utc)) >= min(native.deadline(session), _utc(job["deadline_utc"])):
                 refuse("application_deadline_expired")
             probe_record = witness.consume(session)
             preparation = {"attempt_record": attempt_record, "probe_record": probe_record,
@@ -738,7 +739,7 @@ def _recover_applied_marker(session, row, attempt, observation):
         probes = [event["data"]["probe"] for event in native.retained(session) if event["kind"] == "execution_readability_probe"
             and event["request_id"] == native.child_id(native.child_id(attempt.attempt_id, "readability_application"), "readability_probe")]
         if len(probes) != 1 or _application_checked_at(existing[0], probes[0], attempt, observation,
-                datetime.now(timezone.utc).isoformat()) is None:
+                ordered(datetime.now(timezone.utc)).isoformat()) is None:
             refuse("application_replay_changed")
         expected["checked_utc"] = existing[0]["checked_utc"]
     if (existing != [expected] or binding["packet_sha256"] != digest(packet)
@@ -767,7 +768,7 @@ def apply(session, attempt_id):
             return
         if native._document(session)["state"]["current"] in native.owner("run_controller").TERMINAL_STATES:
             refuse("run_terminal")
-        if datetime.now(timezone.utc) >= min(native.deadline(session), _utc(attempt.job["deadline_utc"])):
+        if ordered(datetime.now(timezone.utc)) >= min(native.deadline(session), _utc(attempt.job["deadline_utc"])):
             refuse("application_deadline_expired")
         _model_observed(session, attempt, observation)
     probe_request_id = native.child_id(attempt_id, "readability_application")
@@ -795,12 +796,12 @@ def apply(session, attempt_id):
                     max_input_bytes=plan.max_input_bytes, max_output_bytes=plan.max_output_bytes)
                 domain = observe_domain(project(observed.document()))
             _commit_current(session, witness, observed._native_observation, observed._native_view)
-            if datetime.now(timezone.utc) >= min(native.deadline(session), _utc(attempt.job["deadline_utc"])):
+            if ordered(datetime.now(timezone.utc)) >= min(native.deadline(session), _utc(attempt.job["deadline_utc"])):
                 refuse("application_deadline_expired")
             probe_record = witness.consume(session)
             existing = [event["data"] for event in native.retained(session) if event["kind"] == "execution_application"
                 and event["data"]["attempt_id"] == attempt_id]
-            checked_utc = datetime.now(timezone.utc).isoformat()
+            checked_utc = ordered(datetime.now(timezone.utc)).isoformat()
             if (session.execution.qualifications.readability_observation(session.policy, session.execution.profile,
                     checked_utc, domain=domain, probe=probe_record["probe"])["state"] != "qualified"
                     or _application_checked_at({"checked_utc": checked_utc}, probe_record["probe"], attempt, observation, checked_utc) is None):

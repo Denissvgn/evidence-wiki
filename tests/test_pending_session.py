@@ -10,6 +10,7 @@ from threading import Event
 import pytest
 
 from evidence_wiki import Workspace
+from evidence_wiki._ordered_clock import ALLOWANCE
 from evidence_wiki.mutation_contracts import detached, digest
 from evidence_wiki.mutation_store import MutationStore
 from evidence_wiki.research_session import ResearchSession
@@ -94,7 +95,7 @@ def test_clock_regression_preserves_retained_state(root, tmp_path, monkeypatch):
     with host(root, tmp_path).activate():
         session = ResearchSession(root, policy(paid=True), run_id="session")
         work = job(session)
-        clock(monkeypatch, datetime.fromisoformat(work["issued_utc"]) - timedelta(seconds=1))
+        clock(monkeypatch, datetime.fromisoformat(work["issued_utc"]) - ALLOWANCE - timedelta(seconds=1))
         before = files(root)
         with pytest.raises(Exception) as error:
             session.reconcile_pending(request_id="past")

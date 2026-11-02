@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from ._ordered_clock import ordered
 from ._pack_io import identity
 from .agent_execution import ExecutionAttempt
 from .host_context import current_context
@@ -67,7 +68,7 @@ def run(root, policy, *, execution, request_id, benchmark_config_ref, critic_con
             if not store.new:
                 refuse("PERFORMANCE_RETENTION_UNAVAILABLE")
             state = {"schema_version": STATE, "binding": binding, "attempts": {}, "measurements": [],
-                "hardware": hardware(), "created_at": datetime.now(timezone.utc).isoformat(), "report": None, "authentication": None}
+                "hardware": hardware(), "created_at": ordered(datetime.now(timezone.utc)).isoformat(), "report": None, "authentication": None}
         else:
             execution._verify(state)
             if state["binding"] != binding:
@@ -97,7 +98,7 @@ def run(root, policy, *, execution, request_id, benchmark_config_ref, critic_con
             for row in selected:
                 if any(item["workload_id"] == row["workload_id"] for item in state["measurements"]):
                     continue
-                remaining = (deadline-datetime.now(timezone.utc)).total_seconds()
+                remaining = (deadline-ordered(datetime.now(timezone.utc))).total_seconds()
                 if remaining <= 0:
                     break
                 started = time.perf_counter()
@@ -171,7 +172,7 @@ def _agent(store, execution, state, policy, config, packet, deadline):
     fresh = record is None
     profile, frozen = execution.profile, policy.to_dict()
     if fresh:
-        clock = datetime.now(timezone.utc)
+        clock = ordered(datetime.now(timezone.utc))
         timeout = min(60, int((deadline-clock).total_seconds()))
         if timeout <= 0:
             refuse("PERFORMANCE_BUDGET_EXHAUSTED")
@@ -207,7 +208,7 @@ def _agent(store, execution, state, policy, config, packet, deadline):
         if observation is not None and observation["state"] != "running":
             break
         function = execution.executor.invoke if fresh and observation is None else execution.executor.poll
-        observed, reason = bounded_host_call(function, (attempt,), min(profile.cleanup_timeout_seconds, max(0, (deadline-datetime.now(timezone.utc)).total_seconds())))
+        observed, reason = bounded_host_call(function, (attempt,), min(profile.cleanup_timeout_seconds, max(0, (deadline-ordered(datetime.now(timezone.utc))).total_seconds())))
         fresh = False
         if reason is not None:
             refuse("PERFORMANCE_EXECUTION_UNKNOWN")
@@ -221,7 +222,7 @@ def _agent(store, execution, state, policy, config, packet, deadline):
             or type(usage.get("model_calls")) is not int or usage["model_calls"] < 1 or observation["started_utc"] is None
             or observation["reason"] == "offline_fixture" or profile.role(config).model_ref.startswith("offline/")):
         refuse("PERFORMANCE_EXECUTION_INCOMPLETE")
-    if (datetime.now(timezone.utc) >= deadline
+    if (ordered(datetime.now(timezone.utc)) >= deadline
             or datetime.fromisoformat(observation["completed_utc"]) >= datetime.fromisoformat(attempt.job["deadline_utc"])
             or usage.get("seconds") is None or usage["seconds"] > attempt.job["timeout_seconds"]):
         refuse("PERFORMANCE_EXECUTION_INCOMPLETE")

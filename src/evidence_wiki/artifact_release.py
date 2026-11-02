@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from . import execution_accounting as accounting
 from . import execution_session as native
+from ._ordered_clock import ordered
 from .agent_execution import ExecutionAttempt
 from .artifact_delivery_contracts import CAPABILITIES, INPUT, PROPOSAL, checked, refuse
 from .artifact_delivery_session import prepare
@@ -44,7 +45,7 @@ def reserve(session, request_id, action, view):
         for key in ("model_calls", "tool_calls", "tokens")}
     cap["cost"] = str(min(Decimal(desired["cost"]), Decimal(job_caps["cost"]),
         *(Decimal(row["remaining"]["cost"]) for row in projections)))
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     timeout = min(plan.timeout_seconds, int((native.deadline(session) - now).total_seconds()),
         *(int(Decimal(row["remaining"]["seconds"])) for row in projections))
     if cap["model_calls"] < 1 or cap["tokens"] < 1 or timeout < 1:
@@ -90,7 +91,7 @@ def apply(session, attempt_id):
     if (row.get("purpose") != "release" or observation["state"] != "succeeded" or not observation["final_accounting"]
             or observation["started_utc"] is None or observation["reason"] == "offline_fixture"
             or type(usage.get("model_calls")) is not int or usage["model_calls"] < 1
-            or completed is None and datetime.now(timezone.utc) >= datetime.fromisoformat(attempt.job["deadline_utc"])):
+            or completed is None and ordered(datetime.now(timezone.utc)) >= datetime.fromisoformat(attempt.job["deadline_utc"])):
         refuse("release_execution_not_observed")
     proposed = checked(PROPOSAL, observation["output"])
     expected = row["delivery_parent"]

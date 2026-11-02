@@ -10,6 +10,7 @@ from inspect import getattr_static
 from types import MethodType
 
 from . import execution_accounting as accounting
+from ._ordered_clock import ordered
 from ._review_dependency_json import canonical, detached, digest
 from .agent_execution import MAX_BYTES, BoundedSubprocessExecutor, ExecutionAttempt, ExecutionProfile
 from .mutation_contracts import validate_request_id
@@ -119,7 +120,7 @@ def bounded_host_call(function, arguments, timeout_seconds):
 
 
 def now_utc():
-    return datetime.now(timezone.utc).isoformat()
+    return ordered(datetime.now(timezone.utc)).isoformat()
 
 
 class ResearchExecution:
