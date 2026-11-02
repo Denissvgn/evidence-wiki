@@ -101,6 +101,8 @@ def test_real_seal_record_quote_and_anchored_input_restore_exactly_with_unchange
     assert second["previous_record_ref"] == digest(probe_row) and probe_row["previous_record_ref"] == digest(first)
     assert first["data"]["readability_preparation"] == encoded
     monkeypatch.setattr(input_owner.native, "retained", lambda *_: [first, probe_row, second])
+    # This journal has no bytes on disk, so every comparison decodes.
+    monkeypatch.setattr(input_owner.native, "retained_witness", lambda *_: object())
     token = input_owner._INPUT_DISPATCH.set(None)
     try:
         input_owner._admit_input_dispatch(session, current.attempt_id, current)

@@ -422,6 +422,32 @@ def test_report_qualification_uses_exact_application_probe_never_a_later_unrelat
     assert result["state"] == ("qualified" if own_present and not expired and certified else "unknown")
 
 
+def test_qualification_decodes_retained_probes_only_without_an_in_flight_witness(monkeypatch):
+    from tests.test_readability_context import context
+    brief, _packet, _binding = context()
+    registry = execution.CalibratedEvaluators.__new__(execution.CalibratedEvaluators)
+    session = SimpleNamespace(policy=None, execution=SimpleNamespace(profile=None, qualifications=registry))
+    observed = SimpleNamespace(require=lambda *_: None, document=lambda: brief)
+    witness, stored, seen = {"probe": "in-flight"}, {"probe": "stored"}, []
+    selected = [witness]
+
+    def observation(_policy, _profile, _now, *, domain, probe):
+        seen.append(probe)
+        return {"state": "unknown"}
+
+    monkeypatch.setattr(execution.CalibratedEvaluators, "readability_observation", lambda _self, *a, **k: observation(*a, **k))
+    monkeypatch.setattr(execution, "project", lambda value: value)
+    monkeypatch.setattr("evidence_wiki.readability_probes.selected", lambda *_: selected[0])
+    monkeypatch.setattr(execution.native, "retained", lambda *_: pytest.fail("An in-flight witness decoded the journal."))
+    execution.qualification(session, observed)
+    assert seen == [witness]
+    selected[0] = None
+    monkeypatch.setattr(execution.native, "retained", lambda *_: [
+        {"kind": "execution_readability_probe", "request_id": "probe", "data": {"probe": stored}}])
+    execution.qualification(session, observed)
+    assert seen == [witness, stored]
+
+
 @pytest.mark.parametrize("failure", ["capacity", "zero_wait", "thread_start", "late_guard"])
 def test_real_bounded_guard_scheduling_failure_poisons_one_use_admission(custody, monkeypatch, failure):
     lease, payload, _clock, _probe = custody

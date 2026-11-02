@@ -10,6 +10,7 @@ from evidence_wiki.onboarding_contract import _matches
 RESOLUTION = "research-question-resolution/v1"
 DEPENDENCY_RESOLUTION = "research-question-resolution/v2"
 MAX_BYTES = 1_048_576
+_NATIVE_DOCUMENTS = None
 
 
 def refuse(reason):
@@ -17,10 +18,19 @@ def refuse(reason):
         details={"reason": reason}, recoverable=False)
 
 
+def _native_documents():
+    """One read-only set per loaded contract; its only reader copies what it keeps."""
+    global _NATIVE_DOCUMENTS
+    from .pack_discovery import owner
+    contract = owner("_strict_contract")
+    if _NATIVE_DOCUMENTS is None or _NATIVE_DOCUMENTS[0] is not contract:
+        _NATIVE_DOCUMENTS = contract, contract.schema_documents()
+    return _NATIVE_DOCUMENTS[1]
+
+
 def _eligible_shape(native=None, *, version=RESOLUTION):
     if native is None:
-        from .pack_discovery import owner
-        native = owner("_strict_contract").schema_documents()
+        native = _native_documents()
     versions = (("evidence-strict-publication/v3",) if version == DEPENDENCY_RESOLUTION else
         ("evidence-strict-publication/v1", "evidence-strict-publication/v2"))
     question = deepcopy(native[versions[0]]["properties"]["questions"]["items"])

@@ -251,17 +251,19 @@ def qualification(session, observed, *, application_attempt_id=None):
     domain = observe_domain(observed.input_brief() if type(observed) in {_OwnedReadabilityInput, _OwnedArtifactInput} else project(observed.document()))
     probe_id = (native.child_id(native.child_id(application_attempt_id, "readability_application"), "readability_probe")
         if application_attempt_id is not None else None)
-    records = native.retained(session)
-    probes = [row["data"]["probe"] for row in records if row["kind"] == "execution_readability_probe"
-        and (probe_id is None or row["request_id"] == probe_id)]
-    if probe_id is not None and len(probes) != 1:
-        probes = []
     from .readability_probes import selected
     in_flight = selected(session, observed) if application_attempt_id is None else None
     if type(observed) is _OwnedReadabilityInput:
         in_flight = observed._input_admission.lease.configuration_probe(observed)
     elif application_attempt_id is not None:
         in_flight = None
+    # An in-flight witness settles this without the retained probes.
+    if in_flight is None or application_attempt_id is not None:
+        records = native.retained(session)
+        probes = [row["data"]["probe"] for row in records if row["kind"] == "execution_readability_probe"
+            and (probe_id is None or row["request_id"] == probe_id)]
+        if probe_id is not None and len(probes) != 1:
+            probes = []
     now = datetime.now(timezone.utc).isoformat()
     if application_attempt_id is not None:
         applications = [row["data"] for row in records if row["kind"] == "execution_application"
