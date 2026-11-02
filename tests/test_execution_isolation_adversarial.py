@@ -33,6 +33,7 @@ from evidence_wiki.research_execution import ResearchExecution
 from evidence_wiki.review_context import ReviewContext, create_review_context
 from evidence_wiki.run_policy import RunPolicy
 from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
+from tests._execution_fixture import AUTHORITY_EXPIRES_AT
 from tests.test_agent_execution import final
 from tests.test_review_context import inputs
 from tests.test_run_policy import policy_document
@@ -57,7 +58,7 @@ def signer(*, generator_config="worker", generator_controller="generator", revie
     return HostReviewSigner("authority", "1",
         identity(generator_config, "generator-principal", generator_controller, "generator", b"g"),
         (identity(reviewer_config, "reviewer-principal", reviewer_controller, "evaluator", b"r"),
-            identity("counter", "critic-principal", "critic", "evaluator", b"c")), "2027-01-01T00:00:00Z")
+            identity("counter", "critic-principal", "critic", "evaluator", b"c")), AUTHORITY_EXPIRES_AT)
 
 
 @pytest.mark.parametrize("change", ["generator_config", "generator_controller", "reviewer_config", "reviewer_controller", "issuer_generator"])
@@ -204,12 +205,12 @@ def native_attestation_case(tmp_path, *, swapped=None):
     protected = signer()
     if swapped == "reviewer":
         wrong = identity("judge", "critic-principal", "reviewer", "evaluator", b"c")
-        protected = HostReviewSigner("authority", "1", protected.generator, (wrong,), "2027-01-01T00:00:00Z")
+        protected = HostReviewSigner("authority", "1", protected.generator, (wrong,), AUTHORITY_EXPIRES_AT)
     if swapped == "generator":
         wrong = identity("worker", "other-generator", "generator", "generator", b"x")
-        protected = HostReviewSigner("authority", "1", wrong, protected.reviewers, "2027-01-01T00:00:00Z")
+        protected = HostReviewSigner("authority", "1", wrong, protected.reviewers, AUTHORITY_EXPIRES_AT)
     native_policy = {"schema_version": "evidence-trust-policy/v1", "policy_id": "authority", "policy_revision": "1",
-        "not_before": "2026-01-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+        "not_before": "2026-01-01T00:00:00Z", "expires_at": AUTHORITY_EXPIRES_AT,
         "principals": {principal: {"controller": controller, "roles": [role], "keys": {principal + "-key": (key * 32).hex()}}
             for principal, controller, role, key in (("generator-principal", "generator", "generator", b"g"),
                 ("reviewer-principal", "reviewer", "evaluator", b"r"), ("critic-principal", "critic", "evaluator", b"c"),

@@ -14,7 +14,7 @@ import pytest
 
 from evidence_wiki import verify_snapshot
 from evidence_wiki.errors import SourceError
-from tests._execution_fixture import authenticate, canonical, identifier
+from tests._execution_fixture import NEXT_YEAR, authenticate, canonical, identifier
 from tests._script_loader import load_isolated_module
 from tests._temporal_fixture import TemporalFixture, clock_claim
 
@@ -337,7 +337,7 @@ def test_temporal_export_refuses_unsupported_or_future_closure(host, invalid):
     if invalid == "unknown-checkpoint":
         selection["temporal"]["checkpoint"] = "sha256:" + "0" * 64
     elif invalid == "future-cutoff":
-        selection["temporal"]["cutoff"] = "2027-01-01T00:00:00Z"
+        selection["temporal"]["cutoff"] = f"{NEXT_YEAR}-01-01T00:00:00Z"
     elif invalid == "future-execution":
         selection["temporal"]["cutoff"] = "2026-09-10T00:00:00Z"
     before = (host.host / "evidence-state.json").read_bytes()

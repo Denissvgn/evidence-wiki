@@ -6,7 +6,6 @@ import contextlib
 import copy
 import io
 import json
-from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +15,7 @@ import yaml
 from evidence_wiki._filesystem import os
 from tests._execution_fixture import (
     KEYS,
+    NEXT_YEAR,
     NOW,
     SOURCE_ID,
     authenticate,
@@ -167,7 +167,7 @@ def test_evaluator_names_and_embedded_policy_cannot_authorize_a_pass(trusted, mo
     elif change == "policy-revision":
         config["evidence_trust"]["policy_revision"] = "2"
     elif change == "expiry":
-        now += timedelta(days=365)
+        now = NOW.replace(year=NEXT_YEAR + 1)
     elif change == "workspace-trust":
         authority = root / "embedded-policy.json"
         monkeypatch.setenv("EVIDENCE_WIKI_AUTHORITY_FILE", str(authority.resolve()))

@@ -15,7 +15,7 @@ from evidence_wiki.mutation_store import capture_revision
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.review_packet_execution import context_parameters, current_assembly
 from evidence_wiki.review_page_session import assembled
-from tests._execution_fixture import authenticate, closure
+from tests._execution_fixture import NEXT_YEAR, authenticate, closure
 from tests._temporal_fixture import clock_claim
 from tests._usage_fixture import UsageFixture
 from tests.test_review_packet_execution import configured as configured
@@ -184,7 +184,7 @@ def test_combined_read_revalidates_after_projection_before_return(packet_case, m
                         class ExpiredClock:
                             @classmethod
                             def now(cls, zone):
-                                return datetime(2027, 1, 2, tzinfo=timezone.utc)
+                                return datetime(NEXT_YEAR + 1, 1, 2, tzinfo=timezone.utc)
                         monkeypatch.setattr(usage, "datetime", ExpiredClock)
                     else:
                         activation = replace(context, actor_ref="other-owner").activate()

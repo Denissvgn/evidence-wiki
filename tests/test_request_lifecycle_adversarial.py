@@ -10,7 +10,7 @@ import yaml
 from evidence_wiki import Workspace
 from evidence_wiki.host_context import HostContext
 from evidence_wiki.pack_discovery import owner
-from tests._execution_fixture import authenticate, identifier
+from tests._execution_fixture import NEXT_YEAR, authenticate, identifier
 from tests._usage_fixture import UsageFixture
 from tests.test_mutation_operations import roots as roots
 from tests.test_request_lifecycle_owner import ready_source, writer_context
@@ -266,14 +266,14 @@ def test_protected_fulfillment_holds_usage_lock_through_actual_store_write(setup
 @pytest.mark.parametrize("changed", ["clock", "trust"])
 def test_protected_native_revalidates_after_callback_before_effect(setup, tmp_path, monkeypatch, changed):
     root, *_ = setup
-    request_id, fixture, _body = protected_source(setup, tmp_path, monkeypatch, expires="2026-12-15T00:00:00Z")
+    request_id, fixture, _body = protected_source(setup, tmp_path, monkeypatch, expires=f"{NEXT_YEAR}-12-15T00:00:00Z")
     native = owner("source_requests")
     actual = native.run_fulfill_current_request
     injected = []
     class Later(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime(2026, 12, 20, tzinfo=timezone.utc).astimezone(tz)
+            return datetime(NEXT_YEAR, 12, 20, tzinfo=timezone.utc).astimezone(tz)
     with protected_context(setup, fixture).activate(), Workspace.open(root) as workspace:
         store = native.requests_path(root, fixture.config)
         before = store.read_bytes()

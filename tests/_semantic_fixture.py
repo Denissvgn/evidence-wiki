@@ -41,7 +41,7 @@ from evidence_wiki.pack_discovery import owner
 from evidence_wiki.qualification_calibration import calibration_suite
 from evidence_wiki.reference_oracles import protected_cases
 from evidence_wiki.workflow_contracts import EXECUTION_OBSERVATION, JOB_V3
-from tests._execution_fixture import KEYS
+from tests._execution_fixture import AUTHORITY_EXPIRES_AT, KEYS
 from tests._execution_fixture import canonical as authenticated_bytes
 from tests.test_auxiliary_calibration import ProtectedHost
 from tests.test_draft_admission import update_policy
@@ -234,7 +234,7 @@ def build_native(root, control, proposal, authority, policy_document, grants, tm
     reviewers = [SigningIdentity(config, principal, principal + "-key", controller, "evaluator", bytes.fromhex(key))
         for config, _task_role, controller, principal, key in REVIEWERS]
     signer = HostReviewSigner("lab-authority", "1", SigningIdentity("researcher", "runner", "runner-key", "runner",
-        "generator", bytes.fromhex(KEYS["runner"])), reviewers, "2027-01-01T00:00:00Z")
+        "generator", bytes.fromhex(KEYS["runner"])), reviewers, AUTHORITY_EXPIRES_AT)
     execution = ResearchExecution(executor, qualifications=qualifications, review_signer=signer, observer_key=b"j" * 32)
     context = HostContext([root], grants | {"research_session.semantic_report", "research_session.resolution"}, "caller", [root],
         authority_file=authority.policy_path, state_directory=authority.host, mutation_control_directory=control,
