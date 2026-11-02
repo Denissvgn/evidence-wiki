@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -35,6 +36,7 @@ MAX_ATTEMPTS = 3
 MAX_DEPTH = 64
 MAX_PINNED_DIRECTORIES = 32
 EXCLUDED_ROOTS = frozenset({".git", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
+_UNPORTABLE_NAME = re.compile(r'[\\:<>"|?*\x00-\x1f]|[. ]\Z')
 
 
 def refuse(code: str, message: str, **details: Any) -> ScriptRefusal:
@@ -67,15 +69,10 @@ def observation(info: os.stat_result) -> tuple[int, ...]:
     return result
 
 
-def excluded(relative: str) -> bool:
-    parts = Path(relative).parts
-    return bool(parts and (parts[0] in EXCLUDED_ROOTS or "__pycache__" in parts))
-
-
 def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
     """Record directory membership and regular file identities without following links."""
     result: dict[str, tuple[int, ...]] = {}
-    pending = [(root, "", 0)]
+    pending = [(os.fspath(root), "", 0)]
     file_count = 0
     byte_count = 0
     entry_count = 0
@@ -83,8 +80,8 @@ def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
         directory, prefix, depth = pending.pop()
         if depth > MAX_DEPTH:
             raise refuse("EVIDENCE_REVISION_LIMIT", "Workspace nesting exceeds the capture bound.", max_depth=MAX_DEPTH)
-        directory_info = directory.lstat()
-        if (not stat.S_ISDIR(directory_info.st_mode) or directory.is_symlink()
+        directory_info = os.lstat(directory)
+        if (not stat.S_ISDIR(directory_info.st_mode) or os.path.islink(directory)
                 or getattr(directory_info, "st_file_attributes", 0) & 0x400):
             raise refuse("EVIDENCE_REVISION_UNSAFE", "Capture cannot traverse a linked directory.", path=prefix or ".")
         result[prefix or "."] = observation(directory_info)
@@ -98,12 +95,13 @@ def observe_tree(root: Path) -> dict[str, tuple[int, ...]]:
             names.sort()
         for name in names:
             relative = f"{prefix}/{name}" if prefix else name
-            if excluded(relative):
+            # An excluded ancestor is never queued, so only this name can exclude the entry.
+            if name == "__pycache__" or (not prefix and name in EXCLUDED_ROOTS):
                 continue
-            if any(character in name for character in '\\:<>"|?*') or name.endswith((".", " ")) or any(ord(character) < 32 for character in name):
+            if _UNPORTABLE_NAME.search(name):
                 raise refuse("EVIDENCE_REVISION_UNSAFE", "Capture path is not portable.", path=relative)
-            path = directory / name
-            info = path.lstat()
+            path = os.path.join(directory, name)
+            info = os.lstat(path)
             if getattr(info, "st_file_attributes", 0) & 0x400:
                 raise refuse("EVIDENCE_REVISION_UNSAFE", "Capture cannot traverse a reparse point.", path=relative)
             if stat.S_ISDIR(info.st_mode):

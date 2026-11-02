@@ -81,8 +81,8 @@ def state_from(capture):
     return state, raw
 
 
-def pending(root):
-    state, _raw = state_from(capture_workspace(Path(root).resolve()))
+def pending(root, capture=None):
+    state, _raw = state_from(capture or capture_workspace(Path(root).resolve()))
     return [key for key, request in state["requests"].items() if request.get("status") == "pending"]
 
 

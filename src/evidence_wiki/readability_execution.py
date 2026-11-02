@@ -46,6 +46,7 @@ class _InputDispatch:
         self.lease = None
         self._origin = self
         self._parent_lease = None
+        self._retained_witness = None
 
     def __copy__(self):
         refuse("input_dispatch_not_fresh")
@@ -55,9 +56,15 @@ class _InputDispatch:
 
     def require(self, session, attempt):
         if (self._origin is not self or session is not self.session or self.request_id != self.attempt.job["id"]
-                or self.request_id != self.attempt.attempt_id or attempt.document() != self.attempt.document() or self.invalidated
-                or canonical_records(native.retained(session)) != self.records):
+                or self.request_id != self.attempt.attempt_id or attempt.document() != self.attempt.document() or self.invalidated):
             refuse("input_dispatch_identity_changed")
+        witness = native.retained_witness(session)
+        if witness != self._retained_witness:
+            if canonical_records(native.retained(session)) != self.records:
+                refuse("input_dispatch_identity_changed")
+            # Equal bytes around one complete decode prove them; later equal bytes need no decode.
+            if native.retained_witness(session) == witness:
+                self._retained_witness = witness
 
     def transfer(self, session, attempt):
         self.require(session, attempt)
@@ -244,17 +251,19 @@ def qualification(session, observed, *, application_attempt_id=None):
     domain = observe_domain(observed.input_brief() if type(observed) in {_OwnedReadabilityInput, _OwnedArtifactInput} else project(observed.document()))
     probe_id = (native.child_id(native.child_id(application_attempt_id, "readability_application"), "readability_probe")
         if application_attempt_id is not None else None)
-    records = native.retained(session)
-    probes = [row["data"]["probe"] for row in records if row["kind"] == "execution_readability_probe"
-        and (probe_id is None or row["request_id"] == probe_id)]
-    if probe_id is not None and len(probes) != 1:
-        probes = []
     from .readability_probes import selected
     in_flight = selected(session, observed) if application_attempt_id is None else None
     if type(observed) is _OwnedReadabilityInput:
         in_flight = observed._input_admission.lease.configuration_probe(observed)
     elif application_attempt_id is not None:
         in_flight = None
+    # An in-flight witness settles this without the retained probes.
+    if in_flight is None or application_attempt_id is not None:
+        records = native.retained(session)
+        probes = [row["data"]["probe"] for row in records if row["kind"] == "execution_readability_probe"
+            and (probe_id is None or row["request_id"] == probe_id)]
+        if probe_id is not None and len(probes) != 1:
+            probes = []
     now = datetime.now(timezone.utc).isoformat()
     if application_attempt_id is not None:
         applications = [row["data"] for row in records if row["kind"] == "execution_application"

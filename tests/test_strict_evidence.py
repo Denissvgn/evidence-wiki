@@ -410,3 +410,12 @@ def test_current_accepted_claims_do_not_publish_invalid_materialized_grounding(h
     assert result["verdict"] == "blocked_on_sources"
     assert result["questions"][0]["claims"] == []
     assert "strict_release_not_eligible" in result["questions"][0]["gaps"]
+
+
+def test_returned_schema_documents_never_reach_validation():
+    invalid = {"schema_version": CONTRACT.POLICY_SCHEMA}
+    with pytest.raises(ValueError, match="strict_schema_field_missing"):
+        CONTRACT.document(invalid, CONTRACT.POLICY_SCHEMA)
+    CONTRACT.schema_documents()[CONTRACT.POLICY_SCHEMA]["required"].clear()
+    with pytest.raises(ValueError, match="strict_schema_field_missing"):
+        CONTRACT.document(invalid, CONTRACT.POLICY_SCHEMA)

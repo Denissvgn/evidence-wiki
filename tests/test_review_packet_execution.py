@@ -3,7 +3,9 @@
 import ast
 import hashlib
 import json
+import time
 from dataclasses import replace
+from itertools import count
 from types import SimpleNamespace
 
 import pytest
@@ -39,11 +41,14 @@ def configured(tmp_path, monkeypatch):
 def finish(session, attempt, prefix, *, retain_running=True):
     observation, reason = native._external(session, "invoke", attempt)
     assert reason is None
-    for index in range(32):
+    # A poll does not wait, so the attempt deadline bounds this rather than a poll count.
+    for index in count():
         if observation["state"] != "running":
             break
         if retain_running:
             native.intake(session, observation, request_id=prefix + ".running." + str(index))
+        else:
+            time.sleep(0.01)
         observation, reason = native._external(session, "poll", attempt)
         assert reason is None
     assert observation["state"] == "succeeded" and observation["final_accounting"]

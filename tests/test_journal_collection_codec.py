@@ -200,7 +200,8 @@ def test_actual_page_nodes_are_charged_before_hashing_or_parsing_later_pages(mon
 def test_logical_expansion_is_charged_before_retaining_or_encoding_later_children(monkeypatch):
     from evidence_wiki import research_journal_contracts as records_codec
 
-    records = [_record(index) for index in range(4)]
+    # Transport encoding only runs above one record's physical bound.
+    records = [_record(index, {"chunks": [f"expansion-{index}" + "x" * 59999] * 5}) for index in range(4)]
     monkeypatch.setattr(codec, "MAX_BYTES", len(_json(records[:2])))
     events = []
     original_owned = codec._canonical_owned_record
@@ -227,13 +228,13 @@ def test_collection_uses_one_owning_detachment_and_returns_fresh_logical_records
     records = [_record(index) for index in range(2)]
     expected = deepcopy(records)
     seen = []
-    original = records_codec.detached_record
+    original = records_codec._detached_record_bytes
 
     def detaching(value):
         seen.append(value["sequence"])
         return original(value)
 
-    monkeypatch.setattr(records_codec, "detached_record", detaching)
+    monkeypatch.setattr(records_codec, "_detached_record_bytes", detaching)
     encoded = codec.encode_collection(records)
     assert seen == [0, 1]
     assert encoded["artifact_bytes"] == _json(expected)

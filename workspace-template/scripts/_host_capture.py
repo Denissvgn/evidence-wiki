@@ -131,7 +131,7 @@ def read(root: Path, relative: str, maximum=MAX_BYTES, *, read_input=None):
         if read_input is not None:
             raw = read_input(root, relative, maximum)
         else:
-            revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision")
+            revision = load_workspace_module(_SCRIPT_DIR, "_evidence_revision", cache=_VALIDATION_MODULES)
             if os.name == "nt":
                 reader = load_workspace_module(_SCRIPT_DIR, "_windows_files")
                 raw = reader.read_legacy_file(root, relative, revision.observation(info), maximum)

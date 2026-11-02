@@ -502,6 +502,22 @@ class ErrorEnvelopeTests(unittest.TestCase):
 
         self.assertEqual(4, caught.exception.code)
 
+    def test_refusal_from_system_exit_reraises_a_typed_refusal(self):
+        """A refusal that is also a SystemExit keeps its type, code and details."""
+        helper = load_helper()
+
+        class TypedRefusal(helper.ScriptRefusal, SystemExit):
+            pass
+
+        refusal = TypedRefusal("EVIDENCE_USAGE_REFUSED", "Refused.", exit_code=2, details={"reason": "kept"})
+        # Python 3.14 sets this itself; older versions leave it None.
+        refusal.code = "Refused."
+
+        with self.assertRaises(TypedRefusal) as caught:
+            helper.ScriptRefusal.from_system_exit(refusal, exit_code=1)
+
+        self.assertIs(refusal, caught.exception)
+
     def test_emit_refusal_renders_both_modes_and_returns_the_exit_code(self):
         helper = load_helper()
         refusal = helper.ScriptRefusal(
