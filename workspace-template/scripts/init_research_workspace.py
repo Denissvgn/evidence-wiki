@@ -3562,6 +3562,29 @@ def emit_initializer_error(
     return 2
 
 
+def emit_initializer_exit(exc: SystemExit, *, operation: str) -> int:
+    """Render one validation ``SystemExit`` the same way for every front end.
+
+    The direct script and the packaged ``evidence-wiki`` command both route their
+    ``except SystemExit`` through here, so a refusal that carries its own code and
+    remediation keeps them whichever one caught it. An exit without a message
+    (``--help``, an ``argparse`` usage status) is not a refusal and propagates.
+    """
+    if isinstance(exc, ProviderRegistrationExit):
+        # Checked before the generic branch: this refusal already knows its own stable
+        # code and the install-or-repair route, which the sentence alone cannot express.
+        return emit_initializer_error(
+            str(exc),
+            operation=operation,
+            error_code=exc.error_code,
+            remediation=exc.remediation,
+            details=exc.details,
+        )
+    if not isinstance(exc.code, str):
+        raise exc
+    return emit_initializer_error(exc.code, operation=operation)
+
+
 def upgrade_main(argv: list[str] | None = None) -> int:
     args = parse_upgrade_args(argv)
     starter_root = Path(args.starter_root).expanduser().resolve() if args.starter_root else default_starter_root()
@@ -3601,20 +3624,8 @@ def entrypoint(argv: list[str] | None = None) -> int:
     """Normalize direct-script validation failures without changing ``main`` tests."""
     try:
         return main(argv)
-    except ProviderRegistrationExit as exc:
-        # Checked before the generic branch: this refusal already knows its own stable
-        # code and the install-or-repair route, which the sentence alone cannot express.
-        return emit_initializer_error(
-            str(exc),
-            operation="initialization",
-            error_code=exc.error_code,
-            remediation=exc.remediation,
-            details=exc.details,
-        )
     except SystemExit as exc:
-        if not isinstance(exc.code, str):
-            raise
-        return emit_initializer_error(exc.code, operation="initialization")
+        return emit_initializer_exit(exc, operation="initialization")
 
 
 if __name__ == "__main__":

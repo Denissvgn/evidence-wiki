@@ -63,9 +63,7 @@ def _run_initializer(forwarded_args: list[str]) -> int:
         try:
             return int(initializer.main(args) or 0)
         except SystemExit as exc:
-            if not isinstance(exc.code, str):
-                raise
-            return int(initializer.emit_initializer_error(exc.code, operation="initialization"))
+            return int(initializer.emit_initializer_exit(exc, operation="initialization"))
 
 
 def _run_upgrader(forwarded_args: list[str]) -> int:
@@ -124,9 +122,7 @@ def _run_upgrader(forwarded_args: list[str]) -> int:
                 )
             )
         except SystemExit as exc:
-            if not isinstance(exc.code, str):
-                raise
-            return int(initializer.emit_initializer_error(exc.code, operation="upgrade"))
+            return int(initializer.emit_initializer_exit(exc, operation="upgrade"))
 
 
 def _run_contract() -> int:
