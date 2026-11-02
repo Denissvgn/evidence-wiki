@@ -110,6 +110,7 @@ ReviewConfigError = _review_config.ReviewConfigError
 review_config = _review_config.review_config
 _normalized_contract = load_workspace_module(_SCRIPT_DIR, "_normalized_contract")
 _verify_quotes = load_workspace_module(_SCRIPT_DIR, "verify_quotes")
+_CHECK_MODULES = {}
 
 # `sources/normalized/<safe id>.structured.json`, borrowed rather than spelled again so a
 # sidecar the normalizer writes and lint looks for can never be two different filenames.
@@ -2392,8 +2393,8 @@ def check_delegated_acquisition_records(
     orchestration over history.
     """
     stats = results["stats"]
-    source_requests = load_workspace_module(_SCRIPT_DIR, "source_requests")
-    orchestration_config = load_workspace_module(_SCRIPT_DIR, "_orchestration_config")
+    source_requests = load_workspace_module(_SCRIPT_DIR, "source_requests", cache=_CHECK_MODULES)
+    orchestration_config = load_workspace_module(_SCRIPT_DIR, "_orchestration_config", cache=_CHECK_MODULES)
     try:
         delegated = orchestration_config.is_delegated(orchestration_config.orchestration_config(config))
     except orchestration_config.OrchestrationConfigError:
@@ -3994,7 +3995,7 @@ def run_checks(
         selected_files = wiki_files if question_paths is None else [path for path in wiki_files if path in question_paths]
         check_questions(project_root, selected_files, claim_staleness_window_hours(config), results, config)
     if config.get("computation") is not None:
-        computation = load_workspace_module(_SCRIPT_DIR, "_computation_service").status(project_root, config)
+        computation = load_workspace_module(_SCRIPT_DIR, "_computation_service", cache=_CHECK_MODULES).status(project_root, config)
         results["computation"] = computation
         if computation["status"] != "passed":
             issue(results, "HIGH", "computation_required_check_failed", "Required computation checks are incomplete or failed.",

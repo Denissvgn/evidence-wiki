@@ -243,3 +243,29 @@ def test_duplicate_original_and_unbounded_native_claim_text_refused():
     value["current"]["canonical_release"]["publication"]["questions"][0]["claims"][0]["text"] = "x" * 65537
     with pytest.raises(UsageError):
         _project(**value)
+
+
+def test_eligible_shape_reuses_read_only_documents_only_within_one_loaded_contract(monkeypatch):
+    from evidence_wiki import pack_discovery
+    from evidence_wiki import resolution_contracts as contracts
+    contract = pack_discovery.owner("_strict_contract")
+    builds = []
+
+    class LoadedContract:
+        def schema_documents(self):
+            builds.append(self)
+            return contract.schema_documents()
+
+    first, second = LoadedContract(), LoadedContract()
+    selected = [first]
+    monkeypatch.setattr(contracts, "_NATIVE_DOCUMENTS", None)
+    monkeypatch.setattr(pack_discovery, "owner", lambda _stem: selected[0])
+    expected = contracts._eligible_shape(contract.schema_documents())
+    shape = contracts._eligible_shape()
+    assert shape == expected
+    shape["properties"]["claims"]["items"]["anyOf"][0]["properties"].clear()
+    assert contracts._eligible_shape() == expected
+    assert builds == [first]
+    selected[0] = second
+    assert contracts._eligible_shape() == expected
+    assert builds == [first, second]

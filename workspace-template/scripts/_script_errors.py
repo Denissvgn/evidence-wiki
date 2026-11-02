@@ -973,9 +973,12 @@ class ScriptRefusal(Exception):
 
         A ``SystemExit`` that carries no message is process control rather than a
         refusal, and is re-raised untouched — the same choice ``handle_system_exit``
-        makes, kept here so a seam gets it right without repeating the check.
+        makes, kept here so a seam gets it right without repeating the check. So is
+        one that already is a refusal, whose code and details must survive: Python
+        3.14 fills ``code`` with the message of a class that also derives from
+        ``SystemExit``, so that field cannot tell the two apart.
         """
-        if not isinstance(exc.code, str):
+        if is_refusal(exc) or not isinstance(exc.code, str):
             raise exc
         message = exc.code
         return cls(

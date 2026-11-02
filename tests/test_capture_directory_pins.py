@@ -260,3 +260,28 @@ def test_capture_drift_remains_primary_when_directory_cleanup_also_fails(tmp_pat
         revision.capture_workspace(root, max_attempts=1)
     assert refused.value.error_code == "EVIDENCE_REVISION_CHANGED"
     assert isinstance(refused.value.__cause__, OSError)
+
+
+def test_tree_scan_excludes_only_declared_caches_and_refuses_unportable_names(tmp_path, revision):
+    root = tmp_path / "workspace"
+    (root / "kept/.git").mkdir(parents=True)
+    (root / "kept/.git/file").write_bytes(b"Only the workspace root declares these caches.")
+    for directory in (".git", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache", "__pycache__", "kept/__pycache__"):
+        (root / directory).mkdir(exist_ok=True)
+        (root / directory / "cache").write_bytes(b"Declared runtime cache.")
+    assert set(revision.observe_tree(root)) == {".", "kept", "kept/.git", "kept/.git/file"}
+    for name in ("back\\slash", "a:b", "a<b", "a>b", 'a"b', "a|b", "a?b", "a*b", "trailing.", "trailing ", "line\nbreak", "tab\tname", "\x1f"):
+        unsafe = root / "kept" / name
+        unsafe.write_bytes(b"")
+        with pytest.raises(Exception) as refused:
+            revision.observe_tree(root)
+        assert refused.value.error_code == "EVIDENCE_REVISION_UNSAFE"
+        assert refused.value.details["path"] == f"kept/{name}"
+        unsafe.unlink()
+    for name in (".hidden", "a.b", "a b", "\x7f", "é"):
+        (root / "kept" / name).write_bytes(b"")
+    assert {f"kept/{name}" for name in (".hidden", "a.b", "a b", "\x7f", "é")} <= set(revision.observe_tree(root))
+    (tmp_path / "linked").symlink_to(root, target_is_directory=True)
+    with pytest.raises(Exception) as refused:
+        revision.observe_tree(tmp_path / "linked")
+    assert refused.value.error_code == "EVIDENCE_REVISION_UNSAFE"

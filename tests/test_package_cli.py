@@ -925,6 +925,45 @@ class PackageCliTests(unittest.TestCase):
             results = self.smoke_results(target)
             self.assertTrue(results["ok"], results["issues"])
 
+    def test_init_provider_registration_refusal_matches_direct_script(self):
+        # The refusal's code and install remediation cannot be inferred from its
+        # sentence, so a front end that renders only the sentence reports a generic
+        # code instead; the packaged command must print what the script prints.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            arguments = [
+                "--project-name",
+                "provider-refusal-workspace",
+                "--project-description",
+                "Workspace naming an acquisition provider nothing registers.",
+                "--acquisition-provider",
+                "not-a-real-provider",
+            ]
+            cli_target = Path(tmpdir) / "cli-workspace"
+            direct_target = Path(tmpdir) / "direct-workspace"
+            code, stdout, stderr = self.run_cli_result("init", "--target", str(cli_target), *arguments)
+            with resources.assets_root() as assets:
+                direct = subprocess.run(
+                    [
+                        sys.executable,
+                        str(assets / "workspace-template" / "scripts" / "init_research_workspace.py"),
+                        "--target",
+                        str(direct_target),
+                        *arguments,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            self.assertFalse(cli_target.exists())
+            self.assertFalse(direct_target.exists())
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout)
+        self.assertTrue(stderr.startswith("PROVIDER_NOT_REGISTERED: "), stderr)
+        self.assertIn("evidence_wiki.acquisition_providers", stderr)
+        self.assertEqual((direct.returncode, direct.stdout, direct.stderr), (code, stdout, stderr))
+
     def test_questions_add_and_export_round_trip_through_cli(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / "workspace"

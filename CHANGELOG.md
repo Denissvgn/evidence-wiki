@@ -12,6 +12,10 @@
 
 ### Fixed
 
+- Report a provider no installed distribution registers from `evidence-wiki
+  init` with its own error code and install or repair remediation, matching
+  the starter's initializer script instead of a generic workspace error.
+
 - Keep dependency review material scoped to each claim and its premises after
   question resolution, so edits to sibling claims do not invalidate unrelated
   reviews. Current grounding and publication checks remain required.

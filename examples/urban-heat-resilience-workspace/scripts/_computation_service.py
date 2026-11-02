@@ -66,7 +66,7 @@ def required(project_root, config, *, view=None):
     if config.get("computation") is None:
         return None
     try:
-        if sibling("_computation_effects").pending(project_root):
+        if sibling("_computation_effects").pending(project_root, capture):
             raise refusal("computation_recovery_required")
         result = evaluate(project_root, config=config, capture=capture, view=view)
         if result["status"] != "passed":
@@ -82,9 +82,10 @@ def status(project_root, config):
     if config.get("computation") is None:
         return None
     try:
-        result = evaluate(project_root, config=config)
+        capture = capture_workspace(Path(project_root).resolve())
+        result = evaluate(project_root, config=config, capture=capture)
         effects = sibling("_computation_effects")
-        state, _raw = effects.state_from(capture_workspace(Path(project_root).resolve()))
+        state, _raw = effects.state_from(capture)
         waiting = [key for key, item in state["requests"].items() if item["status"] == "pending"]
         dispatch = []
         for row in result["clock"]["schedules"]:

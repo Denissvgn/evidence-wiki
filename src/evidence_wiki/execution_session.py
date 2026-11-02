@@ -245,6 +245,18 @@ def retained(session):
     return session.execution.records(session)
 
 
+def retained_witness(session):
+    """Exact bytes that ``retained`` decodes under this binding and observer key."""
+    from .research_session import _load
+
+    controller = _load(session.root, "run_controller")
+    return (digest(session.binding),
+        controller._read_run_bytes(controller.run_state_path(session.root, session.run_id),
+            maximum=controller.JOURNAL_MAX_EVENT_BYTES, optional=True),
+        controller._read_run_bytes(controller.events_path(session.root, session.run_id),
+            maximum=controller.JOURNAL_MAX_BYTES, optional=True))
+
+
 def append(session, kind, request_id, data):
     from .research_session import _owner
 
