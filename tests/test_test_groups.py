@@ -72,6 +72,20 @@ def test_groups_preserve_order_and_keep_large_modules_intact():
     assert [node for group in result for node in group] == nodes
 
 
+def test_isolated_modules_form_their_own_groups_in_collection_order(monkeypatch):
+    monkeypatch.setattr(GROUPS, "ISOLATED_MODULES", frozenset({"b.py", "d.py"}))
+    nodes = ["a.py::a", "b.py::b", "b.py::c", "c.py::d", "d.py::e", "e.py::f", "e.py::g"]
+    result = GROUPS.groups(nodes, 4)
+    assert result == [nodes[:1], nodes[1:3], nodes[3:4], nodes[4:5], nodes[5:]]
+    assert [node for group in result for node in group] == nodes
+
+
+def test_every_isolated_module_is_a_collected_test_module():
+    assert GROUPS.ISOLATED_MODULES
+    for name in GROUPS.ISOLATED_MODULES:
+        assert (ROOT / name).is_file() and Path(name).name.startswith("test_"), name
+
+
 def test_source_identity_includes_frozen_data_and_ignores_interpreter_caches(tmp_path):
     fixture = tmp_path / "tests/fixtures/cases.json"
     fixture.parent.mkdir(parents=True)
