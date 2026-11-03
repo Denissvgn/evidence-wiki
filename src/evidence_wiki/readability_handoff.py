@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from . import execution_session as native
+from ._ordered_clock import ordered
 from .errors import UsageError
 from .mutation_contracts import canonical, digest
 from .readability_context import create
@@ -54,7 +55,7 @@ class ReadabilityHandoffLease:
         self.session, self.attempt = session, attempt
         self._admission, self._executor, self._running = admission, None, None
         self._deadline = started_monotonic + min(wait_seconds, session.execution.profile.readability.handoff.delivery_seconds)
-        self._clock = datetime.now(timezone.utc)
+        self._clock = ordered(datetime.now(timezone.utc))
         self._wall_deadline = min(native.deadline(session), datetime.fromisoformat(attempt.job["deadline_utc"]))
         self._thread = None
         self._view = self._config = self._capture = self._owned = None
@@ -94,7 +95,7 @@ class ReadabilityHandoffLease:
     def _configuration_observed(self):
         with self._admission.configuration_custody(self):
             self._time_check()
-            now = datetime.now(timezone.utc)
+            now = ordered(datetime.now(timezone.utc))
             plan = self.session.execution.profile.readability
             expires = min(now + timedelta(seconds=plan.probe_lifetime_seconds), self._wall_deadline)
             parent = json.loads(self._admission.records)[-1]["data"]["readability_parent"]
@@ -140,7 +141,7 @@ class ReadabilityHandoffLease:
             refuse("input_domain_unknown")
         if domain["semantic_basis_id"] != value["semantic_basis_id"]:
             refuse("input_domain_changed")
-        now = datetime.now(timezone.utc)
+        now = ordered(datetime.now(timezone.utc))
         if now < datetime.fromisoformat(value["observed_utc"]):
             refuse("dispatch_probe_not_yet_valid")
         if now >= datetime.fromisoformat(value["expires_utc"]):
@@ -212,7 +213,7 @@ class ReadabilityHandoffLease:
             self._failure = {"stage": self._stage, "owner_reason": code}
 
     def _time_check(self):
-        now = datetime.now(timezone.utc)
+        now = ordered(datetime.now(timezone.utc))
         if time.monotonic() >= self._deadline or now >= self._wall_deadline or now < self._clock:
             refuse("handoff_deadline_or_clock_invalid")
         self._clock = now

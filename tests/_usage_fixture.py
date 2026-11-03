@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import SkipTest
 
 from evidence_wiki._filesystem import os
-from tests._execution_fixture import authenticate, canonical, closure, host_policy, identifier
+from tests._execution_fixture import AUTHORITY_EXPIRES_AT, authenticate, canonical, closure, host_policy, identifier
 
 
 def require_host_storage():
@@ -99,7 +99,7 @@ class UsageFixture:
         grant = {"schema_version": "evidence-usage-grant/v1", "source_id": source_id, "source_revision": revision,
                  "permissions": {"retrieval": retrieval, "training": training, "export": export},
                  "purposes": ["research", "qa-export", "training-snapshot"], "consumers": ["evidence-wiki"],
-                 "not_before": "2026-01-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+                 "not_before": "2026-01-01T00:00:00Z", "expires_at": AUTHORITY_EXPIRES_AT,
                  "redaction_policy": {"id": "laboratory-scrub", "revision": "1"}, "retention": "host-managed"}
         scrub = {"schema_version": "evidence-scrub-receipt/v1", "sanitized_revision": revision,
                  "redaction_policy": copy.deepcopy(grant["redaction_policy"]), "tool": {"name": "host-scrubber", "version": "1"},

@@ -15,6 +15,10 @@ import yaml
 from evidence_wiki._filesystem import os
 
 NOW = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+# Host authority is checked against the real clock, so it must outlast any run by
+# at least a year; dated fixtures that must stay ahead of the clock use NEXT_YEAR.
+NEXT_YEAR = datetime.now(timezone.utc).year + 1
+AUTHORITY_EXPIRES_AT = f"{NEXT_YEAR + 1}-01-01T00:00:00Z"
 SOURCE_ID = "execution:lab"
 KEYS = {"runner": "11" * 32, "evaluator": "22" * 32, "owner": "33" * 32}
 
@@ -39,7 +43,7 @@ def authenticate(payload, principal, role):
     auth = {"schema_version": "evidence-authentication/v1", "scheme": "hmac-sha256",
             "principal": principal, "key_id": principal + "-key", "role": role,
             "policy_id": "lab-authority", "policy_revision": "1",
-            "issued_at": "2026-09-10T00:10:00Z", "expires_at": "2027-01-01T00:00:00Z"}
+            "issued_at": "2026-09-10T00:10:00Z", "expires_at": AUTHORITY_EXPIRES_AT}
     message = b"evidence-attestation/v1\0" + canonical({"payload": payload, "authentication": auth})
     auth["signature"] = hmac.new(bytes.fromhex(KEYS[principal]), message, hashlib.sha256).hexdigest()
     return {"payload": copy.deepcopy(payload), "authentication": auth}
@@ -47,7 +51,7 @@ def authenticate(payload, principal, role):
 
 def host_policy(path: Path):
     policy = {"schema_version": "evidence-trust-policy/v1", "policy_id": "lab-authority", "policy_revision": "1",
-              "not_before": "2026-01-01T00:00:00Z", "expires_at": "2027-01-01T00:00:00Z",
+              "not_before": "2026-01-01T00:00:00Z", "expires_at": AUTHORITY_EXPIRES_AT,
               "principals": {principal: {"controller": principal, "roles": [role], "keys": {principal + "-key": KEYS[principal]}}
                              for principal, role in (("runner", "generator"), ("evaluator", "evaluator"), ("owner", "usage"))},
               "revoked_keys": [], "revoked_envelopes": []}

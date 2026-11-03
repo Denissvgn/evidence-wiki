@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from evidence_wiki._filesystem import os
-from tests._execution_fixture import authenticate, canonical, identifier
+from tests._execution_fixture import NEXT_YEAR, authenticate, canonical, identifier
 from tests._script_loader import load_isolated_module
 from tests._usage_fixture import UsageFixture, require_host_storage
 
@@ -113,7 +113,7 @@ def test_unauthorized_bytes_refused_before_first_persistence(usage, changed):
         if changed == "usage-boolean":
             grant["permissions"]["training"] = 1
         elif changed == "future":
-            grant["not_before"] = "2026-12-31T00:00:00Z"
+            grant["not_before"] = f"{NEXT_YEAR}-12-31T00:00:00Z"
         elif changed == "expiry":
             grant["expires_at"] = "2026-09-09T00:00:00Z"
         else:

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from evidence_wiki._ordered_clock import ordered
 from evidence_wiki.agent_execution import ExecutionAttempt, ExecutionProfile, _ref, _utc, validate_observation
 from evidence_wiki.agent_qualification import QualificationError, _ratio
 from evidence_wiki.mutation_contracts import canonical, detached
@@ -271,7 +272,7 @@ class CalibrationAuthority:
         if (role.role != "evaluator" or len(required) != 1 or required[0]["controller_ref"] != role.controller_ref
                 or required[0]["human_required"]):
             fail("role_invalid")
-        now = observed_utc or datetime.now(timezone.utc).isoformat()
+        now = observed_utc or ordered(datetime.now(timezone.utc)).isoformat()
         if not _utc(now) < _utc(expires_utc):
             fail("expiry_invalid")
         binding = {"policy_id": policy.policy_id, "execution_profile_sha256": profile.sha256, "config_ref": config_ref,

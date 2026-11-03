@@ -780,8 +780,21 @@ def test_usefulness_requires_exact_claim_not_matching_substrings(text):
     assert not host.reference_useful(brief)
 
 
+def hold_cli_clock_inside_plan(monkeypatch):
+    """The CLI checks plan expiry against its wall clock; keep it inside the fixture's frozen window."""
+    from datetime import datetime, timezone
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2030, 1, 1, 12, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(cli, "datetime", Clock)
+
+
 def test_cli_rechecks_candidate_after_current_owner_reads(monkeypatch, tmp_path, capsys):
     data = owner_fixture(monkeypatch, tmp_path)
+    hold_cli_clock_inside_plan(monkeypatch)
     plan_path, output = tmp_path / "plan.json", tmp_path / "decision.json"
     manifests = iter(({"candidate": "fixed"}, {"candidate": "changed"}))
     monkeypatch.setattr(cli, "candidate_manifest", lambda _: next(manifests))
@@ -875,6 +888,7 @@ def test_cli_closure_io_expiry_is_inside_final_gate_seal(monkeypatch, tmp_path):
 
     from tools import _integration_improvement as gate
     data = owner_fixture(monkeypatch, tmp_path)
+    hold_cli_clock_inside_plan(monkeypatch)
     plan_path, originals_path, output = (tmp_path / name for name in ("plan.json", "originals.json", "decision.json"))
     originals = {data.plan["hosts"][0]["host_id"]: data.selection}
     monkeypatch.setattr(cli, "_read", lambda path: data.plan if path == plan_path else originals)

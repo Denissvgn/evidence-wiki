@@ -8,12 +8,15 @@ from pathlib import Path
 
 import yaml
 
-from tests._execution_fixture import authenticate, canonical, closure
+from tests._execution_fixture import NEXT_YEAR, authenticate, canonical, closure
 from tests._publication_fixture import write_ship_ready_vendor_fixture
 from tests._usage_fixture import UsageFixture
 
 SOURCE_ID = "web:vendor-official-product-spec"
 QUESTION = "vendor-product-spec"
+# The source lapses before host authority does, and stays current against the real clock.
+SOURCE_EXPIRES_AT = f"{NEXT_YEAR}-12-01T00:00:00Z"
+AFTER_SOURCE_EXPIRY = f"{NEXT_YEAR}-12-02T00:00:00Z"
 
 
 class AssessmentFixture(UsageFixture):
@@ -35,7 +38,7 @@ class AssessmentFixture(UsageFixture):
         self.normalized_path = self.root / "sources/normalized/web--vendor-official-product-spec.md"
         self.raw_path = self.root / "raw/web/vendor-product.html"
 
-    def temporal_source(self, *, expires="2026-12-01T00:00:00Z", supersedes=None, normalized=None, evidence=None):
+    def temporal_source(self, *, expires=SOURCE_EXPIRES_AT, supersedes=None, normalized=None, evidence=None):
         body, files = self.source(SOURCE_ID, normalized=normalized or self.normalized_path.read_bytes(),
                                   evidence=evidence if evidence is not None else
                                   {"raw/web/vendor-product.html": self.raw_path.read_bytes()})

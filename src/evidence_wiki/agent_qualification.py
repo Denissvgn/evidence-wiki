@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from ._ordered_clock import ordered
 from .agent_execution import ExecutionAttempt, ExecutionProfile, _digest, _json, _ref, _utc, validate_observation
 from .run_policy import RunPolicy
 
@@ -170,7 +171,7 @@ class QualificationAuthority:
         expected = reference_suite(cases, **{key: suite[key] for key in ("suite_ref", "split_ref", "domain_ref", "rubric")})
         if suite != expected:
             _fail("qualification_reference_digest_mismatch")
-        now = observed_utc or datetime.now(timezone.utc).isoformat()
+        now = observed_utc or ordered(datetime.now(timezone.utc)).isoformat()
         if not _utc(now) < _utc(expires_utc):
             _fail("qualification_validity_invalid")
         scope_id = scope_id or _scope(policy)

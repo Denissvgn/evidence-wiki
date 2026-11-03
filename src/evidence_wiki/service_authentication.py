@@ -3,6 +3,7 @@
 import secrets
 from datetime import datetime, timezone
 
+from evidence_wiki._ordered_clock import ordered
 from evidence_wiki.agent_execution import ExecutionAttempt, validate_observation
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.mutation_contracts import digest
@@ -82,10 +83,10 @@ def readability_credential(session):
         refuse("readability_native_credential_missing")
     config = owner("_strict_evidence").configuration(session.root)
     authority = owner("_evidence_authority")
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     trust = authority.load_trust(session.root, config, now)
     reference = _credential(session, matches[0], authority, trust, now, "critic")
-    closing = datetime.now(timezone.utc)
+    closing = ordered(datetime.now(timezone.utc))
     if (closing < now or authority.load_trust(session.root, config, closing)["content_hash"] != trust["content_hash"]
             or owner("_strict_evidence").configuration(session.root) != config):
         refuse("readability_current_credential_changed")
@@ -115,7 +116,7 @@ def status(session, *, plan=None):
     before = driver._current_identity(session)
     config = owner("_strict_evidence").configuration(session.root)
     authority = owner("_evidence_authority")
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     try:
         trust = authority.load_trust(session.root, config, now)
     except (Exception, SystemExit):
@@ -181,13 +182,13 @@ def status(session, *, plan=None):
         and generators[0]["credential_state"] == "verified" and all(any(row["slot_ref"] == slot
             and row["credential_state"] == "verified" and row["qualification_state"] == "qualified" for row in rows)
             for slot in required))
-    after = datetime.now(timezone.utc)
+    after = ordered(datetime.now(timezone.utc))
     if (after < now or authority.load_trust(session.root, config, after)["content_hash"] != trust["content_hash"]
             or owner("_strict_evidence").configuration(session.root) != config):
         refuse("service_current_identity_changed")
     closing = driver._current_identity(session)
     if held_epoch:
-        completed = datetime.now(timezone.utc)
+        completed = ordered(datetime.now(timezone.utc))
         if (completed < after
                 or authority.load_trust(session.root, config, completed)["content_hash"] != trust["content_hash"]
                 or owner("_strict_evidence").configuration(session.root) != config):

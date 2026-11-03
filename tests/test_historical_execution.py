@@ -10,7 +10,14 @@ import pytest
 
 from evidence_wiki import verify_snapshot
 from evidence_wiki.errors import SourceError
-from tests._execution_fixture import binding, canonical, closure, identifier, independently_recalculate
+from tests._execution_fixture import (
+    AUTHORITY_EXPIRES_AT,
+    binding,
+    canonical,
+    closure,
+    identifier,
+    independently_recalculate,
+)
 from tests._historical_fixture import HistoricalFixture, late_signature
 from tests._snapshot_fixture import SnapshotFixture
 from tests._temporal_fixture import clock_claim
@@ -213,7 +220,7 @@ def test_nested_run_requires_result_to_exist_at_consumers_input_cutoff(host, cut
         assert assessment["reason"] == "temporal_future_publication"
 
 
-def signature_at(payload, principal, role, issued, expires="2027-01-01T00:00:00Z"):
+def signature_at(payload, principal, role, issued, expires=AUTHORITY_EXPIRES_AT):
     import hashlib
     import hmac
 

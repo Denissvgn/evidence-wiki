@@ -30,7 +30,7 @@ from evidence_wiki.agent_qualification import (
     reference_suite,
 )
 from evidence_wiki.run_policy import RunPolicy
-from tests._execution_fixture import KEYS, canonical
+from tests._execution_fixture import AUTHORITY_EXPIRES_AT, KEYS, canonical
 from tests.test_agent_execution import LocalMeter
 from tests.test_run_policy import policy_document
 from tests.test_strict_evidence import CONTRACT, CORE, USAGE
@@ -292,7 +292,7 @@ def identity(principal, role, *, config_ref=None, controller=None, key=None):
 
 def signer():
     return HostReviewSigner("lab-authority", "1", identity("runner", "generator"),
-        (identity("evaluator", "evaluator"),), "2027-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        (identity("evaluator", "evaluator"),), AUTHORITY_EXPIRES_AT, "2026-01-01T00:00:00Z")
 
 
 @pytest.fixture
@@ -335,7 +335,7 @@ def test_parent_signer_cannot_route_to_human_or_expired_authority(strict_host):
         signer().registration(prepared, dict.fromkeys(CONTRACT.CHECKS, "pass"), "Reference judgment.", "review-request",
                               "2026-10-01T00:00:00Z")
     with pytest.raises(QualificationError, match="expired"):
-        signer().authorship("sha256:" + "a" * 64, "claim", "2027-01-01T00:00:00Z")
+        signer().authorship("sha256:" + "a" * 64, "claim", AUTHORITY_EXPIRES_AT)
 
 
 def test_malformed_prepared_review_produces_typed_refusal():

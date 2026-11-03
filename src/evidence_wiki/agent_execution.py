@@ -27,6 +27,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from ._ordered_clock import ordered
 from ._process_groups import ProcessGroupOwnershipError, ownership_for
 from .workflow_contracts import JOB, JOB_V2, JOB_V3, JOB_V4, JOB_V5, JOB_V6, MAX_BYTES, validate_document, validate_job
 
@@ -112,7 +113,7 @@ def _utc(value: str) -> datetime:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return ordered(datetime.now(timezone.utc)).isoformat()
 
 
 def _json(value: Any) -> bytes:

@@ -13,6 +13,7 @@ from evidence_wiki import execution_accounting as accounting
 from evidence_wiki import readability_execution as execution
 from evidence_wiki import research_execution, resolution_evidence
 from evidence_wiki import resolution_operations as resolution
+from evidence_wiki._ordered_clock import ALLOWANCE
 from evidence_wiki.cli import main
 from evidence_wiki.disagreement_configuration import DisagreementPlan
 from evidence_wiki.errors import UsageError
@@ -572,7 +573,7 @@ def test_private_dispatch_probe_reports_specific_domain_and_clock_refusals(custo
     elif change == "expired":
         clock["now"] = datetime.fromisoformat(lease._configuration.document()["probe"]["expires_utc"].replace("Z", "+00:00"))
     else:
-        clock["now"] -= timedelta(seconds=1)
+        clock["now"] -= ALLOWANCE + timedelta(seconds=1)
     with lease._admission.custody(lease):
         with pytest.raises(UsageError) as error:
             lease.configuration_probe(observed)

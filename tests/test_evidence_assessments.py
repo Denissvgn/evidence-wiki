@@ -17,8 +17,8 @@ import evidence_wiki
 from evidence_wiki.cli import main
 from evidence_wiki.errors import EvidenceWikiError
 from evidence_wiki.pack_discovery import owner
-from tests._assessment_fixture import SOURCE_ID, AssessmentFixture
-from tests._execution_fixture import authenticate, identifier
+from tests._assessment_fixture import AFTER_SOURCE_EXPIRY, SOURCE_EXPIRES_AT, SOURCE_ID, AssessmentFixture
+from tests._execution_fixture import NEXT_YEAR, authenticate, identifier
 from tests._script_loader import load_isolated_module
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "workspace-template/scripts"
@@ -61,7 +61,7 @@ def test_prepare_issue_and_consume_nonfinancial_assessment(host):
         assert payload["publication"]["verdict"] == "ship", payload
         assert payload["gaps"] == []
         assert payload["inputs"]["selected"] == {SOURCE_ID: host.body["source_revision"]}
-        assert payload["expires_at"] == "2026-12-01T00:00:00+00:00"
+        assert payload["expires_at"] == SOURCE_EXPIRES_AT.replace("Z", "+00:00")
         envelope = host.sign(prepared["registration"])
         try:
             receipt = workspace.assessments.issue(envelope)
@@ -119,7 +119,7 @@ def test_whole_envelope_tampering_and_unknown_capabilities_preserve_state(host, 
             "source": lambda p: p["inputs"]["selected"].update({SOURCE_ID: "sha256:" + "0" * 64}),
             "verdict": lambda p: p["publication"].update(verdict="no_ship"),
             "cutoff": lambda p: p["request"]["temporal"].update(mode="historical-audit", cutoff="2026-09-10T00:00:00Z"),
-            "expiry": lambda p: p.update(expires_at="2026-12-31T00:00:00Z"),
+            "expiry": lambda p: p.update(expires_at=f"{NEXT_YEAR}-12-31T00:00:00Z"),
             "capability": lambda p: p["required_capabilities"].append("unsupported/v1"),
             "schema": lambda p: p.update(schema_version="evidence-assessment/v999"),
         }
@@ -224,7 +224,7 @@ def test_clock_only_forecast_pagination_resume_and_supersession(host):
     with evidence_wiki.Workspace.open(host.root) as workspace:
         first = issue(host, workspace)
         second = issue(host, workspace)
-        horizon = "2026-12-02T00:00:00Z"
+        horizon = AFTER_SOURCE_EXPIRY
         prepared = workspace.assessments.plan_refresh(host.refresh(limit=1, evaluation_time=horizon))
         plan = prepared["plan"]
         assert not plan["coverage"]["complete"] and plan["coverage"]["truncated"]
@@ -367,7 +367,7 @@ def test_read_lock_prevents_concurrent_invalidation_and_derived_use_is_denied(ho
         assessment_id = envelope["payload"]["body"]["assessment"]["assessment_id"]
         node_id = identifier("host-derived-record/v1", {"assessment_id": assessment_id})
         host.transact(USAGE, "register", {"node_id": node_id, "kind": "derived", "parents": [assessment_id]})
-        prepared = workspace.assessments.plan_refresh(host.refresh(evaluation_time="2026-12-02T00:00:00Z"))
+        prepared = workspace.assessments.plan_refresh(host.refresh(evaluation_time=AFTER_SOURCE_EXPIRY))
         command = host.sign(prepared["application"])
         engine = workspace._script("evidence_assessments").check.__globals__
         original = engine["capture_workspace"]

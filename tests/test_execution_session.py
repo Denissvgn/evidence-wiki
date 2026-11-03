@@ -54,7 +54,7 @@ from evidence_wiki.workflow_contracts import (
     validate_document,
     validate_job,
 )
-from tests._execution_fixture import KEYS, authenticate, closure, identifier
+from tests._execution_fixture import AUTHORITY_EXPIRES_AT, KEYS, authenticate, closure, identifier
 from tests._execution_fixture import canonical as authenticated_bytes
 from tests._usage_fixture import UsageFixture
 from tests.test_draft_admission import draft_root as draft_fixture
@@ -430,13 +430,13 @@ def fixture(tmp_path, monkeypatch, request=None):
             "evaluator-key" if config_ref == "profile-a" else "counter-key", required["controller_ref"], "evaluator",
             bytes.fromhex("66" * 32 if options.get("service_wrong_key") and config_ref == "profile-a" else KEYS["evaluator"] if config_ref == "profile-a" else "44" * 32)))
     signer = HostReviewSigner("lab-authority", "1", SigningIdentity("researcher", "runner", "runner-key", "runner", "generator", bytes.fromhex(KEYS["runner"])),
-        reviewers, "2027-01-01T00:00:00Z")
+        reviewers, AUTHORITY_EXPIRES_AT)
     registry_owner = QualifiedEvaluators(qualifications, issuer)
     if readability is not None:
         from tests._readability_fixture import qualify
         registry_owner = qualify(profile, policy, readability_suite, registry_owner, executor, worker, selected_meter)
         reviewers.append(SigningIdentity("readability", "readability-reviewer", "readability-key", "readability-controller", "evaluator", bytes.fromhex("88" * 32)))
-        signer = HostReviewSigner("lab-authority", "1", signer.generator, reviewers, "2027-01-01T00:00:00Z")
+        signer = HostReviewSigner("lab-authority", "1", signer.generator, reviewers, AUTHORITY_EXPIRES_AT)
     execution = ResearchExecution(executor, qualifications=registry_owner, review_signer=signer, observer_key=b"o" * 32)
     context = HostContext([root], GRANTS | ({"review_page_operations.prepare", "review_page_operations.page",
         "review_page_session.assembled", "review_packet_execution.bind", "review_packet_execution.reserve",
