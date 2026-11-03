@@ -3,6 +3,9 @@
 import ast
 import copy
 import json
+import runpy
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -67,6 +70,32 @@ def test_probe_uses_only_public_package_imports_and_frozen_legacy_vectors():
             assert all(not name.name.startswith("tests") for name in node.names)
     vectors = public.legacy_vectors()
     assert len(vectors) == 8 and all(len(value) == 64 for value in vectors.values())
+
+
+def test_installed_packet_probe_preserves_each_producer_version(tmp_path, monkeypatch):
+    fixtures = artifacts.REPO_ROOT / "tests/fixtures/codebase-intake/native-packets"
+    root = tmp_path / "packet-workspace"
+    expected = {}
+    for fixture in fixtures.glob("*.json"):
+        packet = json.loads(fixture.read_bytes())
+        expected[packet["packet_id"]] = packet["basis"]["generator"]["version"]
+    observed = {}
+    run = subprocess.run
+
+    def inspect_manifest(command, **kwargs):
+        if command[1:3] == ["normalize", "packet"]:
+            folder = root / "sources/code_wikis/codebase--sample"
+            packet = json.loads((folder / "packet.json").read_bytes())
+            manifest = json.loads((folder / "artifact-manifest.json").read_text())
+            observed[packet["packet_id"]] = manifest["producer"]["version"]
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", inspect_manifest)
+    probe = tmp_path / "packet_probe.py"
+    probe.write_text(artifacts.PACKET_PROBE, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [str(probe), str(artifacts.venv_cli(Path(sys.prefix))), str(fixtures), str(root)])
+    runpy.run_path(str(probe), run_name="__main__")
+    assert observed == expected
 
 
 @pytest.mark.parametrize("case", public.PUBLIC_CASES)
