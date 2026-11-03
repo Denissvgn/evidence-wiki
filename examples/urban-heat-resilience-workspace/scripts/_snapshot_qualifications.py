@@ -10,11 +10,9 @@ from _evidence_authority import EvidenceInvalid
 from _market_evidence import validate_captured
 from _market_evidence import validate_closure as validate_market
 from _packet_vendor_services_context_packet import ContextPacketError, validate_context_packet
-from _qualified_packet import IntakeInvalid, validate_delivery
+from _qualified_packet import VALIDATOR, IntakeInvalid, validate_delivery
 from _snapshot_verifier import ClaimLoader, SnapshotInvalid, binding, document, fields, items, require
 from _usage_gate import requires_authority
-
-VALIDATOR = "agent-wiki-cli/1.8.0:offline-validation-closure/v1"
 
 
 def packet_qualification(path: str, data: bytes) -> dict[str, Any]:

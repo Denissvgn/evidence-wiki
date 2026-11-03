@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ruff: noqa: I001, S101, UP007, UP035, UP045
 # Preserve the pinned upstream validation implementation.
-"""Offline packet validation from agent-wiki-cli 1.8.0: llm_wiki_cli.services.context_packet.
+"""Offline packet validation from agent-wiki-cli 4.0.0: llm_wiki_cli.services.context_packet.
 
-Original source SHA-256: adefa4afbaa11e7401c69d29661d01d384c1b0c56aebb74b3989b93f2b124e75
+Original source SHA-256: 55145e5a6219a1deaae4b9180e7b058801eec85cdd49e1f7eb2f32c1c595a3bc
 Only the validation dependency closure is included; source discovery, producer
 execution, persistence, plugins and live reconciliation are excluded.
 
@@ -60,6 +60,9 @@ from collections.abc import Sequence
 from _packet_vendor_services_contracts import TYPED_GRAPH_SCHEMA_VERSION
 from _packet_vendor_services_knowledge_model import TargetClass
 from _packet_vendor_services_knowledge_model import Verification
+from _packet_vendor_services_packet_field_policy import STRING_CLASSES as _PATH_COUNT_KEYS
+from _packet_vendor_services_packet_field_policy import PUBLIC_URI_FIELDS as _PUBLIC_URI_FIELDS
+from _packet_vendor_services_packet_field_policy import STRUCTURAL_PATH_FIELDS as _STRUCTURAL_PATH_FIELDS
 from _packet_vendor_services_knowledge_evidence import canonical_json_bytes
 from _packet_vendor_services_knowledge_model import concept_kind_for_page_kind
 from _packet_vendor_services_wiki_media import contains_uri_authority_userinfo
@@ -75,6 +78,11 @@ from _packet_vendor_services_knowledge_evidence import sha256_bytes
 from urllib.parse import urlsplit
 from _packet_vendor_services_knowledge_envelope import validate_configured_public_identity
 import _packet_vendor_services_wiki_surface as wiki_surface
+from _packet_vendor_services_packet_field_policy import UnclassifiedPacketField as _packet_import_496d45a296825476
+from _packet_vendor_services_implementation_evidence import validate_implementation_summary as _packet_import_6660107f2df0cde3
+from _packet_vendor_services_maintenance_status import validate_maintenance_summary as _packet_import_89db2640d0ffe184
+from _packet_vendor_services_packet_field_policy import validate_field_coverage as _packet_import_aaa6eabab40dea75
+from _packet_vendor_services_packet_field_policy import classify_string as _packet_import_b0115bd5aa0a5db9
 
 
 CONTEXT_PACKET_SCHEMA_VERSION = QUALIFIED_CONTEXT_PACKET_SCHEMA_VERSION
@@ -154,27 +162,6 @@ _RFC3986_URI_RE = re.compile(r"^[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
-_STRUCTURAL_PATH_FIELDS = frozenset(
-    {
-        "canonical_path",
-        "file",
-        "source_path",
-    }
-)
-
-
-_PUBLIC_URI_FIELDS = frozenset({"mcp_uri"})
-
-
-_PATH_COUNT_KEYS = (
-    "free_text_values",
-    "opaque_values",
-    "portable_identities",
-    "public_uris",
-    "repository_relative_paths",
-)
-
-
 _PACKET_TOP_LEVEL_FIELDS = frozenset(
     {
         "schema_version",
@@ -252,9 +239,11 @@ class ContextPacketMalformedError(ContextPacketError):
 
     code = "malformed-context-packet"
 
-    def __init__(self, field: str, message: str):
+    def __init__(self, field: str, message: str, *, code: str | None = None):
         self.field = field
         self.message = message
+        if code is not None:
+            self.code = code
         super().__init__(f"{field}: {message}")
 
 
@@ -263,8 +252,9 @@ class ContextPacketPathPolicyError(ContextPacketError):
 
     code = "context-packet-path-policy-rejected"
 
-    def __init__(self, field: str, message: str):
+    def __init__(self, field: str, message: str, *, relative_path: str | None = None):
         self.field = field
+        self.relative_path = relative_path
         self.message = message
         super().__init__(f"{field}: {message}")
 
@@ -280,6 +270,7 @@ def _packet_contract_for_schema(schema_version: object) -> _PacketWireContract:
         raise ContextPacketMalformedError(
             "schema_version",
             f"unsupported qualified-context packet schema: {schema_version!r}",
+            code="unsupported-context-packet",
         )
     return contract
 
@@ -505,6 +496,14 @@ def _path_policy_digest() -> str:
 
 
 def _path_policy_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    UnclassifiedPacketField = _packet_import_496d45a296825476; classify_string = _packet_import_b0115bd5aa0a5db9; validate_field_coverage = _packet_import_aaa6eabab40dea75
+
+    try:
+        validate_field_coverage(value)
+    except UnclassifiedPacketField as exc:
+        raise ContextPacketPathPolicyError(
+            _pointer(exc.pointer), "has no declared packet field classification"
+        ) from exc
     counts = {name: 0 for name in _PATH_COUNT_KEYS}
     accepted = 0
 
@@ -534,11 +533,11 @@ def _path_policy_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
             return
         if not isinstance(item, str):
             return
-        field = pointer[-1] if pointer else ""
-        if field in _STRUCTURAL_PATH_FIELDS:
+        classification = classify_string(pointer)
+        if classification == "repository_relative_paths":
             _repository_path(item, _pointer(pointer))
             counts["repository_relative_paths"] += 1
-        elif field in _PUBLIC_URI_FIELDS:
+        elif classification == "public_uris":
             if _PORTABLE_URI_RE.fullmatch(item) is None or item.casefold().startswith(
                 "file:"
             ):
@@ -547,7 +546,7 @@ def _path_policy_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
                     "must be a portable non-file URI",
                 )
             counts["public_uris"] += 1
-        elif pointer == ("basis", "repository", "identity"):
+        elif classification == "portable_identities":
             if item != "unknown":
                 try:
                     validate_configured_public_identity(item)
@@ -557,7 +556,7 @@ def _path_policy_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
                         "must be a normalized portable repository identity",
                     ) from exc
             counts["portable_identities"] += 1
-        elif _is_free_text_pointer(pointer):
+        elif classification == "free_text_values":
             counts["free_text_values"] += 1
         else:
             counts["opaque_values"] += 1
@@ -589,13 +588,6 @@ def _mapping_key_is_repository_path(pointer: tuple[str, ...]) -> bool:
 
 def _list_item_is_repository_path(pointer: tuple[str, ...]) -> bool:
     return pointer == ("response", "omitted_files")
-
-
-def _is_free_text_pointer(pointer: tuple[str, ...]) -> bool:
-    return pointer[:2] in {
-        ("delivery", "warnings"),
-        ("response", "warnings"),
-    } or pointer[:2] == ("delivery", "limitations")
 
 
 def _repository_path(value: object, field: str) -> str:
@@ -997,10 +989,18 @@ def _validate_explicit_knowledge_response(
     }
     _exact_fields(
         data,
-        required | {"selection"},
+        required | {"selection", "maintenance"},
         "response.knowledge",
         required=required,
     )
+    if "maintenance" in data:
+        validate_maintenance_summary = _packet_import_89db2640d0ffe184
+        try:
+            validate_maintenance_summary(data["maintenance"])
+        except (ValueError, TypeError) as exc:
+            raise ContextPacketMalformedError("response.knowledge.maintenance", str(exc)) from exc
+        if data["mode"] == "off":
+            raise ContextPacketMalformedError("response.knowledge.maintenance", "disabled native reads cannot expose ordinary maintenance")
     mode = data["mode"]
     if mode != request["knowledge_mode"]:
         raise ContextPacketMalformedError(
@@ -1563,7 +1563,7 @@ def _validate_explicit_concept(
         "lifecycle",
         "freshness",
     }
-    _exact_fields(value, required | {"uid"}, field, required=required)
+    _exact_fields(value, required | {"uid", "implementation", "maintenance"}, field, required=required)
     for name in required - {"freshness"}:
         if not isinstance(value[name], str) or not value[name]:
             raise ContextPacketMalformedError(
@@ -1575,6 +1575,16 @@ def _validate_explicit_concept(
             f"{field}.uid",
             "must be a non-empty string",
         )
+    if "implementation" in value:
+        _validate_implementation_summary(
+            value["implementation"], f"{field}.implementation"
+        )
+    if "maintenance" in value:
+        validate_maintenance_summary = _packet_import_89db2640d0ffe184
+        try:
+            validate_maintenance_summary(value["maintenance"])
+        except (ValueError, TypeError) as exc:
+            raise ContextPacketMalformedError(f"{field}.maintenance", str(exc)) from exc
     enum_fields = {
         "concept_kind": {item.value for item in ConceptKind},
         "origin": {item.value for item in Origin},
@@ -1670,6 +1680,16 @@ def _validate_explicit_concept(
             f"{field}.freshness",
             "must use the exact snapshot-only freshness disclosure",
         )
+
+
+def _validate_implementation_summary(value: Any, field: str) -> None:
+    """Validate curated syntax evidence without admitting raw native records."""
+    validate_implementation_summary = _packet_import_6660107f2df0cde3
+
+    try:
+        validate_implementation_summary(value)
+    except (TypeError, ValueError) as exc:
+        raise ContextPacketMalformedError(field, str(exc)) from exc
 
 
 def _validate_explicit_page(value: Mapping[str, Any], field: str) -> None:

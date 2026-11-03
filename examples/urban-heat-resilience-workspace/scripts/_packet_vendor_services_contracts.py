@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ruff: noqa: I001, S101, UP007, UP035, UP045
 # Preserve the pinned upstream validation implementation.
-"""Offline packet validation from agent-wiki-cli 1.8.0: llm_wiki_cli.services.contracts.
+"""Offline packet validation from agent-wiki-cli 4.0.0: llm_wiki_cli.services.contracts.
 
-Original source SHA-256: 2832b372f0ed78089e2746fa9b27cd16b6690920214cdd026f6e3cb3a42c6151
+Original source SHA-256: 8a7230783f961020c76af7493b00c4553860f46806bfb5d39801b29ee4302ddd
 Only the validation dependency closure is included; source discovery, producer
 execution, persistence, plugins and live reconciliation are excluded.
 
@@ -34,6 +34,9 @@ SOFTWARE.
 from __future__ import annotations
 
 
+
+
+CONTEXT_BUDGET_PROTOCOL_VERSION = "llm-wiki-context/v3"
 
 
 CONTEXT_PROTOCOL_VERSION = "llm-wiki-context/v1"

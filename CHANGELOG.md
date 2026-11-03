@@ -12,6 +12,10 @@
 
 ### Fixed
 
+- Accept implementation-evidence and ordinary-maintenance qualifications in
+  qualified-context packets produced by `agent-wiki-cli` 4.0.0 while retaining
+  offline validation and support for earlier v1 and v2 packets.
+
 - Keep execution timestamps ordered when the host clock steps back by up to
   one second, as virtualized hosts do when they resynchronize, so a valid
   observation is no longer refused as a clock regression. Larger regressions

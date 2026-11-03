@@ -35,9 +35,10 @@ bundle or install Poppler; the repository Containerfile installs Debian's
 operating-system package retain their own upstream copyright and license terms.
 
 The `_packet_vendor_services_*.py` modules contain the offline qualified-context
-packet validation closure from `agent-wiki-cli` 1.8.0, copyright 2026 Denis
+packet validation closure from `agent-wiki-cli` 4.0.0, copyright 2026 Denis
 Sivagin, under the MIT license. Each module carries the complete permission and
 copyright notice and the original source digest. Local adaptation removes
-unreachable producer operations and rewrites imports to the isolated modules;
-the selected validation implementations are preserved. The pinned source and
+unreachable producer operations, binds imports within the isolated module
+generation, and normalizes redundant deferred self-reference annotations;
+the selected validation logic is preserved. The pinned source and
 symbol inventory is `tools/packet-validator-spec.json`.

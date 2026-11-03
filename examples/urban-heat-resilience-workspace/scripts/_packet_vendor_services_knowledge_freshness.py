@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ruff: noqa: I001, S101, UP007, UP035, UP045
 # Preserve the pinned upstream validation implementation.
-"""Offline packet validation from agent-wiki-cli 1.8.0: llm_wiki_cli.services.knowledge_freshness.
+"""Offline packet validation from agent-wiki-cli 4.0.0: llm_wiki_cli.services.knowledge_freshness.
 
-Original source SHA-256: bc7e62322087f294888f4155c8bfd4d625317ee73b99efc45b038965f7c36748
+Original source SHA-256: 1bee91b5be8edf8547e3fe4bfcdae5a38a0e3b4937b539425c4e1ea0ba4695a0
 Only the validation dependency closure is included; source discovery, producer
 execution, persistence, plugins and live reconciliation are excluded.
 
@@ -34,6 +34,7 @@ SOFTWARE.
 from __future__ import annotations
 
 from types import MappingProxyType
+from _packet_vendor_services_freshness_wording import SOURCE_CHANGED_STRUCTURE_UNCHANGED
 
 
 REASON_LIVE_EVALUATION_NOT_PERFORMED = "live-evaluation-not-performed"
@@ -138,7 +139,7 @@ _REASON_DESCRIPTIONS = MappingProxyType(
         REASON_LIVE_EVALUATION_NOT_PERFORMED: "live evaluation was not performed",
         REASON_RECORDED_BASIS_MATCHES_LIVE_EVALUATION: ("unchanged since observation"),
         REASON_SOURCE_BYTES_CHANGED_CONCEPT_OBSERVATION_UNCHANGED: (
-            "concept observation is unchanged since observation; source bytes changed"
+            SOURCE_CHANGED_STRUCTURE_UNCHANGED
         ),
         REASON_CONCEPT_OBSERVATION_CHANGED: (
             "concept observation changed since observation"
