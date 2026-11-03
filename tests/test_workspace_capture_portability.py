@@ -1,6 +1,7 @@
 """Portable captures, Windows handle epochs and unchanged refusal boundaries."""
 
 import os
+import stat
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +31,23 @@ def test_capture_includes_hidden_controls_and_materializes_exact_bytes(tmp_path,
     assert not root.exists()
     controls.write_bytes(b"state: changed\n")
     assert revision.capture_workspace(tmp_path).revision_id != captured.revision_id
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_materialization_is_read_only_with_exact_bytes(tmp_path, revision):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested/large.bin").write_bytes(bytes(range(256)) * 8192)
+    (tmp_path / "empty.txt").write_bytes(b"")
+    (tmp_path / "research.yml").write_bytes(b"project: {}\n")
+    captured = revision.capture_workspace(tmp_path)
+    with captured.materialize() as root:
+        assert sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()) == sorted(captured.files)
+        for name, data in captured.files.items():
+            assert (root / name).read_bytes() == data
+            assert stat.S_IMODE((root / name).stat().st_mode) == 0o400
+        assert stat.S_IMODE((root / "nested").stat().st_mode) == 0o500
+        assert stat.S_IMODE(root.stat().st_mode) == 0o500
+    assert not root.exists()
 
 
 def test_materialization_canonicalizes_the_temporary_directory_alias(tmp_path, revision, monkeypatch):
