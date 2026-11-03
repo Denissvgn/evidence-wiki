@@ -333,7 +333,7 @@ def bounded_result(result):
     if result["schema_version"] in {RESULT_SCHEMA_V3, "evidence-strict-publication/v3"}:
         contract.dependency_contract().validate(result["schema_version"], result)
     else:
-        contract.validate_shape(result, contract.schema_documents()[result["schema_version"]])
+        contract.validate_document_shape(result)
     require(len(sibling("_evidence_revision").canonical_bytes(result)) <= MAX_BYTES, "strict_output_bound_exceeded")
     return result
 
@@ -565,7 +565,7 @@ def machine_compatibility(root, *, question_slugs=None):
         "policy_sha256": "sha256:" + hashlib.sha256(sibling("_evidence_revision").canonical_bytes(policy)).hexdigest(),
         "authorized": False, "evidence_accepted": False}
 
-    sibling("_strict_contract").validate_shape(result, sibling("_strict_contract").schema_documents()[result["schema_version"]])
+    sibling("_strict_contract").validate_document_shape(result)
     return result
 
 
@@ -592,7 +592,7 @@ def review_status(root, *, claim_id=None):
             "claims": rows, "selection": "latest_matching_current_basis",
             "revocation_owner": "current_host_authority_and_source_usage",
             "authorized": False, "evidence_accepted": False}
-        sibling("_strict_contract").validate_shape(status, sibling("_strict_contract").schema_documents()[status["schema_version"]])
+        sibling("_strict_contract").validate_document_shape(status)
         return status
 
 

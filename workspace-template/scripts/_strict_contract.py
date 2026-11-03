@@ -360,6 +360,17 @@ def _validation_shapes():
     return _VALIDATION_SHAPES
 
 
+def validate_document_shape(value):
+    """Check one document against its version's shape without rebuilding every contract.
+
+    Legacy shapes come from the shared read-only set; any other version is looked up
+    in the complete documents exactly as before.
+    """
+    version = value["schema_version"]
+    shapes = _validation_shapes()
+    validate_shape(value, shapes[version] if version in shapes else schema_documents()[version])
+
+
 def schema_documents():
     """Return legacy and additive selective contracts without merging fragments."""
     documents = _legacy_schema_documents()
