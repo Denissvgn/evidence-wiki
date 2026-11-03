@@ -43,6 +43,12 @@ def internal(module):
 
 def resolved_imports(module, node):
     if isinstance(node, ast.Import):
+        for alias in node.names:
+            if internal(alias.name) and '.' in alias.name and alias.asname is None:
+                raise ValueError(
+                    f'Unaliased dotted producer import requires an explicit alias: '
+                    f'{module}:{node.lineno}: {alias.name}'
+                )
         return [(alias, alias.name, None) for alias in node.names]
     parent = '.'.join(module.split('.')[:-node.level]) if node.level else ''
     imported = '.'.join(part for part in (parent, node.module) if part)

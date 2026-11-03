@@ -177,6 +177,14 @@ def test_current_packet_preserves_pending_review_and_syntax_qualifications(tmp_p
     assert captured["live_reconciliation"] == "not_evaluated"
 
 
+@pytest.mark.parametrize("scripts", [SCRIPTS, SCRIPTS.parents[1] / "examples/urban-heat-resilience-workspace/scripts"])
+def test_untracked_maintenance_targets_can_exceed_the_tracked_record_total(scripts):
+    validator = load_isolated_module("untracked_maintenance", scripts / "_packet_vendor_services_maintenance_status.py")
+    summary = json.loads((FIXTURES / "native-v2-maintenance.json").read_bytes())["response"]["knowledge"]["maintenance"]
+    summary.update(availability="unadopted", total=0, pending=0, acknowledged=0, unavailable=0, ambiguous=0, deleted=0, untracked=3)
+    assert validator.validate_maintenance_summary(summary) == summary
+
+
 def test_previous_validator_generation_requires_requalification_of_original_bytes(tmp_path):
     original = (FIXTURES / "native-v2-current.json").read_bytes()
     config, record, folder = delivery(tmp_path, original)
