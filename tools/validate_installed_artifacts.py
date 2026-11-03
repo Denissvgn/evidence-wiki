@@ -692,9 +692,10 @@ PACKET_PROBE = textwrap.dedent(
         assert workspace.normalize.profiles() == contract()["intake_profiles"]
         for fixture in sorted(fixtures.glob("*.json")):
             packet = fixture.read_bytes()
+            packet_document = json.loads(packet)
             manifest = {"schema_version": "1", "artifact_kind": "codebase_evidence", "source_id": record["id"],
                 "intake_profile": profile, "packet_path": "packet.json", "generated_at": "2026-09-10T00:00:00Z",
-                "producer": {"name": "agent-wiki-cli", "version": "1.8.0"},
+                "producer": {"name": "agent-wiki-cli", "version": packet_document["basis"]["generator"]["version"]},
                 "invocation": {"executed_by": "external_worker", "argv": ["llm-wiki", "context"],
                     "plugins_enabled": False, "hooks_enabled": False, "network_access": False},
                 "files": [{"path": "packet.json", "size_bytes": len(packet), "sha256": hashlib.sha256(packet).hexdigest()}]}
@@ -709,7 +710,7 @@ PACKET_PROBE = textwrap.dedent(
                 assert result.returncode == 1
             else:
                 assert report["valid"] and report["policy_satisfied"] and result.returncode == 0, report
-                assert report["packet_id"] == json.loads(packet)["packet_id"]
+                assert report["packet_id"] == packet_document["packet_id"]
                 assert report["worker_authentication"] == "not_established"
                 for producer in ["normalize_sources.py", "external-tool"]:
                     write_record(report, producer)
