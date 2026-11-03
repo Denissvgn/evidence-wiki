@@ -10,8 +10,13 @@ facade tree into every CLI startup to serve callers that never touch it.
 
 from __future__ import annotations
 
+import os as _os
 import sys as _sys
 from typing import TYPE_CHECKING, Any
+
+from ._platform import require_supported as _require_supported
+
+_require_supported(_os.name)
 
 from . import _review_producer as _review_producer_owner
 

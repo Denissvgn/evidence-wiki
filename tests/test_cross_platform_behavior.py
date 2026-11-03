@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 from tests._script_loader import load_script as load_script_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -248,14 +250,12 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
         self.assertEqual({"raw/links/Case.url", "raw/links/case.url"}, paths)
         self.assertFalse([warning for warning in warnings if "Case.url" in warning or "case.url" in warning])
 
-    def test_ci_declares_native_windows_macos_and_ubuntu_jobs(self):
+    def test_ci_declares_macos_and_ubuntu_jobs_without_native_windows(self):
         workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-        # The hosted fallback is the complete matrix, the expression's last literal.
-        expression = next(line for line in workflow.splitlines() if line.strip().startswith("platform: ${{ fromJSON("))
-        platforms = json.loads(expression.rsplit("'", 2)[1])
+        platforms = yaml.safe_load(workflow)["jobs"]["test"]["strategy"]["matrix"]["platform"]
 
-        for runner in ("ubuntu-latest", "macos-latest", "windows-latest"):
-            self.assertIn(runner, {platform["os"] for platform in platforms})
+        self.assertEqual({"ubuntu-latest", "macos-latest"}, {platform["os"] for platform in platforms})
+        self.assertNotIn("windows-latest", workflow)
         self.assertIn("3.10.21", {platform["python-version"] for platform in platforms})
         self.assertIn("Install and verify optional Poppler compatibility backend", workflow)
         self.assertIn("sudo apt-get install --yes --no-install-recommends poppler-utils", workflow)
@@ -279,30 +279,6 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
 
         self.assertEqual([], offenders)
 
-    def test_ci_propagates_every_windows_python_failure(self):
-        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-        failure_guard = "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
-
-        for step_name in (
-            "Install development environment (Windows)",
-            "Run tests and quality checks (Windows)",
-        ):
-            with self.subTest(step=step_name):
-                marker = f"      - name: {step_name}\n"
-                self.assertIn(marker, workflow)
-                step = workflow.split(marker, 1)[1].split("\n      - name:", 1)[0]
-                lines = [line.strip() for line in step.splitlines() if line.strip()]
-                python_commands = [
-                    index
-                    for index, line in enumerate(lines)
-                    if line.startswith(("python ", ".\\.venv\\Scripts\\python.exe "))
-                ]
-
-                self.assertEqual(3, len(python_commands))
-                for index in python_commands:
-                    self.assertLess(index + 1, len(lines))
-                    self.assertEqual(failure_guard, lines[index + 1])
-
     # -- the library API path ------------------------------------------
     #
     # Everything above drives the workspace scripts. Since the library API a host can drive
@@ -311,7 +287,7 @@ class CrossPlatformBehaviorTests(unittest.TestCase):
     # paths through ``pathlib`` rather than argparse, and it arbitrates a claim
     # with whichever file-locking backend the platform offers -- ``fcntl`` on
     # POSIX, ``msvcrt`` on Windows. Both are checked here rather than in the
-    # library suites, so the native Windows and macOS CI lanes run them.
+    # library suites, so the macOS and Linux CI lanes run them.
 
     def api_workspace(self, root: Path) -> Path:
         """Initialize a real workspace with one question, through the package CLI."""

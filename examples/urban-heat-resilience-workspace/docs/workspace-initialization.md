@@ -147,7 +147,7 @@ Init-generated workspace metadata and content files are written with restrictive
 permissions on POSIX-style systems: generated files such as `research.yml`,
 `index.md`, `log.md`, seeded question pages, project-local guidance, and init
 reports use owner-only file modes, and workspace-created directories use
-owner-only directory modes. On Windows, Python's `chmod` behavior is best effort.
+owner-only directory modes.
 
 After creation, run smoke validation from the new workspace root:
 
@@ -226,29 +226,6 @@ python3 -m venv .venv
 .venv/bin/evidence-wiki init --target "$TARGET" --project-name cafe-heat --project-description "Unicode and spaced-path rehearsal"
 .venv/bin/python "$TARGET/scripts/smoke_validate_workspace.py" --project-root "$TARGET" --format text
 ```
-
-### Windows PowerShell
-
-Record the Windows edition/build, processor architecture, PowerShell version,
-Python launcher resolution, filesystem, and long-path policy. Direct executable
-invocation avoids changing the user's PowerShell execution policy:
-
-```powershell
-$Wheel = 'C:\artifacts\evidence_wiki-X.Y.Z-py3-none-any.whl'
-$Target = Join-Path $HOME 'Research Workspaces\Café Heat'
-py -3.10 -m venv .venv
-& .\.venv\Scripts\python.exe -m pip install --no-deps $Wheel
-$WheelHash = (Get-FileHash -Algorithm SHA256 $Wheel).Hash.ToLowerInvariant()
-$WheelHash
-& .\.venv\Scripts\evidence-wiki.exe --help
-& .\.venv\Scripts\evidence-wiki.exe init --target $Target --project-name cafe-heat --project-description 'Unicode and spaced-path rehearsal'
-& .\.venv\Scripts\python.exe "$Target\scripts\smoke_validate_workspace.py" --project-root $Target --format text
-```
-
-If `py -3.10` is unavailable, select another installed Python 3.10+ executable,
-record its resolved path, and use that same interpreter throughout the lane. Do
-not repair an activation-policy failure by weakening machine policy; continue
-with direct `.exe` invocation.
 
 After initialization, follow the plain-Markdown, Obsidian, and Dataview checks
 in [Obsidian Dataview Guidance](obsidian-dataview.md) and the manual template

@@ -291,13 +291,12 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     matrix = test["strategy"]["matrix"]
     assert set(matrix) == {"platform", "shard"}
     assert matrix["shard"] == [1, 2, 3]
-    expected = {("ubuntu-latest", "3.10.21"), ("ubuntu-latest", "3.14.7"),
-                ("macos-latest", "3.12.10"), ("windows-latest", "3.12.10")}
+    expected = {("ubuntu-latest", "3.10.21"), ("ubuntu-latest", "3.14.7"), ("macos-latest", "3.12.10")}
     fallback = conditional_matrix(matrix["platform"])
     assert {(cell["os"], cell["python-version"]) for cell in fallback} == expected
-    assert len(list(itertools.product(fallback, matrix["shard"]))) == 12
-    assert {(cell["os"], cell["python-version"]) for cell in conditional_matrix(matrix["platform"], local=True)} == {
-        ("windows-latest", "3.12.10")}
+    assert len(list(itertools.product(fallback, matrix["shard"]))) == 9
+    for job in (test, workflow["jobs"]["compatibility"]):
+        assert job["if"] == "vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'"
     assert test["strategy"]["fail-fast"] is False
     assert test["needs"] == "compatibility"
     assert set(package["needs"]) == {"compatibility", "test", "build", "installed"}
@@ -310,13 +309,12 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert all("test '${{ needs." + name + ".result }}' = success" in require
                for name in ("compatibility", "test", "build", "installed"))
     commands = [step["run"] for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", "")]
-    assert len(commands) == 2
-    assert all("--shard-count 3 --shard-index ${{ matrix.shard }}" in command for command in commands)
-    assert all("--group-size 48" in command for command in commands)
-    windows = next(command for command in commands if "Scripts\\python.exe" in command)
-    posix = next(command for command in commands if ".venv/bin/python" in command)
-    assert "--timeout 3600" in windows and "--timeout" not in posix
-    assert all("-m ruff check ." in command and "sync_vendored_scripts.py --check" in command for command in commands)
+    assert len(commands) == 1
+    command = commands[0]
+    assert "--shard-count 3 --shard-index ${{ matrix.shard }}" in command and "--group-size 48" in command
+    assert ".venv/bin/python" in command and "--timeout" not in command
+    assert "-m ruff check ." in command and "sync_vendored_scripts.py --check" in command
+    assert all("runner.os" not in step.get("if", "") for step in test["steps"])
     upload = next(step for step in test["steps"] if step.get("with", {}).get("path") == "suite-evidence/")
     assert upload["if"] == "always()"
     assert upload["with"]["name"].endswith("-shard-${{ matrix.shard }}")
@@ -332,10 +330,10 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert command[command.index("--shard-count") + 1] == "3"
     assert command[command.index("--group-size") + 1] == "48"
     assert {command[i + 1] for i, arg in enumerate(command) if arg == "--platform"} == {
-        "Linux/X64/3.10", "Linux/X64/3.14", "macOS/ARM64/3.12", "Windows/X64/3.12"}
+        "Linux/X64/3.10", "Linux/X64/3.14", "macOS/ARM64/3.12"}
 
 
-def test_local_mode_keeps_required_windows_native_peer_and_authenticated_evidence():
+def test_local_mode_keeps_required_native_peer_and_authenticated_evidence():
     jobs = load_workflow(CI_WORKFLOW_PATH)["jobs"]
     for name in ("linux-native", "local-evidence"):
         assert "LOCAL_CI_ENABLED == 'true'" in jobs[name]["if"]
@@ -354,8 +352,12 @@ def test_local_mode_keeps_required_windows_native_peer_and_authenticated_evidenc
     assert required["name"] == "Required CI" and required["if"] == "${{ always() }}"
     assert set(required["needs"]) == {"compatibility", "test", "package", "local-evidence", "linux-native"}
     command = required["steps"][0]["run"]
-    for status in ("COMPATIBILITY", "WINDOWS_AND_FALLBACK", "LOCAL_EVIDENCE", "NATIVE_PEER", "FALLBACK_PACKAGE"):
-        assert f'test "${status}" = success' in command
+    local, fallback = command.split('if [ "$LOCAL_MODE" = true ]; then', 1)[1].split("else", 1)
+    for status in ("LOCAL_EVIDENCE", "NATIVE_PEER"):
+        assert f'test "${status}" = success' in local and status not in fallback
+    for status in ("FALLBACK_COMPATIBILITY", "FALLBACK_TESTS", "FALLBACK_PACKAGE"):
+        assert f'test "${status}" = success' in fallback and status not in local
+    assert command.split("if [", 1)[0].strip() == ""
 
 
 def test_local_receipt_verifier_executes_only_default_branch_code_without_candidate_checkout():
@@ -469,8 +471,8 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     job = workflow["jobs"]["check"]
     assert job["timeout-minutes"] == 15 and job["strategy"]["fail-fast"] is False
     assert {(cell["os"], cell["python"]) for cell in conditional_matrix(job["strategy"]["matrix"]["include"])} == {
-        ("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.12"), ("ubuntu-latest", "3.14"),
-        ("macos-latest", "3.14"), ("windows-latest", "3.14")}
+        ("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.12"), ("ubuntu-latest", "3.14"), ("macos-latest", "3.14")}
+    assert "inputs" not in (workflow["on"]["workflow_call"] or {})
     setup = next(step for step in job["steps"] if "actions/setup-python@" in step.get("uses", ""))
     assert setup["with"]["check-latest"] is True and setup["with"]["allow-prereleases"] is False
     assert not job.get("continue-on-error", False)
@@ -478,10 +480,11 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     for caller in (CI_WORKFLOW_PATH, QUALIFICATION_PATH):
         jobs = load_workflow(caller)["jobs"]
         assert jobs["compatibility"]["uses"] == "./.github/workflows/check-compatibility.yml"
+        assert "with" not in jobs["compatibility"]
         if caller == CI_WORKFLOW_PATH:
-            assert "LOCAL_CI_ENABLED" in jobs["compatibility"]["with"]["hosted-windows-only"]
+            assert "LOCAL_CI_ENABLED != 'true'" in jobs["compatibility"]["if"]
         else:
-            assert "with" not in jobs["compatibility"]
+            assert "if" not in jobs["compatibility"]
         test = jobs["test" if caller == CI_WORKFLOW_PATH else "release-tests"]
         checks = [step for step in test["steps"] if "tools/check_ci_compatibility.py" in step.get("run", "")]
         full = next(step for step in test["steps"] if "tools/run_test_groups.py" in step.get("run", ""))
@@ -498,8 +501,8 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["package"]
     verification = next(step["run"] for step in gate["steps"] if "tools.verify_test_shards" in step.get("run", ""))
     assert all(f"--python-patch {platform}={version}" in verification for platform, version in (
-        ("Linux/X64/3.10", "3.10.21"), ("Linux/X64/3.14", "3.14.7"),
-        ("macOS/ARM64/3.12", "3.12.10"), ("Windows/X64/3.12", "3.12.10")))
+        ("Linux/X64/3.10", "3.10.21"), ("Linux/X64/3.14", "3.14.7"), ("macOS/ARM64/3.12", "3.12.10")))
+    assert "Windows" not in verification
     assert "pull_request" not in load_workflow(QUALIFICATION_PATH)["on"]
 
 

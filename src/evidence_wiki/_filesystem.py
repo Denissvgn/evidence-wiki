@@ -2,12 +2,10 @@
 
 import os as _os
 
-if _os.name == "nt":
-    from ._script_host import load_packaged_script, shared_assets_root
+from ._platform import require_supported
 
-    os = load_packaged_script(shared_assets_root(), "_native_fs").os
-else:
-    os = _os
+require_supported(_os.name)
+os = _os
 
 
 def metadata_fstat(descriptor):

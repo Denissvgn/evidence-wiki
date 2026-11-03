@@ -70,6 +70,7 @@ _NON_RECOVERABLE_CODES = frozenset(
         'OPERATION_CONTROL_INVALID',
         'OPERATION_DEADLINE_EXCEEDED',
         'OPERATION_PROCESS_BOUNDARY_UNSUPPORTED',
+        'PLATFORM_UNSUPPORTED',
         'RUN_JOB_RESERVATION_INVALID',
         'RUN_JOB_RESERVATION_PENDING',
         'RUN_JOURNAL_LIMIT',
@@ -268,6 +269,7 @@ ERROR_FAMILIES: dict[str, type[EvidenceWikiError]] = {
     "WORKSPACE_UNREADABLE": ConfigError,
     "DEPENDENCY_MISSING": ConfigError,
     "TOOLING_MISSING": ConfigError,
+    "PLATFORM_UNSUPPORTED": ConfigError,
     # An upgrade that cannot write is a workspace-level filesystem problem, the
     # same family an operator is already checking when the workspace is unreadable.
     "UPGRADE_WRITE_FAILED": ConfigError,

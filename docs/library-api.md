@@ -1808,8 +1808,8 @@ or training rights.
 
 Capture is limited to 10,000 files, 20,000 directory entries, 256 MiB total,
 16 MiB per file, and depth 64. Symlinks, hardlinks, special files, and nonportable
-paths refuse. Platforms lacking no-follow descriptor operations, including
-Windows, return `EVIDENCE_REVISION_UNSUPPORTED`. The live workspace is unchanged;
+paths refuse. Platforms lacking no-follow descriptor operations return
+`EVIDENCE_REVISION_UNSUPPORTED`. The live workspace is unchanged;
 CLI `--output` must name a destination outside it. Exit 0 means `ship`, exit 1
 means another research verdict, and exit 2 means refusal. The unscoped operation
 and its bundle behavior retain their existing contract.

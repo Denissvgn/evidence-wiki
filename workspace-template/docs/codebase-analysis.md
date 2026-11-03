@@ -133,7 +133,7 @@ llm-wiki context --src-dir raw/code/example --budget 12000 --format json --focus
 
 `extract` always emits JSON and does not accept `--format`. Prefer its explicit
 `--output` option over shell redirection so the same command shape works on
-Windows, macOS, and Ubuntu.
+Linux and macOS.
 
 An external producer may use `llm-wiki bootstrap` when a generated architecture
 wiki is useful, but must write it to the generated source directory, not to the

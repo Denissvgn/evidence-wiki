@@ -16,6 +16,13 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from types import ModuleType
 
+# Package hosts load this file directly, so it cannot rely on ``_script_errors``
+# for the platform refusal and raises the shared line before loading anything.
+if os.name == "nt":
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
+
 _STEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _IMPORT_LOCK = threading.RLock()
 _MISSING = object()

@@ -297,8 +297,7 @@ pdftotext -enc UTF-8 -layout <pdf> -
 ```
 
 pip cannot install this system executable. Install it separately with
-`poppler-utils` on Debian/Ubuntu, `brew install poppler` on macOS, or
-`conda install conda-forge::poppler` on Windows. Selecting `poppler` when
+`poppler-utils` on Debian/Ubuntu or `brew install poppler` on macOS. Selecting `poppler` when
 `pdftotext` is not on `PATH` is a fatal setup error; missing Poppler has no
 effect when the default pypdf backend is selected.
 

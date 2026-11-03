@@ -49,7 +49,7 @@ request payload, and MCP wrapper all use the capped limit.
 By default the generated database is written to `.research-cache/query-index.sqlite3` under the project root. Use `--index-path` on both `build-index` and query mode to choose another workspace-relative path.
 Concurrent builders serialize through a cross-process lock. Each build uses a
 unique same-directory temporary SQLite database, closes SQLite before replacement
-or cleanup on POSIX and Windows, and atomically publishes only a complete index.
+or cleanup, and atomically publishes only a complete index.
 Failed builds retain the prior complete database and remove their own temporary
 database and SQLite sidecars.
 

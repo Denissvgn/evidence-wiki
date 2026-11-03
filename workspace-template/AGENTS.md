@@ -130,8 +130,7 @@ managed work order must finish within that bounded action.
 During a package-managed work order, the host supplies the exact workspace
 interpreter in `EVIDENCE_WIKI_PYTHON`. Invoke every Python workspace script
 with that value and `-B`, even when examples elsewhere use `python3`: use
-`"$EVIDENCE_WIKI_PYTHON" -B scripts/...` in a POSIX shell or
-`& $env:EVIDENCE_WIKI_PYTHON -B scripts/...` in PowerShell. Never fall back to
+`"$EVIDENCE_WIKI_PYTHON" -B scripts/...`. Never fall back to
 bare `python`, `python3`, or `py`, and do not print or report the absolute
 interpreter value.
 
