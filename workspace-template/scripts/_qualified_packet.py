@@ -24,7 +24,7 @@ from _script_errors import ScriptRefusal
 from _workspace_module_loader import load_workspace_module
 
 PROFILE = "qualified_context_packet/v1"
-VALIDATOR = "agent-wiki-cli/1.8.0:offline-validation-closure/v1"
+VALIDATOR = "agent-wiki-cli/4.0.0:offline-validation-closure/v1"
 MANIFEST = "artifact-manifest.json"
 MAX_FILES = 128
 MAX_ENTRIES = 512

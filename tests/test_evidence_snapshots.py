@@ -280,7 +280,7 @@ def test_offline_transport_is_strict_and_bounded(host, data):
     assert not verify_snapshot(data, trust_policy_bytes=host.policy_path.read_bytes())["valid"]
 
 
-@pytest.mark.parametrize("packet_name", ["native-v1.json", "native-v2-current.json", "native-v2-stale.json", "native-v2-bounded.json"])
+@pytest.mark.parametrize("packet_name", ["native-v1.json", "native-v2-current.json", "native-v2-stale.json", "native-v2-bounded.json", "native-v2-maintenance.json"])
 def test_snapshot_preserves_native_packet_limits_without_authority_promotion(host, packet_name):
     raw = (Path(__file__).parent / "fixtures/codebase-intake/native-packets" / packet_name).read_bytes()
 

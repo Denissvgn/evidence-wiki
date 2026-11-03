@@ -46,10 +46,14 @@ def delivery(root: Path, packet: bytes, *, required: bool = False):
 
 
 def deposit(folder: Path, packet: bytes):
+    try:
+        producer_version = json.loads(packet).get("basis", {}).get("generator", {}).get("version", "1.8.0")
+    except (ValueError, AttributeError):
+        producer_version = "1.8.0"
     manifest = {
         "schema_version": "1", "artifact_kind": "codebase_evidence", "source_id": SOURCE_ID,
         "intake_profile": INTAKE.PROFILE, "packet_path": "packet.json",
-        "generated_at": "2026-09-10T00:00:00Z", "producer": {"name": "agent-wiki-cli", "version": "1.8.0"},
+        "generated_at": "2026-09-10T00:00:00Z", "producer": {"name": "agent-wiki-cli", "version": producer_version},
         "invocation": {"executed_by": "external_worker", "argv": ["llm-wiki", "context"],
                        "plugins_enabled": False, "hooks_enabled": False, "network_access": False},
         "files": [{"path": "packet.json", "size_bytes": len(packet), "sha256": hashlib.sha256(packet).hexdigest()}],
@@ -139,10 +143,77 @@ def test_recomputed_delivery_checksums_cannot_repair_an_invalid_native_packet(tm
     report = INTAKE.inspect_packet(tmp_path, config, record)
     assert report["delivery_integrity"] == "valid"
     assert report["valid"] is False
-    assert report["reason"] in {"malformed-context-packet", "context-packet-path-policy-rejected"}
+    if mutation == "version":
+        assert report["reason"] == "unsupported-context-packet"
+    else:
+        assert report["reason"] in {"malformed-context-packet", "context-packet-path-policy-rejected"}
     source = NORMALIZE.normalize_codebase_record(tmp_path, config, record)
     assert source.extraction_method == "codebase_stub"
     assert not source.record["metadata"]["qualified_context"]["valid"]
+
+
+def test_current_packet_preserves_pending_review_and_syntax_qualifications(tmp_path):
+    original = (FIXTURES / "native-v2-maintenance.json").read_bytes()
+    config, record, _folder = delivery(tmp_path, original)
+    report = INTAKE.inspect_packet(tmp_path, config, record)
+    assert report["valid"] and report["policy_satisfied"]
+    assert report["validator"] == "agent-wiki-cli/4.0.0:offline-validation-closure/v1"
+    knowledge = report["qualifications"]["response"]["knowledge"]
+    assert knowledge["maintenance"]["pending"] == 2
+    assert knowledge["maintenance"]["acknowledged"] == 0
+    source_backed = [concept for concept in knowledge["selection"]["concepts"] if concept.get("source_path")]
+    assert len(source_backed) == 2
+    for concept in source_backed:
+        assert concept["implementation"]["state"] == "unchanged"
+        assert "dependencies-and-runtime-behavior-not-evaluated" in concept["implementation"]["limitations"]
+        assert concept["maintenance"]["acknowledged"] == 0
+    assert report["worker_authentication"] == "not_established"
+    assert report["host_reconciliation"]["state"] == "unevaluated"
+    snapshots = load_isolated_module("current_packet_snapshot", SCRIPTS / "_snapshot_qualifications.py")
+    captured = snapshots.packet_qualification("sources/code_wikis/sample/packet.json", original)
+    assert captured["validator"] == report["validator"]
+    assert captured["qualifications"] == report["qualifications"]
+    assert captured["worker_authentication"] == "not_established"
+    assert captured["live_reconciliation"] == "not_evaluated"
+
+
+def test_previous_validator_generation_requires_requalification_of_original_bytes(tmp_path):
+    original = (FIXTURES / "native-v2-current.json").read_bytes()
+    config, record, folder = delivery(tmp_path, original)
+    report = INTAKE.inspect_packet(tmp_path, config, record)
+    normalized = {"qualified_context": copy.deepcopy(report)}
+    normalized["qualified_context"]["validator"] = "agent-wiki-cli/1.8.0:offline-validation-closure/v1"
+    assert INTAKE.normalized_issues(tmp_path, config, record, normalized) == ["packet_normalized_binding_mismatch"]
+    normalized["qualified_context"] = report
+    assert INTAKE.normalized_issues(tmp_path, config, record, normalized) == []
+    assert (folder / "packet.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("mutation", ["maintenance_count", "maintenance_flag", "concept_count", "syntax_flag"])
+def test_resealed_packet_cannot_forge_native_review_or_syntax_qualifications(tmp_path, mutation):
+    payload = json.loads((FIXTURES / "native-v2-maintenance.json").read_bytes())
+    knowledge = payload["response"]["knowledge"]
+    concept = next(row for row in knowledge["selection"]["concepts"] if row.get("source_path"))
+    if mutation == "maintenance_count":
+        knowledge["maintenance"]["pending"] = knowledge["maintenance"]["total"] + 1
+    elif mutation == "maintenance_flag":
+        knowledge["maintenance"]["live_evaluation_performed"] = 1
+    elif mutation == "concept_count":
+        concept["maintenance"]["acknowledged"] = concept["maintenance"]["total"] + 1
+    else:
+        concept["implementation"]["live_comparison_performed"] = False
+    del payload["packet_id"]
+    canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    payload["packet_id"] = "sha256:" + hashlib.sha256(
+        b"llm-wiki-qualified-context-packet/v2\0" + canonical(payload)
+    ).hexdigest()
+    packet = canonical(payload) + b"\n"
+    config, record, folder = delivery(tmp_path, packet)
+    report = INTAKE.inspect_packet(tmp_path, config, record)
+    assert report["delivery_integrity"] == "valid"
+    assert report["valid"] is False
+    assert report["reason"] == "malformed-context-packet"
+    assert (folder / "packet.json").read_bytes() == packet
 
 
 @pytest.mark.parametrize("mutation", ["missing", "wrong_size", "duplicate", "unsafe", "undeclared", "script", "symlink", "hardlink", "oversized", "many_entries", "directory_link"])

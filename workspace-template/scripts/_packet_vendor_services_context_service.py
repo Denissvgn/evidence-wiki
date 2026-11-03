@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ruff: noqa: I001, S101, UP007, UP035, UP045
 # Preserve the pinned upstream validation implementation.
-"""Offline packet validation from agent-wiki-cli 1.8.0: llm_wiki_cli.services.context_service.
+"""Offline packet validation from agent-wiki-cli 4.0.0: llm_wiki_cli.services.context_service.
 
-Original source SHA-256: e9c8c2bfbf0534dd112d2825cb7d4b76cf855abe5a64178869608c2d414263da
+Original source SHA-256: 20e5e7f2791c459e4fba6678c1faa24940202062c33fb78510e5c933c659671a
 Only the validation dependency closure is included; source discovery, producer
 execution, persistence, plugins and live reconciliation are excluded.
 
@@ -43,6 +43,7 @@ from _packet_vendor_services_knowledge_graph import GRAPH_RESOLUTIONS
 from _packet_vendor_services_context_knowledge_contract import KNOWLEDGE_MODE_VALUES
 import re
 import _packet_vendor_services_wiki_surface as wiki_surface
+from _packet_vendor_services_context_budget import validate_request as _packet_import_fbfe44c790897599
 
 
 PROTOCOL_VERSION = CONTEXT_PROTOCOL_VERSION
@@ -150,6 +151,7 @@ def _validate_protocol_request(data: object) -> dict:
         if isinstance(protocol, str) and protocol in {
             PROTOCOL_VERSION,
             KNOWLEDGE_PROTOCOL_VERSION,
+            "llm-wiki-context/v3",
         }:
             exc.protocol = protocol
         raise
@@ -165,6 +167,10 @@ def _validate_protocol_request_impl(data: object) -> dict:
         )
 
     protocol = data.get("protocol")
+    if protocol == "llm-wiki-context/v3":
+        validate_request = _packet_import_fbfe44c790897599
+
+        return validate_request(data)
     if protocol == PROTOCOL_VERSION:
         request_keys = _V1_REQUEST_KEYS
     elif protocol == KNOWLEDGE_PROTOCOL_VERSION:
