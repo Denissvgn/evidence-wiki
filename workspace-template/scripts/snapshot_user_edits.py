@@ -3,19 +3,20 @@
 
 from __future__ import annotations
 
-import argparse
 import os
+
+# Refuse before importing any sibling module, which would write its bytecode into the workspace.
+if os.name == "nt":
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
+
+import argparse
 import shlex
 import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
-
-# This script imports no shared workspace module, so it refuses native Windows itself.
-if os.name == "nt":
-    raise SystemExit(
-        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
-    )
 
 try:
     import yaml

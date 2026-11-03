@@ -3,12 +3,19 @@
 
 from __future__ import annotations
 
+import os
+
+# Refuse before importing any sibling module, which would write its bytecode into the workspace.
+if os.name == "nt":
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
+
 import argparse
 import copy
 import hashlib
 import json
 import math
-import os
 import re
 import shutil
 import sys
@@ -2485,7 +2492,6 @@ def write_question_pages(target: Path, config: dict[str, Any], seed_questions: l
     for question in seed_questions:
         page_path = questions_dir / f"{question['slug']}.md"
         write_private_text(page_path, render_question_page(question), target)
-
 
 
 def starter_version(target: Path) -> str:

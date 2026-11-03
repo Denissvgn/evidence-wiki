@@ -2,15 +2,20 @@
 
 The wheel installs on any platform, so the refusal is a runtime check. The package
 refuses on import. Workspace scripts run without the package, so each script entry
-point must reach, through its unconditional top-level imports, a module that
-refuses at import time. Faking ``os.name`` breaks ``pathlib``, so behavior is
-tested by passing the platform name, and coverage is checked statically.
+point refuses before its first sibling import: importing a sibling would already
+write that module's bytecode into the workspace. Shared modules refuse too, for
+callers that import them directly. Faking ``os.name`` in-process breaks
+``pathlib``, so in-process checks pass the platform name, and entry points run in
+a subprocess that fakes ``os.name`` before the script starts.
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,11 +29,20 @@ if str(SRC_ROOT) not in sys.path:
 from evidence_wiki import _platform
 from evidence_wiki._script_host import load_packaged_script, shared_assets_root
 
-SCRIPTS = REPO_ROOT / "workspace-template" / "scripts"
-# The modules that refuse at import. Pinned, so removing one refusal fails even
-# where another refusal still covers every entry point.
-REFUSING_MODULES = {"_script_errors", "_workspace_module_loader", "_native_fs", "_workspace_locks",
-                    "snapshot_user_edits"}
+TEMPLATE = REPO_ROOT / "workspace-template"
+SCRIPTS = TEMPLATE / "scripts"
+# The shared modules that refuse at import. Pinned, so removing one refusal fails
+# even where an entry point's own refusal still runs first.
+SHARED_REFUSING_MODULES = {"_script_errors", "_workspace_module_loader", "_native_fs", "_workspace_locks"}
+# Runs a script as ``python <script>`` would, after faking a native Windows host.
+FAKE_WINDOWS = (
+    "import os, runpy, sys\n"
+    "script = sys.argv[1]\n"
+    "sys.argv = sys.argv[1:]\n"
+    "sys.path[0] = os.path.dirname(script)\n"
+    "os.name = 'nt'\n"
+    "runpy.run_path(script, run_name='__main__')\n"
+)
 # Calls that would act on the filesystem or start a process before the refusal.
 EFFECT_ROOTS = {"open", "os", "subprocess", "shutil"}
 EFFECT_METHODS = {"write_text", "write_bytes", "mkdir", "touch", "unlink", "rename", "replace", "rmdir"}
@@ -57,14 +71,24 @@ def _statement_imports(node, stems):
     return set()
 
 
-def _closure(stem, graph):
-    seen, pending = set(), [stem]
-    while pending:
-        current = pending.pop()
-        if current not in seen:
-            seen.add(current)
-            pending.extend(graph[current])
-    return seen
+def _entry_points(trees):
+    return sorted(stem for stem, tree in trees.items() if any(
+        isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "__name__" for node in tree.body))
+
+
+def _precedes_entry_refusal(node):
+    """Only the docstring, ``__future__`` imports and ``import os`` may run before an entry point refuses."""
+    if isinstance(node, ast.Expr):
+        return isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    if isinstance(node, ast.ImportFrom):
+        return node.module == "__future__"
+    return isinstance(node, ast.Import) and [(alias.name, alias.asname) for alias in node.names] == [("os", None)]
+
+
+def _state(root):
+    return sorted((path.relative_to(root).as_posix(), path.is_dir(), path.stat().st_size, path.stat().st_mtime_ns)
+                  for path in root.rglob("*"))
 
 
 def _is_platform_refusal(node, refusal):
@@ -137,11 +161,12 @@ def test_script_refusal_exits_with_the_shared_code(script_errors, capsys):
     assert (envelope["error_code"], envelope["recoverable"]) == ("PLATFORM_UNSUPPORTED", False)
 
 
-def test_every_refusing_module_refuses_first_with_the_shared_line():
+def test_every_shared_refusing_module_refuses_first_with_the_shared_line():
     stems, trees = _stems(), _trees()
-    refusing = {stem for stem, tree in trees.items()
-                if any(_is_platform_refusal(node, _platform.REFUSAL) for node in tree.body)}
-    assert refusing == REFUSING_MODULES
+    entry_points = set(_entry_points(trees))
+    refusing = {stem for stem, tree in trees.items() if stem not in entry_points
+                and any(_is_platform_refusal(node, _platform.REFUSAL) for node in tree.body)}
+    assert refusing == SHARED_REFUSING_MODULES
     for stem in sorted(refusing):
         body = trees[stem].body
         index = next(index for index, node in enumerate(body) if _is_platform_refusal(node, _platform.REFUSAL))
@@ -150,21 +175,29 @@ def test_every_refusing_module_refuses_first_with_the_shared_line():
         assert not set().union(*(_statement_imports(node, stems) for node in body[:index])), stem
 
 
-def test_every_script_entry_point_reaches_a_platform_refusal_before_any_effect():
-    stems, trees = _stems(), _trees()
-    graph = {stem: set().union(*(_statement_imports(node, stems) for node in tree.body))
-             for stem, tree in trees.items()}
-    entry_points = sorted(stem for stem, tree in trees.items() if any(
-        isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name)
-        and node.test.left.id == "__name__" for node in tree.body))
+def test_every_script_entry_point_refuses_before_its_first_sibling_import():
+    trees = _trees()
+    entry_points = _entry_points(trees)
     assert len(entry_points) >= 39
     for stem in entry_points:
-        before = []
-        for node in trees[stem].body:
-            reached = set().union(*(_closure(target, graph) for target in _statement_imports(node, stems)))
-            if reached & REFUSING_MODULES or _is_platform_refusal(node, _platform.REFUSAL):
-                break
-            before.extend(_effects(node))
-        else:
-            pytest.fail(f"{stem} reaches no platform refusal through its top-level imports")
-        assert not before, (stem, before)
+        body = trees[stem].body
+        refusals = [index for index, node in enumerate(body) if _is_platform_refusal(node, _platform.REFUSAL)]
+        assert len(refusals) == 1, stem
+        assert all(_precedes_entry_refusal(node) for node in body[:refusals[0]]), stem
+
+
+def test_refused_entry_points_leave_the_workspace_unchanged_with_bytecode_writing_on(tmp_path):
+    workspace = tmp_path / "workspace"
+    shutil.copytree(TEMPLATE, workspace, ignore=shutil.ignore_patterns("__pycache__"))
+    entry_points = _entry_points(_trees())
+    assert len(entry_points) >= 39
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"} and not key.startswith("COVERAGE_")}
+    before = _state(workspace)
+    for stem in entry_points:
+        script = workspace / "scripts" / f"{stem}.py"
+        done = subprocess.run([sys.executable, "-c", FAKE_WINDOWS, str(script), "--project-root", str(workspace)],
+                              cwd=workspace, env=env, capture_output=True, text=True, timeout=60, check=False)
+        assert done.returncode == 1, (stem, done.returncode, done.stderr[-400:])
+        assert done.stderr.strip().splitlines()[-1] == _platform.REFUSAL, (stem, done.stderr[-400:])
+        assert _state(workspace) == before, stem
