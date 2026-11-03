@@ -183,7 +183,15 @@ The delivery manifest retains the format above and adds `intake_profile` and
 file's exact `size_bytes` and SHA-256. The receiver captures one bounded
 directory generation before parsing, rejects links and undeclared members,
 and checks original canonical packet bytes using the offline validation closure
-from `agent-wiki-cli` 1.8.0. Native packet schemas v1 and v2 are supported.
+from `agent-wiki-cli` 4.0.0. Native packet schemas v1 and v2 are supported,
+including implementation-evidence and ordinary-maintenance qualifications.
+Existing packets remain subject to their original qualifications; pending
+maintenance review does not establish human approval or live reconciliation.
+Unsupported native packet schemas return `unsupported-context-packet`.
+Validation reports identify their validator generation. After upgrading workspace
+scripts, rebuild normalized qualification metadata from the retained original
+deliveries before reusing it; earlier reports remain tied to their captured
+generation.
 The limit is 128 declared files, 512 directory entries, 64 levels, and 16 MiB
 including the manifest; the native validator applies its tighter packet bounds.
 
