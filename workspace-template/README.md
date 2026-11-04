@@ -28,9 +28,8 @@ The installed package supplies the required PyYAML, ruamel.yaml, and pypdf
 Python dependencies. ruamel.yaml preserves comments and quoting during
 domain-pack refresh; pypdf is the portable default for PDF normalization. Poppler
 `pdftotext` is an optional, explicit compatibility backend and is not installed
-by pip. Install it with `sudo apt install poppler-utils` on Debian/Ubuntu,
-`brew install poppler` on macOS, or `conda install conda-forge::poppler` on
-Windows only when that backend is required. Run
+by pip. Install it with `sudo apt install poppler-utils` on Debian/Ubuntu or
+`brew install poppler` on macOS only when that backend is required. Run
 `evidence-wiki doctor --format json` (or the workspace-local
 `python3 scripts/doctor.py --format json`) to inspect required and optional
 capabilities. The workspace records `pypdf` as the default
@@ -98,9 +97,8 @@ Codex managed runs require Codex CLI 0.138 or newer. For user-local npm, pnpm,
 or bun installs, the host exposes only the resolved platform-native Codex
 runtime tree as read-only; it does not expose the home directory,
 `CODEX_HOME`, or the package-manager prefix. Install the runner outside this
-writable workspace. Managed Claude execution is unavailable on native Windows;
-use macOS, Linux, WSL2, or a container.
-Claude also requires `bubblewrap` and `socat` on Linux/WSL2, or
+writable workspace.
+Managed Claude requires `bubblewrap` and `socat` on Linux/WSL2, or
 `sandbox-exec` and `touch` on macOS.
 Runner isolation and runtime visibility are checked before a worker is
 launched; an unavailable profile, incomplete runtime, or overlapping runner

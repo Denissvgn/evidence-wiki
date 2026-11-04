@@ -176,9 +176,9 @@ coordination artifact. Unknown tool arguments are rejected before execution even
 when a client skipped JSON Schema validation.
 
 Linux/POSIX deterministic tests cover absolute and relative targets, spaces and
-Unicode, supported symlink aliases, and fail-closed case variants. Native
-Windows junction/case behavior and macOS filesystem-specific path evidence are
-release-candidate obligations, not inferred from POSIX simulation.
+Unicode, supported symlink aliases, and fail-closed case variants. macOS
+filesystem-specific path evidence is a release-candidate obligation, not
+inferred from POSIX simulation.
 
 ## Minimal Handshake
 

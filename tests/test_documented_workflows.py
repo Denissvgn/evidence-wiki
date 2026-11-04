@@ -2091,7 +2091,8 @@ class DocumentedWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(document=label):
                 self.assertIn("Codex CLI 0.138", text)
-                self.assertIn("native Windows", text)
+                self.assertIn("Linux/WSL2", text)
+                self.assertNotIn("unavailable on native Windows", text)
                 self.assertIn("RUNNER_ISOLATION_UNAVAILABLE", text)
                 self.assertIn("runs/orchestrations/", text)
                 self.assertIn("resume", text)
@@ -2132,7 +2133,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
         self.assertIn("runs/orchestrations/", agents)
         self.assertIn("required postconditions", agents)
         self.assertIn('"$EVIDENCE_WIKI_PYTHON" -B scripts/...', agents)
-        self.assertIn("$env:EVIDENCE_WIKI_PYTHON", agents)
+        self.assertNotIn("PowerShell", agents)
 
     def test_harness_support_levels_are_documented_without_false_managed_claims(self):
         documents = {
@@ -2172,7 +2173,7 @@ class DocumentedWorkflowTests(unittest.TestCase):
                         self.assertRegex(external, rf"\b{host}\b")
                         self.assertNotRegex(managed, rf"\b{host}\b")
                     self.assertIn("`orchestrate run` / `resume`", managed)
-                    self.assertIn("managed claude is unavailable on native windows", managed)
+                    self.assertNotIn("windows", managed)
                     self.assertIn("operator-controlled host", external)
                     self.assertIn("`start` / `next` / `submit` / `status`", external)
                 else:

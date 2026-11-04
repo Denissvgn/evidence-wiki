@@ -105,11 +105,7 @@ Managed execution is fail-closed when the runner cannot enforce the workspace
 boundary required by the host. Codex managed runs require Codex CLI 0.138 or
 newer so EvidenceWiki can select the named `evidence_wiki_worker` custom
 permission profile with `-c default_permissions="evidence_wiki_worker"`.
-Claude managed runs are not available from native Windows because Claude Code
-does not currently provide the required per-path isolation there. Use macOS,
-Linux, WSL2, or a container for managed Claude execution, or drive the
-model-neutral protocol from an external host that owns the control artifacts.
-A managed Claude preflight also requires `bubblewrap` and `socat` on
+A managed Claude preflight requires `bubblewrap` and `socat` on
 Linux/WSL2, or the built-in `sandbox-exec` and `touch` tools on macOS. Missing
 primitives fail before a worker is launched.
 A failed capability check returns `RUNNER_ISOLATION_UNAVAILABLE` before a worker
@@ -123,7 +119,7 @@ a minimal deterministic `PATH`, and adds read-only permission rules for only
 the selected virtual environment and its external Python runtime. Its
 preflight executes that interpreter inside a stricter read-only variant of the
 worker profile and imports the required PyYAML and pypdf packages before it
-initializes the TLS context. An unreadable macOS framework, Windows base
+initializes the TLS context. An unreadable macOS framework or base
 installation, missing dependency, or unavailable interpreter therefore fails
 before a new parent is created by `run` and before a worker is launched by
 `resume`. Poppler is not a managed-run prerequisite: pypdf is the portable
@@ -751,7 +747,7 @@ read-only grant. Offline actions receive none of these grants; an unexpected
 resolver target fails closed with `RUNNER_ISOLATION_UNAVAILABLE`.
 
 The Codex preflight resolves the selected launcher before session creation.
-For an official npm, pnpm, or bun launcher (including a Windows npm shim), it
+For an official npm, pnpm, or bun launcher, it
 locates the matching platform package and grants only the canonical native
 target tree containing `bin/`, `codex-resources/`, and `codex-path/` as an
 absolute read-only profile rule. Direct native/IDE layouts use their bounded
@@ -760,10 +756,7 @@ action; it never widens to the operator's home, `CODEX_HOME`, or an npm prefix.
 A missing/malformed platform package or a runtime that overlaps the writable
 workspace fails with `RUNNER_ISOLATION_UNAVAILABLE` before a parent session is
 created. The official launcher remains the executed command so its supported
-runtime environment and signal handling are preserved, except on native
-Windows when `PATH` resolves an npm `.cmd`/`.bat`/`.ps1` shim: the host resolves
-and executes the validated packaged `codex.exe` directly to retain
-`shell=False` and avoid command-shell injection semantics.
+runtime environment and signal handling are preserved.
 
 The same Codex preflight resolves the exact `sys.executable` used by the
 EvidenceWiki host without resolving away a workspace `.venv`/`venv` launcher.

@@ -30,10 +30,11 @@ evidence-wiki agent summary --format json \
   --require strict-evidence/v1 --require declarative-computation/v1
 ```
 
-On Windows, create the environment with `py -3 -m venv .research-env`, use
-`.\.research-env\Scripts\python.exe` to install, and activate with
-`.\.research-env\Scripts\Activate.ps1`. Subsequent examples assume the selected
-environment is active; its executable is `evidence-wiki.exe` on Windows.
+EvidenceWiki runs on Linux and macOS. Native Windows is not supported: the
+package and every workspace script refuse it with `PLATFORM_UNSUPPORTED`. On
+Windows, run EvidenceWiki inside a Linux environment such as WSL2. Release 1.1.2
+is the last release with native Windows support. Subsequent examples assume the
+selected environment is active.
 
 You can select the interpreter explicitly without activating the environment:
 
@@ -140,7 +141,7 @@ cd solid-state-batteries
 writes. Provider flags explicitly configure separate discovery and acquisition
 permissions. Domain packs never enable providers on their own.
 
-Add a question (on PowerShell, create `batch.yaml` in an editor):
+Add a question:
 
 ```bash
 cat > batch.yaml <<'EOF'
@@ -201,7 +202,7 @@ evidence immutable and continue with the [research workflow][research-run].
 | Scoped MCP host | `serve-onboarding-mcp` exposes [startup-granted research tools](workspace-template/docs/agent-contracts.md#scoped-autonomous-research-tools), with explicit runtime, native cancellation/recovery and no elicitation. |
 | Configured autonomous host | `agent run-cycle` / `refresh` share the [public library dispatcher](docs/library-api.md), with explicit private runtime selection and bounded noninteractive execution. |
 | Current caller | `agent research-guide` describes advice, claims, ingestion and controlled export without another model runner. |
-| Managed adapters | `orchestrate run` / `resume` use the Codex CLI and Claude Code version/platform/mode rows listed by `agent frameworks`. Managed Claude is unavailable on native Windows. |
+| Managed adapters | `orchestrate run` / `resume` use the Codex CLI and Claude Code version/platform/mode rows listed by `agent frameworks`. |
 | External host | `start` / `next` / `submit` / `status` support an operator-controlled host, including OpenCode, Pi, Aider or Gemini CLI. |
 
 For exact candidate conformance, the [unattended qualification guide](docs/unattended-qualification.md)
@@ -318,11 +319,7 @@ Run `evidence-wiki doctor --format json` for available capabilities and
 `evidence-wiki status --target WORKSPACE --format json` for workspace health.
 See [workspace validation][workspace-status] for lower-level checks and completion.
 
-Native Windows supports local captures, protected publication, pack catalogs
-and setup through anchored handles and private ACLs. Reparse points, network
-shares and filesystems lacking required guarantees refuse. Restrict protected
-host state and trust files to the current account and SYSTEM. Framework
-qualification and `host_enforced` isolation remain separate; see
+Framework qualification and `host_enforced` isolation remain separate; see
 [platform and authority boundaries][agent-contracts].
 
 ## Create and Maintain a Workspace

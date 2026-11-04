@@ -45,10 +45,6 @@ the template's exact lowercase filename:
 cp .obsidian/templates/concept.md "wiki/concepts/café-cooling.md"
 ```
 
-```powershell
-Copy-Item -LiteralPath '.obsidian\templates\concept.md' -Destination 'wiki\concepts\café-cooling.md'
-```
-
 Open the copied file in any text editor, replace every placeholder, and add an
 exact-case standard Markdown link to `index.md`. The destination may contain
 reviewed Unicode, but create names in NFC where the platform permits it and do

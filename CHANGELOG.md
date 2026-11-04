@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** native Windows is no longer supported. The package and every
+  workspace script refuse it on import with `PLATFORM_UNSUPPORTED`, before any
+  workspace effect. Linux and macOS behavior is unchanged. On Windows, run
+  EvidenceWiki in a Linux environment such as WSL2. Release 1.1.2 is the last
+  release with native Windows support, and CI no longer runs Windows jobs.
+
 ### Added
 
 - Add an explicit 48-hour execution profile and RunPolicy v4 for larger total

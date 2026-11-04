@@ -8,10 +8,17 @@ workflows.
 
 from __future__ import annotations
 
+import os
+
+# Refuse before importing any sibling module, which would write its bytecode into the workspace.
+if os.name == "nt":
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
+
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import sys

@@ -83,8 +83,7 @@ and outside the parent tree whose expected fingerprint it retains.
 
 Managed Codex execution requires Codex CLI 0.138 or newer so EvidenceWiki can
 select its named `evidence_wiki_worker` custom permission profile. Managed
-Claude execution is unavailable on native Windows; use macOS, Linux, WSL2, or a
-container instead. Claude additionally requires `bubblewrap` and `socat` on
+Claude requires `bubblewrap` and `socat` on
 Linux/WSL2, or `sandbox-exec` and `touch` on macOS. The package host checks isolation before a worker launches
 and returns `RUNNER_ISOLATION_UNAVAILABLE` if it cannot keep
 `runs/orchestrations/<orchestration_id>/` host-owned. Direct protocol hosts must
@@ -446,7 +445,7 @@ result:
 
 | Code | Meaning | Typical remediation |
 |------|---------|---------------------|
-| `RUNNER_ISOLATION_UNAVAILABLE` | The selected runner/runtime or platform cannot enforce the required permission profile. | For Codex, install CLI 0.138+ outside the writable workspace and reinstall it if the npm/pnpm/bun platform runtime is missing; EvidenceWiki grants only that native runtime tree read-only. For Claude, install `bubblewrap` and `socat` on Linux/WSL2 or use the built-in `sandbox-exec` and `touch` on macOS. Do not use managed Claude on native Windows; use WSL2, a container, or an external protocol host with equivalent isolation. No worker or parent session was started by preflight. |
+| `RUNNER_ISOLATION_UNAVAILABLE` | The selected runner/runtime or platform cannot enforce the required permission profile. | For Codex, install CLI 0.138+ outside the writable workspace and reinstall it if the npm/pnpm/bun platform runtime is missing; EvidenceWiki grants only that native runtime tree read-only. For Claude, install `bubblewrap` and `socat` on Linux/WSL2 or use the built-in `sandbox-exec` and `touch` on macOS. No worker or parent session was started by preflight. |
 | `RUNNER_DELEGATED_ACQUISITION_UNSUPPORTED` | The workspace declares `orchestration.acquisition: delegated`, so acquisition work orders are addressed to an external acquirer no managed worker can be. | Drive this workspace with `orchestrate start/next/submit`, which is the mode delegation is designed for, or remove the declaration to acquire through workspace providers. Refused before the runner is resolved and before `run` creates a session, so nothing was started. |
 | `CONTROL_ARTIFACT_UNSAFE` | The host cannot construct the bounded snapshot of tripwire-protected controls because a tripwire root is too large or contains a link or special file. | Inspect the named workspace-relative path, restore a bounded regular-file tree, and resume the same action. Preventive-only read-only roots are sandbox controls, not recursively hashed tripwire roots. |
 | `CONTROL_ARTIFACT_TAMPERED` | A worker changed tripwire-protected path membership, file type, mode, or content. Timestamp-only drift is not included. | Inspect the exact workspace-relative changes and any quarantined valid result. No result was submitted and no file was automatically restored or rolled back. Restore the issued control state, then resume with `--acknowledge-control-repair`; the controller still checks its trusted-input fingerprint. Start a new session for intentional static-control changes. |
@@ -506,6 +505,7 @@ Stable error codes:
 | `PUBLICATION_SELECTION_INVALID` | Question selection is empty, oversized, or contains an invalid slug. | Supply one to 1000 portable question slugs. |
 | `QUESTION_BLOCKERS_UNFULFILLED` | Reopening a question found unfulfilled or untrusted blocking requests. | Fulfil every blocker with normalized evidence through its owning acquisition flow, retaining request and claim audit records. |
 | `DEPENDENCY_MISSING` | Required runtime dependency is unavailable. | Install the dependency and rerun. |
+| `PLATFORM_UNSUPPORTED` | The command runs on native Windows, which EvidenceWiki does not support. The refusal happens on import, before any workspace effect. | Run EvidenceWiki on Linux or macOS; on Windows, use a Linux environment such as WSL2. |
 | `CONFIG_MISSING` | `research.yml` is missing. | Run from an initialized workspace or pass `--project-root`. |
 | `CONFIG_INVALID` | `research.yml` or contract metadata is malformed. | Fix the workspace config. |
 | `WORKSPACE_UNREADABLE` | Required workspace state could not be read. | Check the path and starter files. |

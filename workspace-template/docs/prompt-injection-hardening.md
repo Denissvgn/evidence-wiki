@@ -64,8 +64,6 @@ behaviors:
 
 | Behavior | Coverage | Why it needs a target-environment check |
 |---|---|---|
-| Native Windows drive, UNC, and case behavior | Not covered by the portable fixture | Requires a native Windows filesystem. |
-| Native NTFS junction swap | Not covered by the portable fixture | A POSIX symlink is not equivalent to an NTFS junction. |
 | Case-folding macOS alias behavior | Not covered by the portable fixture | Requires the target macOS filesystem and its actual case behavior. |
 | Different-user read and denial behavior | Not covered by the current-user fixture | Requires a separately provisioned OS identity. |
 

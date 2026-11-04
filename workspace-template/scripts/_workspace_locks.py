@@ -39,14 +39,11 @@ from enum import Enum
 from pathlib import Path
 
 if os.name == "nt":
-    # This leaf helper is also loaded directly by importlib callers that do not
-    # put its directory on sys.path. Resolve only its installed native sibling.
-    import importlib.util
-
-    _native_spec = importlib.util.spec_from_file_location("_workspace_lock_windows_fs", Path(__file__).with_name("_windows_fs.py"))
-    _native_module = importlib.util.module_from_spec(_native_spec)
-    _native_spec.loader.exec_module(_native_module)
-    os = _native_module.filesystem
+    # This leaf helper is also loaded directly by importlib callers that cannot
+    # import ``_script_errors``, so it raises the shared refusal line itself.
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
 
 try:  # pragma: no cover - platform dependent import
     import fcntl

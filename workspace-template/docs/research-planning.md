@@ -13,7 +13,7 @@ evidence-wiki agent plan-check --from-file setup-plan.json
 ```
 
 The output file is optional, must be new and must have an existing parent outside
-the target and installed assets. Publication is exclusive and atomic through native POSIX or Windows handles.
+the target and installed assets. Publication is exclusive and atomic through native POSIX descriptors.
 Planning without `--output` makes no target writes. Apply an authorized saved plan
 with `evidence-wiki agent apply --from-file setup-plan.json`; the executor rechecks
 its inputs under a target lock. See [application and recovery](workspace-application.md).
@@ -235,7 +235,7 @@ evidence-wiki agent apply --from-file setup-plan.json
 evidence-wiki agent apply --from-file setup-plan.json
 ```
 
-For another location, including Windows, choose an existing absolute writable
+For another location, choose an existing absolute writable
 parent and set both `request.payload.target.writable_root` and
 `request.payload.authority.writable_roots` to it before planning. Keep the target
 new or empty and save the request and plan outside it. The second apply verifies

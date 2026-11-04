@@ -170,6 +170,16 @@ SEAM_WITHOUT_REFUSAL = {
 #: itself, and the ``raise SystemExit(main())`` module trailer, which is process exit.
 REFUSAL_INTRODUCED = re.compile(r"^\s*raise (?:ScriptRefusal\(|SystemExit\((?!main\(\)\)))", re.MULTILINE)
 
+#: The native Windows refusal every entry point raises before its first import. No input
+#: reaches it on a supported platform, so one verbatim module-level copy is removed before
+#: the search; ``tests/test_platform_refusal.py`` pins its place and its line.
+PLATFORM_REFUSAL = (
+    'if os.name == "nt":\n'
+    "    raise SystemExit(\n"
+    '        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."\n'
+    "    )\n"
+)
+
 #: Substituted for a declared-volatile value on both sides before comparison.
 VOLATILE = "<volatile>"
 
@@ -413,7 +423,8 @@ class SeamConformanceTests(unittest.TestCase):
                     f"{script} is declared refusal-free but is no longer detected as a seam; "
                     "either restore its seam or drop it from SEAM_WITHOUT_REFUSAL",
                 )
-                found = REFUSAL_INTRODUCED.search((SCRIPTS / script).read_text(encoding="utf-8"))
+                source = (SCRIPTS / script).read_text(encoding="utf-8").replace(PLATFORM_REFUSAL, "", 1)
+                found = REFUSAL_INTRODUCED.search(source)
                 self.assertIsNone(
                     found,
                     f"{script} now raises a refusal ({found.group().strip() if found else ''}), "

@@ -14,25 +14,14 @@ contributions may be reviewed as maintainer time permits.
 
 ## Local setup
 
-EvidenceWiki supports Python 3.10 and newer. Create a virtual environment and
-install the development dependencies.
-
-POSIX shells:
+EvidenceWiki supports Python 3.10 and newer on Linux and macOS; native Windows
+is not supported. Create a virtual environment and install the development
+dependencies:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 ```
-
-Windows PowerShell:
-
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
-```
-
-The commands below use the POSIX path. On Windows, replace
-`.venv/bin/python` with `.venv\Scripts\python.exe`.
 
 ## Repository boundaries
 
@@ -59,7 +48,9 @@ The commands below use the POSIX path. On Windows, replace
   `wiki/` pages.
 - Do not add hooks, automatic commits, background synchronization, or network
   fetching as defaults.
-- Preserve compatibility with Python 3.10+ on Windows, macOS, and Ubuntu.
+- Preserve compatibility with Python 3.10+ on Linux and macOS. Keep the native
+  Windows refusal ahead of any effect at every entry point; a new workspace
+  script must reach it through its top-level imports.
 - Avoid broad refactors while implementing a focused change.
 
 ## Local pre-PR gate
@@ -68,7 +59,7 @@ The local gate runs clean tracked Git snapshots with pinned interpreters. Linux
 uses native ARM64 Docker on Apple Silicon; macOS runs natively with explicitly
 selected Python executables. Linux x64 and ARM64 share the full functional-suite
 obligation, while both architectures must run the same native probe selection.
-Machine identities are retained separately. Windows remains a hosted gate.
+Machine identities are retained separately.
 
 Run each required profile into a new directory outside the checkout:
 
@@ -108,8 +99,8 @@ retention policy, and the hosted verifier retains the signed receipt summary.
 The migration uses `LOCAL_CI_ENABLED=true` only after the trusted verifier is
 present on the default branch and a complete signed local result has passed.
 Require `Required CI` in branch protection and keep the branch up to date with
-main. With local mode enabled, PR Actions retain Windows, a native Linux x64
-probe and the small authenticated-results verifier. The full hosted fallback
+main. With local mode enabled, PR Actions retain a native Linux x64 probe and
+the small authenticated-results verifier. The full hosted fallback
 remains active before activation and on main. Release qualification retains its
 complete release/manual checks instead of duplicating them on every PR.
 

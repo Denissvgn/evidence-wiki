@@ -2,10 +2,6 @@ name: Latest Python compatibility
 
 on:
   workflow_call:
-    inputs:
-      hosted-windows-only:
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -22,7 +18,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.hosted-windows-only && '[{"os":"windows-latest","python":"3.14"}]' || '[{"os":"ubuntu-latest","python":"3.10"},{"os":"ubuntu-latest","python":"3.12"},{"os":"ubuntu-latest","python":"3.14"},{"os":"macos-latest","python":"3.14"},{"os":"windows-latest","python":"3.14"}]') }}
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: macos-latest
+            python: "3.14"
     steps:
       - name: Check out the event commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,8 +44,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install and check compatibility (POSIX)
-        if: runner.os != 'Windows'
+      - name: Install and check compatibility
         shell: bash
         env:
           EVIDENCE_WIKI_EXPECTED_PYTHON: ${{ steps.python.outputs.python-version }}
@@ -49,19 +52,6 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install --editable ".[dev]"
           .venv/bin/python tools/check_ci_compatibility.py
-
-      - name: Install and check compatibility (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          EVIDENCE_WIKI_EXPECTED_PYTHON: ${{ steps.python.outputs.python-version }}
-        run: |
-          python -m venv .venv
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe -m pip install --editable ".[dev]"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe tools/check_ci_compatibility.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Retain latest compatibility evidence
         if: always()

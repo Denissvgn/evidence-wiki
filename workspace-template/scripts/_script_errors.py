@@ -4,10 +4,27 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any
 
 SCHEMA_VERSION = "1.0"
+
+# Workspace scripts run on Linux and macOS. Importing this module refuses native
+# Windows before a script has any effect; leaf modules that cannot import it raise
+# the same line themselves.
+PLATFORM_REFUSAL = (
+    "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+)
+
+
+def refuse_unsupported_platform(os_name: str) -> None:
+    """Exit with :data:`PLATFORM_REFUSAL` when ``os_name`` names native Windows."""
+    if os_name == "nt":
+        raise SystemExit(PLATFORM_REFUSAL)
+
+
+refuse_unsupported_platform(os.name)
 
 _REMEDIATIONS = {
     'COVERAGE_INPUTS_CHANGED': 'Use the serialized coverage operation; recapture current inputs and prepare a fresh plan under its native lock.',
@@ -38,6 +55,7 @@ _REMEDIATIONS = {
     'SOURCE_NORMALIZATION_REQUEST_INVALID': 'Supply the closed normalization request with valid selectors, booleans and supported finite bounds.',
     'SOURCE_SCOPE_INVALID': 'Keep source and generated paths in the workspace, preserve direct-original mappings, and avoid input/output overlap.',
     'WORKSPACE_PATH_REFUSED': 'Select ordinary, unaliased in-scope paths on a supported native platform; preserve existing artifacts.',
+    'PLATFORM_UNSUPPORTED': 'Run EvidenceWiki on Linux or macOS; on Windows, use a Linux environment such as WSL2.',
     "COMPUTATION_BUSY": "Wait for the current computation writer to finish, inspect its result and request IDs, then retry without deleting locks or journals.",
     "COMPUTATION_REFUSED": "Inspect the computation reason, correct the declared inputs, expressions or clock selection, and evaluate again before applying any effect.",
     "RUN_CALLER_CONTEXT_CONFLICT": "Preserve the run and inspect its original owner, instructions and controls. Use that unchanged context or explicitly start new work after an authorized change; never rewrite the old binding.",
@@ -735,6 +753,8 @@ def json_mode_requested(argv: list[str] | None, *, default_json: bool = False) -
 def classify_error_code(message: str) -> str:
     text = message.strip()
     lower = text.lower()
+    if text == PLATFORM_REFUSAL:
+        return "PLATFORM_UNSUPPORTED"
     if "pyyaml is required" in lower:
         return "DEPENDENCY_MISSING"
     if "pypdf" in lower and "pdf text extraction requires" in lower:
@@ -852,6 +872,7 @@ NON_RECOVERABLE_CODES = frozenset(
         'OPERATION_CONTROL_INVALID',
         'OPERATION_DEADLINE_EXCEEDED',
         'OPERATION_PROCESS_BOUNDARY_UNSUPPORTED',
+        'PLATFORM_UNSUPPORTED',
         'RUN_JOB_RESERVATION_INVALID',
         'RUN_JOB_RESERVATION_PENDING',
         'RUN_JOURNAL_LIMIT',

@@ -33,11 +33,9 @@ evidence_usage:
 ```
 
 The directory must belong to the current user. POSIX permissions must exclude
-group and other access; Windows ACLs must exclude other unprivileged users.
-State and lock files must be private regular files with one hard link. Paths
-must have no symlink or reparse-point components. POSIX uses directory
-descriptors, no-follow opens and advisory locks. Windows uses anchored local
-drive handles, private ACLs and native mutexes; unsupported filesystems refuse.
+group and other access. State and lock files must be private regular files with
+one hard link. Paths must have no symlink components. The store uses directory
+descriptors, no-follow opens and advisory locks; unsupported filesystems refuse.
 Read operations do not create a missing store. The host must provision the
 directory; initialization creates only the state and lock inside it.
 

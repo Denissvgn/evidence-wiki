@@ -64,7 +64,7 @@ retargeting them. Receipt hashes identify caller-local files; these files are
 unprotected observations and confer no trusted review or evidence acceptance.
 
 Writes use anchored native file operations, process-safe coordination and atomic
-catalog replacement on POSIX and Windows local drives. Missing native filesystem
+catalog replacement on local POSIX filesystems. Missing native filesystem
 capabilities explicitly refuse catalog writes. A failure can
 leave an unreferenced immutable receipt; registration is complete only when the
 revision appears in `catalog.json`. Inspection is read-only for caller assets;

@@ -4,6 +4,7 @@
 import os as _os
 
 if _os.name == "nt":
-    from _windows_fs import filesystem as os
-else:
-    os = _os
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
+os = _os

@@ -20,14 +20,16 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
+  # Local mode replaces every hosted suite and compatibility cell with authenticated
+  # local evidence, so these jobs run only in the hosted fallback.
   compatibility:
+    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
     uses: ./.github/workflows/check-compatibility.yml
-    with:
-      hosted-windows-only: ${{ vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' }}
 
   test:
     name: ${{ matrix.platform.name }} / shard ${{ matrix.shard }}
     needs: compatibility
+    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
     env:
       EVIDENCE_WIKI_EXPECTED_PYTHON: ${{ matrix.platform.python-version }}
     runs-on: ${{ matrix.platform.os }}
@@ -35,7 +37,16 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-        platform: ${{ fromJSON(vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' && '[{"name":"Windows / Python 3.12","os":"windows-latest","python-version":"3.12.10"}]' || '[{"name":"Ubuntu / Python 3.10","os":"ubuntu-latest","python-version":"3.10.21"},{"name":"Ubuntu / Python 3.14","os":"ubuntu-latest","python-version":"3.14.7"},{"name":"macOS / Python 3.12","os":"macos-latest","python-version":"3.12.10"},{"name":"Windows / Python 3.12","os":"windows-latest","python-version":"3.12.10"}]') }}
+        platform:
+          - name: Ubuntu / Python 3.10
+            os: ubuntu-latest
+            python-version: "3.10.21"
+          - name: Ubuntu / Python 3.14
+            os: ubuntu-latest
+            python-version: "3.14.7"
+          - name: macOS / Python 3.12
+            os: macos-latest
+            python-version: "3.12.10"
 
     steps:
       - name: Check out repository
@@ -56,36 +67,16 @@ jobs:
           sudo apt-get install --yes --no-install-recommends poppler-utils
           pdftotext -v
 
-      - name: Install development environment (POSIX)
-        if: runner.os != 'Windows'
+      - name: Install development environment
         shell: bash
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install --editable ".[dev]"
 
-      - name: Install development environment (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          python -m venv .venv
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe -m pip install --editable ".[dev]"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Check pinned compatibility (POSIX)
-        if: runner.os != 'Windows'
+      - name: Check pinned compatibility
         shell: bash
         run: .venv/bin/python tools/check_ci_compatibility.py
-
-      - name: Check pinned compatibility (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          .\.venv\Scripts\python.exe tools/check_ci_compatibility.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Retain pinned compatibility evidence
         if: always()
@@ -96,31 +87,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      - name: Run tests and quality checks (POSIX)
-        if: runner.os != 'Windows'
+      - name: Run tests and quality checks
         shell: bash
         run: |
           .venv/bin/python tools/run_test_groups.py --group-size 48 --shard-count 3 --shard-index ${{ matrix.shard }}
           .venv/bin/python -m ruff check .
           .venv/bin/python tools/sync_vendored_scripts.py --check
-
-      - name: Check native Windows contracts
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          .\.venv\Scripts\python.exe -m pytest -q -x --tb=short --durations=15 tests/test_native_filesystem.py tests/test_workspace_capture_portability.py tests/test_legacy_usage_portability.py tests/test_frameworks.py tests/test_evidence_assessments.py::test_prepare_issue_and_consume_nonfinancial_assessment tests/test_orchestration_host.py::OrchestrationHostTests::test_managed_run_completes_through_real_controller_with_fake_codex tests/test_orchestration_host.py::OrchestrationHostTests::test_managed_window_serializes_its_own_controller_calls_without_a_driver_refusal tests/test_pack_composition.py::test_composition_uses_scoped_identifiers_and_validates_materialized_bytes tests/test_pack_migrations.py::test_generic_attachment_preview_preserves_sources_and_requires_reevaluation tests/test_usage_consumers.py::test_unsupported_host_storage_fails_without_initializing tests/test_usage_consumers.py::test_host_fixture_skips_before_setup_without_supported_locking tests/test_caller_research.py::test_readonly_advice_and_no_fabricated_completion tests/test_workspace_application.py::test_empty_setup_and_replay_preserve_question tests/test_native_instructions.py tests/test_pack_authoring.py::test_replaced_output_directory_is_not_followed tests/test_market_evidence.py::test_market_capture_refuses_when_directory_descriptors_are_unavailable tests/test_caller_research.py::test_progress_has_unknown_grading_and_separate_estimates tests/test_upgrade_workspace.py::UpgradePendingOrderTests::test_upgrade_refuses_while_a_driver_holds_a_session_lock
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Run tests and quality checks (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          .\.venv\Scripts\python.exe tools/run_test_groups.py --group-size 48 --shard-count 3 --shard-index ${{ matrix.shard }} --timeout 3600
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe -m ruff check .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\.venv\Scripts\python.exe tools\sync_vendored_scripts.py --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Retain suite outcomes and process evidence
         if: always()
@@ -245,10 +217,9 @@ jobs:
         run: |
           .venv/bin/python -m tools.verify_test_shards --evidence suite-shards \
             --commit "$SUITE_COMMIT" --run-id "$SUITE_RUN_ID" --shard-count 3 --group-size 48 \
-            --platform Linux/X64/3.10 --platform Linux/X64/3.14 \
-            --platform macOS/ARM64/3.12 --platform Windows/X64/3.12 \
+            --platform Linux/X64/3.10 --platform Linux/X64/3.14 --platform macOS/ARM64/3.12 \
             --python-patch Linux/X64/3.10=3.10.21 --python-patch Linux/X64/3.14=3.14.7 \
-            --python-patch macOS/ARM64/3.12=3.12.10 --python-patch Windows/X64/3.12=3.12.10
+            --python-patch macOS/ARM64/3.12=3.12.10
 
       - name: Download this run's candidate distributions
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
@@ -348,17 +319,17 @@ jobs:
       - name: Require the selected complete policy
         env:
           LOCAL_MODE: ${{ vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' }}
-          COMPATIBILITY: ${{ needs.compatibility.result }}
-          WINDOWS_AND_FALLBACK: ${{ needs.test.result }}
+          FALLBACK_COMPATIBILITY: ${{ needs.compatibility.result }}
+          FALLBACK_TESTS: ${{ needs.test.result }}
           FALLBACK_PACKAGE: ${{ needs.package.result }}
           LOCAL_EVIDENCE: ${{ needs.local-evidence.result }}
           NATIVE_PEER: ${{ needs.linux-native.result }}
         run: |
-          test "$COMPATIBILITY" = success
-          test "$WINDOWS_AND_FALLBACK" = success
           if [ "$LOCAL_MODE" = true ]; then
             test "$LOCAL_EVIDENCE" = success
             test "$NATIVE_PEER" = success
           else
+            test "$FALLBACK_COMPATIBILITY" = success
+            test "$FALLBACK_TESTS" = success
             test "$FALLBACK_PACKAGE" = success
           fi

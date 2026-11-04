@@ -25,6 +25,10 @@ keywords = [
   "provenance",
   "autonomous-research",
 ]
+classifiers = [
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
 
 [project.optional-dependencies]
 dev = [

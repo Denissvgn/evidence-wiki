@@ -3,6 +3,14 @@
 
 from __future__ import annotations
 
+import os
+
+# Refuse before importing any sibling module, which would write its bytecode into the workspace.
+if os.name == "nt":
+    raise SystemExit(
+        "refused (PLATFORM_UNSUPPORTED): EvidenceWiki runs on Linux and macOS; native Windows is not supported."
+    )
+
 import argparse
 import base64
 import csv
@@ -2591,7 +2599,6 @@ def extract_pdf_abstract_details(text: str) -> PdfAbstractExtraction:
 
 def extract_pdf_abstract(text: str) -> str | None:
     return extract_pdf_abstract_details(text).text
-
 
 
 def extract_pdf_outline(text: str) -> list[tuple[int, str]]:
