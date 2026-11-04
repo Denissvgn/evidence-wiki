@@ -1,5 +1,6 @@
 """Portable captures, Windows handle epochs and unchanged refusal boundaries."""
 
+import mmap
 import os
 import stat
 import sys
@@ -48,6 +49,23 @@ def test_materialization_is_read_only_with_exact_bytes(tmp_path, revision):
         assert stat.S_IMODE((root / "nested").stat().st_mode) == 0o500
         assert stat.S_IMODE(root.stat().st_mode) == 0o500
     assert not root.exists()
+
+
+def test_capture_rereads_bytes_written_through_a_dirty_mapping(tmp_path, revision):
+    target = tmp_path / "data.bin"
+    target.write_bytes(b"0" * 4096)
+    (tmp_path / "research.yml").write_bytes(b"project: {}\n")
+    with open(target, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
+        mapping[0:1] = b"A"
+        first = revision.capture_workspace(tmp_path)
+        before = revision.observe_tree(tmp_path)
+        # The page is already dirty, so this write leaves the whole observation unchanged.
+        mapping[0:1] = b"B"
+        assert revision.observe_tree(tmp_path) == before
+        second = revision.capture_workspace(tmp_path)
+    assert first.files["data.bin"][:1] == b"A"
+    assert second.files["data.bin"][:1] == b"B"
+    assert second.revision_id != first.revision_id
 
 
 def test_materialization_canonicalizes_the_temporary_directory_alias(tmp_path, revision, monkeypatch):

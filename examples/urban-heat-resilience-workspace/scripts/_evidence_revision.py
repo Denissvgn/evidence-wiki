@@ -5,12 +5,6 @@ Readers evaluate a private materialization of one validated capture. No script
 from that materialization is executed. File and directory observations bracket
 the read, including ctime/inode identity, so concurrent edits are retried rather
 than splicing independently read inputs into a purported revision.
-
-A file whose complete observation is unchanged since an earlier capture of the
-same root, and whose times were already settled when that capture began, reuses
-the bytes read then instead of being reread. Every change to a file moves its
-ctime, which user space cannot set, so the reuse relies on the kernel's change
-time and on the wall clock not stepping back by more than the settle interval.
 """
 
 from __future__ import annotations
@@ -22,8 +16,6 @@ import re
 import stat
 import sys
 import tempfile
-import threading
-import time
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
@@ -43,9 +35,6 @@ MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_ATTEMPTS = 3
 MAX_DEPTH = 64
 MAX_PINNED_DIRECTORIES = 32
-SETTLED_NS = 2_000_000_000
-SETTLED_MAX_ROOTS = 16
-SETTLED_MAX_BYTES = 64 * 1024 * 1024
 EXCLUDED_ROOTS = frozenset({".git", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
 _UNPORTABLE_NAME = re.compile(r'[\\:<>"|?*\x00-\x1f]|[. ]\Z')
 
@@ -366,55 +355,17 @@ class WorkspaceRevision:
                     directory.chmod(0o700)
 
 
-# Bytes of settled files from each root's latest complete capture, behind their full
-# observation. Racily recent files are never remembered, as in git's index: a change
-# in the same timestamp tick as the read could otherwise leave the observation equal.
-_SETTLED_LOCK = threading.Lock()
-_SETTLED: OrderedDict[str, tuple[dict[str, tuple[tuple[int, ...], bytes]], int]] = OrderedDict()
-
-
-def _settled(root: Path) -> dict[str, tuple[tuple[int, ...], bytes]]:
-    with _SETTLED_LOCK:
-        remembered = _SETTLED.get(str(root))
-        if remembered is None:
-            return {}
-        _SETTLED.move_to_end(str(root))
-        return remembered[0]
-
-
-def _remember_settled(root: Path, before: dict[str, tuple[int, ...]], payloads: dict[str, bytes], started: int) -> None:
-    limit = started - SETTLED_NS
-    kept = {relative: (before[relative], data) for relative, data in payloads.items()
-            if max(before[relative][5:]) < limit}
-    size = sum(len(data) for _info, data in kept.values())
-    with _SETTLED_LOCK:
-        _SETTLED.pop(str(root), None)
-        if not kept or size > SETTLED_MAX_BYTES:
-            return
-        while _SETTLED and (len(_SETTLED) >= SETTLED_MAX_ROOTS
-                            or sum(entry[1] for entry in _SETTLED.values()) + size > SETTLED_MAX_BYTES):
-            _SETTLED.popitem(last=False)
-        _SETTLED[str(root)] = (kept, size)
-
-
 def capture_workspace(root: str | Path, *, max_attempts: int = MAX_ATTEMPTS) -> WorkspaceRevision:
     """Capture a local workspace without creating locks, caches, or other live files.
 
-    A regular file reuses the bytes an earlier complete capture of this root read only
-    when its whole observation (device, inode, mode, link count, size, mtime and ctime)
-    is exactly unchanged and both times preceded that capture's start by more than
-    SETTLED_NS. Any other file is read again through pinned directories.
-
-    Trust condition: the kernel moves a file's ctime on every change to it, user space
-    cannot set ctime, and the wall clock does not step back by more than SETTLED_NS.
-    The reused bytes are held in process memory only.
+    Every regular file is read on every capture. No stat observation is a change token:
+    a write through an already-dirty shared mapping leaves every field unchanged.
     """
     if type(max_attempts) is not int or not 1 <= max_attempts <= MAX_ATTEMPTS:
         raise refuse("EVIDENCE_REVISION_LIMIT", "Capture attempts must be between one and three.")
     root = Path(root).expanduser().resolve()
     for attempt in range(max_attempts):
         try:
-            started = time.time_ns()
             before = observe_tree(root)
             if sys.platform == "win32":
                 payloads = capture_windows_files(root, before)
@@ -423,14 +374,10 @@ def capture_workspace(root: str | Path, *, max_attempts: int = MAX_ATTEMPTS) -> 
                     raise refuse("EVIDENCE_REVISION_UNSUPPORTED", "No-follow descriptor capture is unavailable.")
                 directories = _DirectoryPins(root, before)
                 try:
-                    settled = _settled(root)
-                    payloads = {}
-                    for relative, info in sorted(before.items()):
-                        if not stat.S_ISREG(info[2]):
-                            continue
-                        held = settled.get(relative)
-                        payloads[relative] = (held[1] if held is not None and held[0] == info
-                                              else read_observed_file(root, relative, info, directories))
+                    payloads = {
+                        relative: read_observed_file(root, relative, info, directories)
+                        for relative, info in sorted(before.items()) if stat.S_ISREG(info[2])
+                    }
                     directories.verify()
                     if observe_tree(root) != before:
                         raise refuse("EVIDENCE_REVISION_CHANGED", "Workspace changed during capture.")
@@ -443,7 +390,6 @@ def capture_workspace(root: str | Path, *, max_attempts: int = MAX_ATTEMPTS) -> 
                     raise
                 else:
                     directories.close()
-                _remember_settled(root, before, payloads, started)
             directories = tuple(sorted(relative for relative, info in before.items() if stat.S_ISDIR(info[2])))
             return WorkspaceRevision(MappingProxyType(payloads), directories)
         except (FileNotFoundError, NotADirectoryError):

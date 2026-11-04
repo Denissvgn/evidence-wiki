@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import mmap
 import stat
-import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -392,7 +392,7 @@ def test_owner_generation_rejects_source_changes_during_capture(roots, monkeypat
     assert error.value.error_code == "MUTATION_REVISION_CONFLICT"
 
 
-def test_owner_generation_rehashes_package_bytes_only_after_their_observation_moves(roots, monkeypatch):
+def test_owner_generation_rehashes_package_bytes_written_through_a_dirty_mapping(roots, monkeypatch):
     workspace, _control = roots
     package = workspace / "package"
     package.mkdir()
@@ -400,46 +400,16 @@ def test_owner_generation_rehashes_package_bytes_only_after_their_observation_mo
     source.write_bytes(b"VALUE = 1\n")
     monkeypatch.setattr(module, "__file__", str(package / "__init__.py"))
     monkeypatch.setattr(module, "owner_generation", lambda: (package, "1" * 64))
-    revision = module.owner("_evidence_revision")
-    monkeypatch.setattr(revision, "SETTLED_NS", 0)
-    first = capture_owner_generation()
-    original_read, reads = revision.read_observed_file, []
-
-    def counted(root, relative, observation):
-        reads.append(relative)
-        return original_read(root, relative, observation)
-
-    monkeypatch.setattr(revision, "read_observed_file", counted)
-    assert capture_owner_generation() == first
-    assert reads == []
-    before = source.stat()
-    # A same-size rewrite in one coarse clock tick could keep ctime; wait for a later tick.
-    deadline = time.monotonic() + 5
-    while True:
-        source.write_bytes(b"VALUE = 2\n")
-        if source.stat().st_ctime_ns != before.st_ctime_ns or time.monotonic() > deadline:
-            break
-        time.sleep(0.01)
-    changed = capture_owner_generation()
-    assert reads == ["owner.py"]
+    observe = module.owner("_evidence_revision").observe_tree
+    with open(source, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
+        mapping[8:9] = b"2"
+        first = capture_owner_generation()
+        before = observe(package)
+        # The page is already dirty, so this write leaves the whole observation unchanged.
+        mapping[8:9] = b"3"
+        assert observe(package) == before
+        changed = capture_owner_generation()
     assert changed["package_sha256"] != first["package_sha256"]
-
-
-def test_owner_generation_never_remembers_racily_recent_package_bytes(roots, monkeypatch):
-    workspace, _control = roots
-    package = workspace / "package"
-    package.mkdir()
-    (package / "owner.py").write_bytes(b"VALUE = 1\n")
-    monkeypatch.setattr(module, "__file__", str(package / "__init__.py"))
-    monkeypatch.setattr(module, "owner_generation", lambda: (package, "1" * 64))
-    revision = module.owner("_evidence_revision")
-    monkeypatch.setattr(revision, "SETTLED_NS", 3600 * 10**9)
-    capture_owner_generation()
-    original_read, reads = revision.read_observed_file, []
-    monkeypatch.setattr(revision, "read_observed_file",
-                        lambda root, relative, observation: reads.append(relative) or original_read(root, relative, observation))
-    capture_owner_generation()
-    assert reads == ["owner.py"]
 
 
 def test_stored_invalid_json_and_unknown_state_are_not_admitted(roots):

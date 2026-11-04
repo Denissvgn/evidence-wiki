@@ -12,7 +12,6 @@ import hashlib
 import re
 import secrets
 import stat
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NoReturn
@@ -165,24 +164,11 @@ def capture_revision(workspace_root: str | Path, *, excluded=(), input_paths=())
             "input_bytes": {name: files[name] for name in inputs}}
 
 
-_PACKAGE_DIGEST_MEMO: tuple[Path, dict[str, tuple[int, ...]], str] | None = None
-
-
 def capture_owner_generation() -> dict[str, str]:
-    """Bind trusted script and package source bytes, including namespace helpers.
-
-    The package digest is always a content hash. As the script loader does for its
-    tree hash, the bytes are reread only when the package tree observation moves:
-    every entry's device, inode, mode, link count, size, mtime and ctime. The digest
-    is remembered only when that observation held across the hash and every time in
-    it was already settled, as for settled capture bytes, and a remembered digest
-    still needs the same closing observation.
-    """
-    global _PACKAGE_DIGEST_MEMO
+    """Bind trusted script and package source bytes, including namespace helpers."""
     script_root, script_hash = owner_generation()
     package = Path(__file__).resolve().parent
     revision = owner("_evidence_revision")
-    started = time.time_ns()
     try:
         observed = revision.observe_tree(package)
     except (Exception, SystemExit):
@@ -191,35 +177,28 @@ def capture_owner_generation() -> dict[str, str]:
                    if name.endswith(".py") and stat.S_ISREG(info[2]))
     if len(paths) > 512:
         _refuse("owner_generation_bound")
-    remembered = _PACKAGE_DIGEST_MEMO
-    if remembered is not None and remembered[0] == package and remembered[1] == observed:
-        package_digest, fresh = remembered[2], False
-    else:
-        rows, total = [], 0
-        for relative in paths:
-            try:
-                if observed[relative][4] > 2_097_152:
-                    _refuse("owner_generation_bound")
-                raw = revision.read_observed_file(package, relative, observed[relative])
-            except MutationStoreError:
-                raise
-            except (Exception, SystemExit):
-                _refuse("owner_generation_unavailable")
-            total += len(raw)
-            if total > 32 * 1024 * 1024:
+    rows, total = [], 0
+    for relative in paths:
+        try:
+            if observed[relative][4] > 2_097_152:
                 _refuse("owner_generation_bound")
-            rows.append({"path": relative, "sha256": _digest(raw)})
-        package_digest, fresh = _digest(canonical(rows)), True
+            raw = revision.read_observed_file(package, relative, observed[relative])
+        except MutationStoreError:
+            raise
+        except (Exception, SystemExit):
+            _refuse("owner_generation_unavailable")
+        total += len(raw)
+        if total > 32 * 1024 * 1024:
+            _refuse("owner_generation_bound")
+        rows.append({"path": relative, "sha256": _digest(raw)})
     try:
         unchanged = revision.observe_tree(package) == observed
     except (Exception, SystemExit):
         _refuse("owner_generation_changed", "MUTATION_REVISION_CONFLICT")
     if not unchanged or owner_generation() != (script_root, script_hash):
         _refuse("owner_generation_changed", "MUTATION_REVISION_CONFLICT")
-    if fresh and all(max(info[5:]) < started - revision.SETTLED_NS for info in observed.values()):
-        _PACKAGE_DIGEST_MEMO = (package, observed, package_digest)
     return {"script_root": str(script_root), "script_sha256": "sha256:" + script_hash,
-            "package_sha256": package_digest}
+            "package_sha256": _digest(canonical(rows))}
 
 
 class MutationStore:
