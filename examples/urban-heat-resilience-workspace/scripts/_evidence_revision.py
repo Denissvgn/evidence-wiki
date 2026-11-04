@@ -283,6 +283,17 @@ def capture_windows_files(root: Path, before: dict[str, tuple[int, ...]]) -> dic
         raise windows_refusal(error) from error
 
 
+def _write_read_only(path: Path, data: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
+        os.fchmod(descriptor, 0o400)
+    finally:
+        os.close(descriptor)
+
+
 @dataclass(frozen=True)
 class WorkspaceRevision:
     """Immutable captured bytes and the canonical input identity they establish."""
@@ -326,8 +337,12 @@ class WorkspaceRevision:
                     (root / directory).mkdir(parents=True, exist_ok=True)
             for name, data in self.files.items():
                 path = root / name
-                path.write_bytes(data)
-                path.chmod(0o400)
+                if hasattr(os, "fchmod"):
+                    # One descriptor per file: create, write, then restrict it.
+                    _write_read_only(path, data)
+                else:
+                    path.write_bytes(data)
+                    path.chmod(0o400)
             paths = [root / name for name in self.directories if name != "."]
             try:
                 for directory in sorted(paths, key=lambda path: len(path.parts), reverse=True):
@@ -341,7 +356,11 @@ class WorkspaceRevision:
 
 
 def capture_workspace(root: str | Path, *, max_attempts: int = MAX_ATTEMPTS) -> WorkspaceRevision:
-    """Capture a local workspace without creating locks, caches, or other live files."""
+    """Capture a local workspace without creating locks, caches, or other live files.
+
+    Every regular file is read on every capture. No stat observation is a change token:
+    a write through an already-dirty shared mapping leaves every field unchanged.
+    """
     if type(max_attempts) is not int or not 1 <= max_attempts <= MAX_ATTEMPTS:
         raise refuse("EVIDENCE_REVISION_LIMIT", "Capture attempts must be between one and three.")
     root = Path(root).expanduser().resolve()

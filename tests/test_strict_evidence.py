@@ -419,3 +419,23 @@ def test_returned_schema_documents_never_reach_validation():
     CONTRACT.schema_documents()[CONTRACT.POLICY_SCHEMA]["required"].clear()
     with pytest.raises(ValueError, match="strict_schema_field_missing"):
         CONTRACT.document(invalid, CONTRACT.POLICY_SCHEMA)
+
+
+def test_document_shape_validation_ignores_returned_schema_documents():
+    invalid = {"schema_version": "evidence-machine-review-policy/v1"}
+    with pytest.raises(ValueError, match="strict_schema_field_missing"):
+        CONTRACT.validate_document_shape(invalid)
+    CONTRACT.schema_documents()["evidence-machine-review-policy/v1"]["required"].clear()
+    with pytest.raises(ValueError, match="strict_schema_field_missing"):
+        CONTRACT.validate_document_shape(invalid)
+
+
+def test_document_shape_validation_keeps_complete_contracts_for_other_versions():
+    value = {"schema_version": "evidence-strict-review-status/v2"}
+    with pytest.raises(ValueError) as expected:
+        CONTRACT.validate_shape(value, CONTRACT.schema_documents()["evidence-strict-review-status/v2"])
+    with pytest.raises(ValueError) as actual:
+        CONTRACT.validate_document_shape(value)
+    assert str(actual.value) == str(expected.value)
+    with pytest.raises(KeyError):
+        CONTRACT.validate_document_shape({"schema_version": "evidence-strict-unknown/v1"})

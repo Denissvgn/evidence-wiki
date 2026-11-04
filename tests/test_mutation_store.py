@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import mmap
 import stat
 from concurrent.futures import ThreadPoolExecutor
 
@@ -389,6 +390,26 @@ def test_owner_generation_rejects_source_changes_during_capture(roots, monkeypat
     with pytest.raises(MutationStoreError) as error:
         capture_owner_generation()
     assert error.value.error_code == "MUTATION_REVISION_CONFLICT"
+
+
+def test_owner_generation_rehashes_package_bytes_written_through_a_dirty_mapping(roots, monkeypatch):
+    workspace, _control = roots
+    package = workspace / "package"
+    package.mkdir()
+    source = package / "owner.py"
+    source.write_bytes(b"VALUE = 1\n")
+    monkeypatch.setattr(module, "__file__", str(package / "__init__.py"))
+    monkeypatch.setattr(module, "owner_generation", lambda: (package, "1" * 64))
+    observe = module.owner("_evidence_revision").observe_tree
+    with open(source, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
+        mapping[8:9] = b"2"
+        first = capture_owner_generation()
+        before = observe(package)
+        # The page is already dirty, so this write leaves the whole observation unchanged.
+        mapping[8:9] = b"3"
+        assert observe(package) == before
+        changed = capture_owner_generation()
+    assert changed["package_sha256"] != first["package_sha256"]
 
 
 def test_stored_invalid_json_and_unknown_state_are_not_admitted(roots):

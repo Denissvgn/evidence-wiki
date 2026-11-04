@@ -1,6 +1,8 @@
 """Portable captures, Windows handle epochs and unchanged refusal boundaries."""
 
+import mmap
 import os
+import stat
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -30,6 +32,40 @@ def test_capture_includes_hidden_controls_and_materializes_exact_bytes(tmp_path,
     assert not root.exists()
     controls.write_bytes(b"state: changed\n")
     assert revision.capture_workspace(tmp_path).revision_id != captured.revision_id
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_materialization_is_read_only_with_exact_bytes(tmp_path, revision):
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested/large.bin").write_bytes(bytes(range(256)) * 8192)
+    (tmp_path / "empty.txt").write_bytes(b"")
+    (tmp_path / "research.yml").write_bytes(b"project: {}\n")
+    captured = revision.capture_workspace(tmp_path)
+    with captured.materialize() as root:
+        assert sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()) == sorted(captured.files)
+        for name, data in captured.files.items():
+            assert (root / name).read_bytes() == data
+            assert stat.S_IMODE((root / name).stat().st_mode) == 0o400
+        assert stat.S_IMODE((root / "nested").stat().st_mode) == 0o500
+        assert stat.S_IMODE(root.stat().st_mode) == 0o500
+    assert not root.exists()
+
+
+def test_capture_rereads_bytes_written_through_a_dirty_mapping(tmp_path, revision):
+    target = tmp_path / "data.bin"
+    target.write_bytes(b"0" * 4096)
+    (tmp_path / "research.yml").write_bytes(b"project: {}\n")
+    with open(target, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
+        mapping[0:1] = b"A"
+        first = revision.capture_workspace(tmp_path)
+        before = revision.observe_tree(tmp_path)
+        # The page is already dirty, so this write leaves the whole observation unchanged.
+        mapping[0:1] = b"B"
+        assert revision.observe_tree(tmp_path) == before
+        second = revision.capture_workspace(tmp_path)
+    assert first.files["data.bin"][:1] == b"A"
+    assert second.files["data.bin"][:1] == b"B"
+    assert second.revision_id != first.revision_id
 
 
 def test_materialization_canonicalizes_the_temporary_directory_alias(tmp_path, revision, monkeypatch):

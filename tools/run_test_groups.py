@@ -19,6 +19,14 @@ COMBINED_MODULES = (
     "tests/test_script_loader.py", "tests/test_script_host.py", "tests/test_library_workspace.py",
     "tests/test_provider_contract.py", "tests/test_provider_plugins.py",
 )
+# Each of these runs a complete native research drive per test, so its runtime alone
+# approaches a group's process limit. Each forms a group of its own.
+ISOLATED_MODULES = frozenset({
+    "tests/test_repair_continuations_exhaustion_reference.py",
+    "tests/test_repair_continuations_reference.py",
+    "tests/test_repair_continuations_refusal_reference.py",
+    "tests/test_repair_peer_reference.py",
+})
 TIMEOUT_GRACE = 30.0
 KILL_CONFIRMATION = 5.0
 
@@ -34,12 +42,22 @@ def source_identity(root: Path) -> dict:
 
 
 def groups(nodes: list[str], limit: int) -> list[list[str]]:
-    """Keep each module intact; release its process state between bounded groups."""
+    """Keep each module intact; release its process state between bounded groups.
+
+    Groups follow collection order. An isolated module ends the group before it and
+    forms its own, whatever its node count.
+    """
     modules: dict[str, list[str]] = {}
     for node in nodes:
         modules.setdefault(node.split("::", 1)[0], []).append(node)
     result, current = [], []
-    for members in modules.values():
+    for name, members in modules.items():
+        if name in ISOLATED_MODULES:
+            if current:
+                result.append(current)
+                current = []
+            result.append(list(members))
+            continue
         if current and len(current) + len(members) > limit:
             result.append(current)
             current = []
@@ -230,7 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     report = {"strategy": "fresh processes; intact modules grouped around a target count",
               "limits": ["No complete-suite single-interpreter claim.",
                          "Two combined module orders cover selected shared caches and registries only.",
-                         "A module larger than the target runs alone; timeout is per process."],
+                         "A module larger than the target runs alone; timeout is per process.",
+                         "Listed long-running modules each run alone."],
               "python": sys.version, "platform": platform.platform(), "source_sha256": identity,
               "runtime": {"system": platform.system(), "machine": platform.machine(),
                           "architecture": "ARM64" if platform.machine().lower() in {"arm64", "aarch64"}
