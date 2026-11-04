@@ -1,5 +1,9 @@
 """Cover the shared packaged-script host that the CLI and the library API share."""
 
+import hashlib
+import mmap
+import os
+import shutil
 import sys
 import unittest
 from pathlib import Path
@@ -80,23 +84,28 @@ class SharedAssetsRootTests(unittest.TestCase):
         self.assertEqual([], resources.missing_required_assets(shared))
 
 
-class LoaderHashMemoTests(unittest.TestCase):
-    def test_loader_file_is_reread_only_when_its_signature_moves(self):
-        import tempfile
-        import time
-        from unittest import mock
+def observation(path):
+    info = os.stat(path)
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "_workspace_module_loader.py"
-            path.write_text("VALUE = 1\n", encoding="utf-8")
-            first = _script_host._loader_content_hash(path)
-            with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("must not reread")):
-                self.assertEqual(first, _script_host._loader_content_hash(path))
-            time.sleep(0.01)
-            path.write_text("VALUE = 22\n", encoding="utf-8")
-            second = _script_host._loader_content_hash(path)
-            self.assertNotEqual(first, second)
-            self.assertEqual(second, _script_host._loader_content_hash(path))
+
+def test_loader_bytes_written_through_a_dirty_mapping_select_a_fresh_loader(tmp_path):
+    root = tmp_path / "assets/workspace-template/scripts"
+    root.mkdir(parents=True)
+    path = root / "_workspace_module_loader.py"
+    shutil.copyfile(REPO_ROOT / "workspace-template/scripts/_workspace_module_loader.py", path)
+    offset = path.read_bytes().index(b"Load one")
+    with open(path, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping:
+        mapping[offset:offset + 1] = b"X"
+        first = _script_host._load_workspace_loader(root)
+        before = observation(path)
+        # The page is already dirty, so this write leaves the whole observation unchanged.
+        mapping[offset:offset + 1] = b"Y"
+        assert observation(path) == before
+        second = _script_host._load_workspace_loader(root)
+        key = f"{root.resolve()}\0{hashlib.sha256(path.read_bytes()).hexdigest()}"
+    assert second is not first
+    assert _script_host._LOADER_MODULE_CACHE[key] is second
 
 
 if __name__ == "__main__":

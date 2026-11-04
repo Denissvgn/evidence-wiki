@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
@@ -14,7 +13,7 @@ from typing import Any
 import yaml
 from _evidence_revision import MAX_ATTEMPTS, capture_workspace, content_id, refuse
 from _publication_context import authorized_capture
-from _workspace_module_loader import _tree_signature, load_workspace_module
+from _workspace_module_loader import load_workspace_module
 from _yaml_safe import safe_load_current as safe_load
 
 SCHEMA_VERSION = "evidence-selected-publication/v1"
@@ -22,7 +21,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 _STRICT_CACHE = {}
 _READ_HELPER_CACHE = {}
 _QUALIFICATION_CACHE = {}
-_REMEMBERED_PRODUCER = None
 GLOBAL_GATES = (
     "configuration_and_workspace_health", "source_integrity_and_normalization",
     "source_requests", "candidate_lifecycle", "claims_and_contradictions",
@@ -72,28 +70,15 @@ def validate_config_paths(config: dict[str, Any]) -> None:
 def producer_identity() -> str:
     """Bind the trusted script implementation independently of workspace copies.
 
-    The identity is always a content hash. A stat signature only decides whether
-    it must be rehashed, and is remembered only if it held across the hash. Every
-    ``*.py`` name is part of the signature, so an entry the stat signature skips
-    still forces a rehash, which refuses it.
+    Every call hashes the bytes as they are now. Guards compare this identity at
+    the start and end of a run, so it must not come from a stat signature: a
+    write through an already-dirty shared mapping changes bytes without moving
+    any stat field.
     """
-    global _REMEMBERED_PRODUCER
-    signature = _producer_signature()
-    if _REMEMBERED_PRODUCER is not None and _REMEMBERED_PRODUCER[0] == signature:
-        return _REMEMBERED_PRODUCER[1]
-    identity = content_id("evidence-publication-producer/v1", [
+    return content_id("evidence-publication-producer/v1", [
         {"path": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
         for path in sorted(SCRIPT_DIR.glob("*.py"))
     ])
-    if _producer_signature() == signature:
-        _REMEMBERED_PRODUCER = (signature, identity)
-    return identity
-
-
-def _producer_signature():
-    with os.scandir(SCRIPT_DIR) as children:
-        names = tuple(sorted(child.name for child in children if child.name.endswith(".py")))
-    return os.stat(SCRIPT_DIR).st_mtime_ns, _tree_signature(SCRIPT_DIR), names
 
 
 def logical_paths(value: Any, temporary_root: Path) -> Any:

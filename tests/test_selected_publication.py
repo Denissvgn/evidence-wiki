@@ -4,10 +4,10 @@ import contextlib
 import hashlib
 import io
 import json
+import mmap
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
@@ -229,39 +229,35 @@ class SelectedPublicationTests(unittest.TestCase):
             self.assert_refusal("EVIDENCE_REVISION_LIMIT", lambda: REVISION.capture_workspace(self.root))
 
 
+def producer_expected(content):
+    return SELECTED.content_id("evidence-publication-producer/v1", [
+        {"path": "script.py", "sha256": hashlib.sha256(content).hexdigest()}])
+
+
 @unittest.skipIf(sys.platform == "win32", "Requires POSIX change times and unprivileged symbolic links")
 class ProducerIdentityTests(unittest.TestCase):
-    def test_identity_stays_a_content_hash_behind_the_stat_signature(self):
-        def expected(content):
-            return SELECTED.content_id("evidence-publication-producer/v1", [
-                {"path": "script.py", "sha256": hashlib.sha256(content).hexdigest()}])
-
+    def test_identity_is_a_content_hash_of_the_current_bytes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             script = root / "script.py"
             script.write_bytes(b"first = 1\n")
             info = script.stat()
-            with patch.object(SELECTED, "SCRIPT_DIR", root), patch.object(SELECTED, "_REMEMBERED_PRODUCER", None):
-                self.assertEqual(expected(b"first = 1\n"), SELECTED.producer_identity())
-                self.assertEqual(SELECTED._tree_signature(root), SELECTED._REMEMBERED_PRODUCER[0][1])
-                self.assertEqual(expected(b"first = 1\n"), SELECTED.producer_identity())
-                # Only the change time reveals this rewrite, so it must move past the file clock's resolution.
-                time.sleep(0.05)
+            with patch.object(SELECTED, "SCRIPT_DIR", root):
+                self.assertEqual(producer_expected(b"first = 1\n"), SELECTED.producer_identity())
+                self.assertEqual(producer_expected(b"first = 1\n"), SELECTED.producer_identity())
                 script.write_bytes(b"other = 2\n")
                 os.utime(script, ns=(info.st_atime_ns, info.st_mtime_ns))
-                self.assertEqual(expected(b"other = 2\n"), SELECTED.producer_identity())
-                # The signature skips entries it cannot stat, and those must still refuse.
+                self.assertEqual(producer_expected(b"other = 2\n"), SELECTED.producer_identity())
                 (root / "dangling.py").symlink_to(root / "missing.py")
                 with self.assertRaises(OSError):
                     SELECTED.producer_identity()
 
-    def test_remembered_identity_never_hides_an_entry_the_stat_signature_skips(self):
+    def test_an_entry_added_behind_a_restored_directory_clock_still_refuses(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             (root / "script.py").write_bytes(b"first = 1\n")
-            with patch.object(SELECTED, "SCRIPT_DIR", root), patch.object(SELECTED, "_REMEMBERED_PRODUCER", None):
+            with patch.object(SELECTED, "SCRIPT_DIR", root):
                 SELECTED.producer_identity()
-                self.assertIsNotNone(SELECTED._REMEMBERED_PRODUCER)
                 clock = root.stat()
                 (root / "dangling.py").symlink_to(root / "missing.py")
                 os.utime(root, ns=(clock.st_atime_ns, clock.st_mtime_ns))
@@ -269,22 +265,24 @@ class ProducerIdentityTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     SELECTED.producer_identity()
 
-    def test_identity_is_not_remembered_when_an_entry_appears_during_its_hash(self):
+    def test_identity_reports_bytes_written_through_a_dirty_mapping(self):
+        def observation(path):
+            info = os.stat(path)
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            (root / "script.py").write_bytes(b"first = 1\n")
-            clock = root.stat()
-            hashed = SELECTED.content_id
-
-            def appearing(*args):
-                (root / "dangling.py").symlink_to(root / "missing.py")
-                os.utime(root, ns=(clock.st_atime_ns, clock.st_mtime_ns))
-                return hashed(*args)
-
-            with patch.object(SELECTED, "SCRIPT_DIR", root), patch.object(SELECTED, "_REMEMBERED_PRODUCER", None), \
-                    patch.object(SELECTED, "content_id", appearing):
-                SELECTED.producer_identity()
-                self.assertIsNone(SELECTED._REMEMBERED_PRODUCER)
+            script = root / "script.py"
+            script.write_bytes(b"value = 1\n")
+            with patch.object(SELECTED, "SCRIPT_DIR", root), open(script, "r+b") as handle, \
+                    mmap.mmap(handle.fileno(), 0) as mapping:
+                mapping[8:9] = b"2"
+                self.assertEqual(producer_expected(b"value = 2\n"), SELECTED.producer_identity())
+                before = observation(script), observation(root)
+                # The page is already dirty, so this write leaves the whole observation unchanged.
+                mapping[8:9] = b"3"
+                self.assertEqual(before, (observation(script), observation(root)))
+                self.assertEqual(producer_expected(b"value = 3\n"), SELECTED.producer_identity())
 
 
 if __name__ == "__main__":

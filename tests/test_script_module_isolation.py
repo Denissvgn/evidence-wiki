@@ -94,7 +94,7 @@ class ScriptModuleIsolationTests(unittest.TestCase):
             self.assertEqual("after-recreate", after.origin())
             self.assertIsNot(before, after)
 
-    def test_warm_load_reads_no_script_bytes_and_an_edited_sibling_still_invalidates(self):
+    def test_warm_load_reads_only_the_loader_and_an_edited_sibling_still_invalidates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             script_root = Path(tmpdir) / "workspace" / "scripts"
             write_script_asset(script_root, "first")
@@ -111,7 +111,10 @@ class ScriptModuleIsolationTests(unittest.TestCase):
             with mock.patch.object(Path, "read_bytes", counting_read_bytes):
                 warm = cli._load_script(script_root / "target.py", "legacy-name")
             self.assertIs(first, warm)
-            self.assertEqual([], [path for path in reads if script_root in path.parents], "a warm load must not reread the tree")
+            tree = script_root.resolve()
+            self.assertEqual([tree / "_workspace_module_loader.py"],
+                             [path.resolve() for path in reads if tree in path.resolve().parents],
+                             "a warm load rereads only the loader, never the tree")
 
             time.sleep(0.01)
             (script_root / "helper.py").write_text("ORIGIN = 'second, longer'\n", encoding="utf-8")
