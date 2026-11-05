@@ -1,6 +1,7 @@
 """Shared code identity preserves fresh metadata and host generation boundaries."""
 
 import inspect
+import mmap
 import os
 import shutil
 import threading
@@ -187,6 +188,53 @@ def test_real_pinned_generation_refuses_warm_cached_module_after_rewrite(tmp_pat
                 (root / "leaf.py").write_text("VALUE = 2\n", encoding="utf-8")
                 with pytest.raises(ConfigError):
                     _script_host.load_packaged_script(root.parents[1], "leaf")
+
+
+def observation(path):
+    info = os.stat(path)
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def owner_scripts(tmp_path, monkeypatch):
+    root = scripts(tmp_path)
+    (root / "user.py").write_text("from leaf import VALUE as SEEN\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(_script_host, "shared_assets_root", lambda: root.parents[1])
+    return root, host_context.HostContext(allowed_roots=[workspace], grants=[], actor_ref="owner")
+
+
+def test_pinned_operation_refuses_bytes_written_through_a_dirty_mapping(tmp_path, memo, monkeypatch):
+    root, context = owner_scripts(tmp_path, monkeypatch)
+    leaf = root / "leaf.py"
+    with open(leaf, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping, context.activate():
+        mapping[8:9] = b"2"
+        with pytest.raises(ConfigError) as refused:
+            with host_context.call_binding():
+                assert _script_host.load_packaged_script(root.parents[1], "leaf").VALUE == 2
+                before = observation(leaf)
+                # The page is already dirty, so this write leaves the whole observation unchanged.
+                mapping[8:9] = b"3"
+                assert observation(leaf) == before
+                _script_host.load_packaged_script(root.parents[1], "user")
+    assert refused.value.details["reason"] == "host_owner_generation_changed"
+
+
+def test_next_operation_runs_bytes_written_through_a_dirty_mapping(tmp_path, memo, monkeypatch):
+    root, context = owner_scripts(tmp_path, monkeypatch)
+    leaf = root / "leaf.py"
+    with open(leaf, "r+b") as handle, mmap.mmap(handle.fileno(), 0) as mapping, context.activate():
+        mapping[8:9] = b"2"
+        with host_context.call_binding():
+            assert _script_host.load_packaged_script(root.parents[1], "leaf").VALUE == 2
+        before = observation(leaf)
+        # The page is already dirty, so this write leaves the whole observation unchanged.
+        mapping[8:9] = b"3"
+        assert observation(leaf) == before
+        # The fresh pin must also replace the stale cache key, or every load would refuse.
+        with host_context.call_binding():
+            assert _script_host.load_packaged_script(root.parents[1], "leaf").VALUE == 3
+            assert _script_host.load_packaged_script(root.parents[1], "user").SEEN == 3
 
 
 def test_unbridged_loader_keeps_original_local_memo(tmp_path, memo):

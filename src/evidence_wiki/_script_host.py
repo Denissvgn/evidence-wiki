@@ -28,9 +28,6 @@ from . import host_context, resources
 
 _SCRIPT_MODULE_CACHE: dict[str, ModuleType] = {}
 _LOADER_MODULE_CACHE: dict[str, ModuleType] = {}
-# The loader file's content hash, remembered behind the stat signature it was
-# read under, so a warm load does not reread the loader to find its own cache key.
-_LOADER_HASH_MEMO: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
 
 # Serializes every workspace-script load in this process.
 #
@@ -101,39 +98,80 @@ def _script_content_tree_hash(root: Path) -> str:
     return value.hexdigest()
 
 
-def script_tree_hash(root: Path) -> str:
-    """Share only an owner-computed code digest behind fresh original metadata.
+def _script_tree_owner_code() -> tuple[CodeType, CodeType]:
+    return _script_tree_signature.__code__, _script_content_tree_hash.__code__
 
-    This retains the copied loader's stat-signature limitations. No source bytes,
-    parsed configuration, permissions or current eligibility are remembered.
-    The private memo bounds payload bytes and root count; larger trees still hash
-    normally without being retained. No caller supplies computed cache material.
-    """
+
+def _forget_script_tree(root: Path) -> None:
     global _SCRIPT_TREE_MEMO_BYTES
+    previous = _SCRIPT_TREE_MEMO.pop(root, None)
+    if previous is not None:
+        _SCRIPT_TREE_MEMO_BYTES -= previous[3]
+
+
+def _retain_script_tree(root: Path, owner_code: tuple, signature: tuple, digest: str) -> None:
+    """Remember one digest under the signature observed before and after its hash."""
+    global _SCRIPT_TREE_MEMO_BYTES
+    _forget_script_tree(root)
+    size = (sys.getsizeof(signature) + sum(sys.getsizeof(row) +
+            sum(sys.getsizeof(item) for item in row) for row in signature) +
+            len(str(root).encode("utf-8", errors="surrogatepass")) + sys.getsizeof(digest))
+    if size > _SCRIPT_TREE_MEMO_MAX_BYTES:
+        return
+    while _SCRIPT_TREE_MEMO and (len(_SCRIPT_TREE_MEMO) >= _SCRIPT_TREE_MEMO_MAX_ROOTS or
+            _SCRIPT_TREE_MEMO_BYTES + size > _SCRIPT_TREE_MEMO_MAX_BYTES):
+        _key, dropped = _SCRIPT_TREE_MEMO.popitem(last=False)
+        _SCRIPT_TREE_MEMO_BYTES -= dropped[3]
+    _SCRIPT_TREE_MEMO[root] = (owner_code, signature, digest, size)
+    _SCRIPT_TREE_MEMO_BYTES += size
+
+
+def script_tree_hash(root: Path) -> str:
+    """Return the loader's module-cache key: a code digest behind fresh metadata.
+
+    This retains the copied loader's stat-signature limitations. A write through an
+    already-dirty shared mapping changes bytes without moving any stat field, so the
+    digest returned here can be older than the bytes. It only keys modules and the
+    per-load generation check; every identity claim is built on
+    :func:`owner_generation`, which reads the bytes afresh. No source bytes, parsed
+    configuration, permissions or current eligibility are remembered. The private
+    memo bounds payload bytes and root count; larger trees still hash normally
+    without being retained. No caller supplies computed cache material.
+    """
     root = Path(root).expanduser().resolve()
     with _LOAD_LOCK:
-        owner_code = (_script_tree_signature.__code__, _script_content_tree_hash.__code__)
+        owner_code = _script_tree_owner_code()
         before = _script_tree_signature(root)
         previous = _SCRIPT_TREE_MEMO.get(root)
         if previous is not None and previous[0] == owner_code and previous[1] == before:
             _SCRIPT_TREE_MEMO.move_to_end(root)
             return previous[2]
-        if previous is not None:
-            _SCRIPT_TREE_MEMO_BYTES -= previous[3]
-            del _SCRIPT_TREE_MEMO[root]
+        _forget_script_tree(root)
         digest = _script_content_tree_hash(root)
-        after = _script_tree_signature(root)
-        if after == before:
-            size = (sys.getsizeof(before) + sum(sys.getsizeof(row) +
-                    sum(sys.getsizeof(item) for item in row) for row in before) +
-                    len(str(root).encode("utf-8", errors="surrogatepass")) + sys.getsizeof(digest))
-            if size <= _SCRIPT_TREE_MEMO_MAX_BYTES:
-                while _SCRIPT_TREE_MEMO and (len(_SCRIPT_TREE_MEMO) >= _SCRIPT_TREE_MEMO_MAX_ROOTS or
-                        _SCRIPT_TREE_MEMO_BYTES + size > _SCRIPT_TREE_MEMO_MAX_BYTES):
-                    _key, dropped = _SCRIPT_TREE_MEMO.popitem(last=False)
-                    _SCRIPT_TREE_MEMO_BYTES -= dropped[3]
-                _SCRIPT_TREE_MEMO[root] = (owner_code, after, digest, size)
-                _SCRIPT_TREE_MEMO_BYTES += size
+        if _script_tree_signature(root) == before:
+            _retain_script_tree(root, owner_code, before, digest)
+        return digest
+
+
+def _current_script_tree_hash(root: Path) -> str:
+    """Hash every script's bytes now, and leave that digest as the loader's key.
+
+    The memo entry is replaced whenever the fresh digest differs from it. Otherwise
+    a key that went stale before an operation's pin would differ from the pin, and
+    every later load in the process would refuse until some stat field moved.
+    """
+    root = Path(root).expanduser().resolve()
+    with _LOAD_LOCK:
+        owner_code = _script_tree_owner_code()
+        before = _script_tree_signature(root)
+        digest = _script_content_tree_hash(root)
+        previous = _SCRIPT_TREE_MEMO.get(root)
+        if previous is not None and previous[:3] == (owner_code, before, digest):
+            _SCRIPT_TREE_MEMO.move_to_end(root)
+            return digest
+        _forget_script_tree(root)
+        if _script_tree_signature(root) == before:
+            _retain_script_tree(root, owner_code, before, digest)
         return digest
 
 
@@ -172,28 +210,6 @@ _SHARED_ASSETS_STACK: contextlib.ExitStack | None = None
 _SHARED_ASSETS_ROOT: Path | None = None
 
 
-def _loader_signature(path: Path) -> tuple[int, int, int, int]:
-    stat = path.stat()
-    return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
-
-
-def _loader_content_hash(path: Path) -> str:
-    """Hash the loader file, rereading it only when its stat signature moves.
-
-    Observed before and after the read, remembered only when both agree, for the
-    same reason the loader's own tree hash is: a file edited mid-read must never be
-    remembered under a signature it does not match.
-    """
-    before = _loader_signature(path)
-    remembered = _LOADER_HASH_MEMO.get(path)
-    if remembered is not None and remembered[0] == before:
-        return remembered[1]
-    content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    if _loader_signature(path) == before:
-        _LOADER_HASH_MEMO[path] = (before, content_hash)
-    return content_hash
-
-
 def _load_workspace_loader(script_dir: Path) -> ModuleType:
     from . import _review_producer
 
@@ -202,7 +218,10 @@ def _load_workspace_loader(script_dir: Path) -> ModuleType:
     path = root / "_workspace_module_loader.py"
     if not path.is_file():
         raise SystemExit(f"Missing packaged script loader: {path}")
-    content_hash = _loader_content_hash(path)
+    # Read on every load: a stat signature cannot show a write through an
+    # already-dirty shared mapping. The bytes hashed here are the bytes executed.
+    source = path.read_bytes()
+    content_hash = hashlib.sha256(source).hexdigest()
     _review_producer.register_native(root, None, host_context, loader_hash=content_hash)
     key = f"{root}\0{content_hash}"
     if key in _LOADER_MODULE_CACHE:
@@ -216,7 +235,7 @@ def _load_workspace_loader(script_dir: Path) -> ModuleType:
     try:
         # Timestamp-based pyc validation is weaker than this loader's content
         # identity. Compile the actual loader bytes even when an old pyc exists.
-        exec(compiled_source_code(path.read_bytes(), str(path)), module.__dict__)  # noqa: S102 -- trusted packaged code
+        exec(compiled_source_code(source, str(path)), module.__dict__)  # noqa: S102 -- trusted packaged code
     finally:
         sys.modules.pop(module_name, None)
     for old_key in list(_LOADER_MODULE_CACHE):
@@ -274,11 +293,15 @@ def _load_script(script_path: Path, module_name: str) -> ModuleType:
 
 
 def owner_generation() -> tuple[Path, str]:
-    """Select the exact owner tree used by packaged in-process calls."""
+    """Select the exact owner tree used by packaged in-process calls.
+
+    The digest comes from the bytes as they are now, never from a stat signature:
+    an operation pins it at open and compares it again at close.
+    """
     root = shared_assets_root() / resources.STARTER_DIR / "scripts"
     with _LOAD_LOCK:
         _load_workspace_loader(root)
-        selected = root.resolve(), script_tree_hash(root)
+        selected = root.resolve(), _current_script_tree_hash(root)
         from . import _review_producer
 
         _review_producer.register_native(*selected, host_context)

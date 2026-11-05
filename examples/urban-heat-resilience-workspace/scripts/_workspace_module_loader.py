@@ -112,6 +112,11 @@ def _tree_hash(script_dir: Path) -> str:
     hash is remembered only when the two agree, so a tree edited mid-hash is
     never remembered under a signature it does not match. One entry per
     directory bounds the memo; a changed tree replaces its predecessor.
+
+    A write through an already-dirty shared mapping changes bytes without moving
+    any stat field, so this hash can be older than the bytes. No trusted identity
+    derives from it: with a trusted host bridge the host supplies the digest
+    instead, and the host's identity claims read the bytes afresh.
     """
     before = _tree_signature(script_dir)
     with _TREE_HASH_LOCK:
