@@ -256,6 +256,7 @@ class EmittedCodeFamilyTests(unittest.TestCase):
     #: Screaming-snake literals that are demonstrably not error codes.
     NOT_ERROR_CODES = {
         "O_BINARY": "os.open flag",
+        "O_CLOEXEC": "os.open flag",
         "O_DIRECTORY": "os.open flag",
         "O_NOFOLLOW": "os.open flag",
         "ROUND_HALF_EVEN": "decimal rounding mode recorded in simulation results",
