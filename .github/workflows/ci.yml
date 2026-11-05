@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # A draft cannot be merged, so its pushes run no hosted job. Marking it ready runs
+  # the complete selected policy on its head; converting it back cancels that run.
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches:
       - main
@@ -23,13 +25,13 @@ jobs:
   # Local mode replaces every hosted suite and compatibility cell with authenticated
   # local evidence, so these jobs run only in the hosted fallback.
   compatibility:
-    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true'
     uses: ./.github/workflows/check-compatibility.yml
 
   test:
     name: ${{ matrix.platform.name }} / shard ${{ matrix.shard }}
     needs: compatibility
-    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true'
     env:
       EVIDENCE_WIKI_EXPECTED_PYTHON: ${{ matrix.platform.python-version }}
     runs-on: ${{ matrix.platform.os }}
@@ -91,11 +93,22 @@ jobs:
           .venv/bin/python -m ruff check .
           .venv/bin/python tools/sync_vendored_scripts.py --check
 
+      # A re-run shard replaces only its successful manifest, so one failed shard can be
+      # retried alone; each attempt keeps its own diagnostics.
+      - name: Store the successful shard manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform.python-version }}-shard-${{ matrix.shard }}
+          path: suite-evidence/manifest.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
       - name: Retain suite outcomes and process evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: suite-${{ github.sha }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform.python-version }}-shard-${{ matrix.shard }}
+          name: suite-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform.python-version }}-shard-${{ matrix.shard }}
           path: suite-evidence/
           if-no-files-found: warn
           retention-days: 90
@@ -103,7 +116,7 @@ jobs:
   build:
     name: Build wheel and source archive
     runs-on: ubuntu-latest
-    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true'
     timeout-minutes: 15
     steps:
       - name: Check out repository
@@ -139,7 +152,7 @@ jobs:
           retention-days: 7
 
   installed-wheel:
-    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true'
     needs: [build]
     uses: ./.github/workflows/qualify-installation.yml
     with:
@@ -148,7 +161,7 @@ jobs:
       report-prefix: installed-check
 
   installed-sdist:
-    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true'
     needs: [build]
     uses: ./.github/workflows/qualify-installation.yml
     with:
@@ -157,7 +170,7 @@ jobs:
       report-prefix: installed-check
 
   installed:
-    if: vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true'
     needs: [installed-wheel, installed-sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -174,7 +187,7 @@ jobs:
   package:
     name: Build distributions
     needs: [compatibility, test, build, installed]
-    if: ${{ !cancelled() && (vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft && vars.LOCAL_CI_ENABLED != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -243,7 +256,7 @@ jobs:
 
   linux-native:
     name: Native Linux peer architecture contract
-    if: vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request'
+    if: vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' && !github.event.pull_request.draft
     runs-on: ${{ vars.LOCAL_CI_LINUX_ARCH == 'X64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
@@ -274,7 +287,7 @@ jobs:
 
   local-evidence:
     name: Require authenticated local profiles and Linux pair
-    if: vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request'
+    if: vars.LOCAL_CI_ENABLED == 'true' && github.event_name == 'pull_request' && !github.event.pull_request.draft
     needs: [linux-native]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -307,7 +320,7 @@ jobs:
 
   required:
     name: Required CI
-    if: ${{ always() }}
+    if: ${{ always() && !github.event.pull_request.draft }}
     needs: [compatibility, test, package, local-evidence, linux-native]
     runs-on: ubuntu-latest
     timeout-minutes: 5

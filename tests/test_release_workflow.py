@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import io
 import itertools
@@ -42,6 +43,38 @@ def conditional_matrix(value, *, local=False):
     choices = re.findall(r"'(\[[^']+\])'", value)
     assert len(choices) == 2 and "fromJSON" in value
     return json.loads(choices[0 if local else 1])
+
+
+FALLBACK_CONDITION = ("github.event_name != 'pull_request' || !github.event.pull_request.draft"
+                      " && vars.LOCAL_CI_ENABLED != 'true'")
+CONDITION_TOKEN = re.compile(r"\s+|&&|\|\||!=|==|!|\(|\)|'[^']*'|always\(\)|cancelled\(\)|[A-Za-z_][A-Za-z_.]*")
+
+
+def job_runs(condition: str, context: dict) -> bool:
+    """Evaluate a job condition with GitHub's precedence: `!`, then comparison, `&&`, `||`."""
+    text = condition.strip()
+    if text.startswith("${{") and text.endswith("}}"):
+        text = text[3:-2]
+    words, negate, position = [], False, 0
+    while position < len(text):
+        match = CONDITION_TOKEN.match(text, position)
+        assert match, f"unsupported condition syntax: {text[position:]!r}"
+        token, position = match.group(), match.end()
+        if token.isspace():
+            continue
+        if token == "!":
+            negate = True
+            continue
+        if token in {"&&", "||", "==", "!=", "(", ")"}:
+            assert not negate, "negation must apply to one operand"
+            words.append({"&&": "and", "||": "or"}.get(token, token))
+            continue
+        operand = {"always()": "True", "cancelled()": "False"}.get(token)
+        if operand is None:
+            operand = token if token.startswith("'") else repr(context[token])
+        words.append(f"(not {operand})" if negate else operand)
+        negate = False
+    return eval(" ".join(words), {"__builtins__": {}})  # noqa: S307 - restricted to the tokens above.
 
 
 def test_pypi_workflow_can_only_start_from_a_published_release() -> None:
@@ -289,7 +322,7 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert {(cell["os"], cell["python-version"]) for cell in fallback} == expected
     assert len(list(itertools.product(fallback, matrix["shard"]))) == 6
     for job in (test, workflow["jobs"]["compatibility"]):
-        assert job["if"] == "vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'"
+        assert job["if"] == FALLBACK_CONDITION
     assert test["strategy"]["fail-fast"] is False
     assert test["needs"] == "compatibility"
     assert set(package["needs"]) == {"compatibility", "test", "build", "installed"}
@@ -312,12 +345,20 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert upload["if"] == "always()"
     assert upload["with"]["name"].endswith("-shard-${{ matrix.shard }}")
     assert upload["with"]["retention-days"] == 90
+    assert "github.run_attempt" in upload["with"]["name"] and "overwrite" not in upload["with"]
+    # A retried shard replaces only its own successful manifest; diagnostics stay per attempt.
+    manifest = next(step for step in test["steps"] if step.get("with", {}).get("path") == "suite-evidence/manifest.json")
+    assert "if" not in manifest and manifest["with"]["overwrite"] is True
+    assert manifest["with"]["if-no-files-found"] == "error" and "github.run_attempt" not in manifest["with"]["name"]
+    assert test["steps"].index(manifest) < test["steps"].index(upload)
     steps = package["steps"]
     download = next(step for step in steps if "actions/download-artifact@" in step.get("uses", ""))
     gate = next(step for step in steps if "-m tools.verify_test_shards" in step.get("run", ""))
     artifact_gate = next(step for step in steps if "tools.verify_installed_artifacts" in step.get("run", ""))
     assert steps.index(download) < steps.index(gate) < steps.index(artifact_gate)
     assert download["with"] == {"pattern": "suite-${{ github.sha }}-*-shard-*", "path": "suite-shards/"}
+    assert fnmatch.fnmatchcase(manifest["with"]["name"], download["with"]["pattern"])
+    assert not fnmatch.fnmatchcase(upload["with"]["name"], download["with"]["pattern"])
     assert gate["env"] == {"SUITE_COMMIT": "${{ github.sha }}", "SUITE_RUN_ID": "${{ github.run_id }}"}
     command = shlex.split(gate["run"].replace("\\\n", " "))
     assert command[command.index("--shard-count") + 1] == "3"
@@ -342,7 +383,7 @@ def test_local_mode_keeps_required_native_peer_and_authenticated_evidence():
     verify = next(step["run"] for step in evidence["steps"] if "check_local_ci_status.py" in step.get("run", ""))
     assert '--native-peer native-peer/summary.json' in verify
     required = jobs["required"]
-    assert required["name"] == "Required CI" and required["if"] == "${{ always() }}"
+    assert required["name"] == "Required CI" and required["if"] == "${{ always() && !github.event.pull_request.draft }}"
     assert set(required["needs"]) == {"compatibility", "test", "package", "local-evidence", "linux-native"}
     command = required["steps"][0]["run"]
     local, fallback = command.split('if [ "$LOCAL_MODE" = true ]; then', 1)[1].split("else", 1)
@@ -351,6 +392,30 @@ def test_local_mode_keeps_required_native_peer_and_authenticated_evidence():
     for status in ("FALLBACK_COMPATIBILITY", "FALLBACK_TESTS", "FALLBACK_PACKAGE"):
         assert f'test "${status}" = success' in fallback and status not in local
     assert command.split("if [", 1)[0].strip() == ""
+
+
+@pytest.mark.parametrize("local", [None, "true"])
+@pytest.mark.parametrize("event,draft", [("push", None), ("workflow_dispatch", None), ("pull_request", False),
+                                         ("pull_request", True)])
+def test_draft_pull_requests_run_no_hosted_job_and_every_mergeable_head_runs_one_policy(event, draft, local):
+    workflow = load_workflow(CI_WORKFLOW_PATH)
+    assert workflow["on"]["pull_request"]["types"] == [
+        "opened", "synchronize", "reopened", "ready_for_review", "converted_to_draft"]
+    # Converting back to a draft starts a run in the same group, which cancels the running one.
+    assert workflow["concurrency"] == {"group": "ci-${{ github.workflow }}-${{ github.ref }}", "cancel-in-progress": True}
+    jobs = workflow["jobs"]
+    fallback = {"compatibility", "test", "build", "installed-wheel", "installed-sdist", "installed", "package"}
+    local_mode = {"linux-native", "local-evidence"}
+    assert set(jobs) == fallback | local_mode | {"required"}
+    context = {"github.event_name": event, "github.event.pull_request.draft": draft, "vars.LOCAL_CI_ENABLED": local}
+    running = {name for name, job in jobs.items() if job_runs(job["if"], context)}
+    if draft:
+        expected = set()
+    elif event == "pull_request" and local == "true":
+        expected = local_mode | {"required"}
+    else:
+        expected = fallback | {"required"}
+    assert running == expected
 
 
 def test_local_receipt_verifier_executes_only_default_branch_code_without_candidate_checkout():
