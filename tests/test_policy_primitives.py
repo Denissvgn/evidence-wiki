@@ -628,30 +628,10 @@ class PrimitiveValidationTests(unittest.TestCase):
         cannot multiply an outer repetition's choices: `(?>a|a)+` matches 26 characters
         in 0.018 ms. Refusing the repair alongside the bug would leave a pack author
         with nowhere to go.
-
-        `re` grew atomic groups in 3.11; the companion test below covers what an older
-        interpreter does with the same pattern, which is refuse it as invalid syntax.
         """
-        if sys.version_info < (3, 11):
-            self.skipTest("`re` gained atomic groups in Python 3.11")
         for pattern in ("(?>a|a)+", "(?>(a|a))+"):
             with self.subTest(pattern=pattern):
                 self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
-
-    def test_an_atomic_group_is_refused_as_invalid_before_python_311(self):
-        """Where `re` has no atomic group, the pattern is refused for the honest reason.
-
-        The guard does not flag `(?>a|a)+` as a nested quantifier on any version — the
-        construct cannot backtrack — but before 3.11 `re.compile` does not recognize it
-        at all, so `_parse_regex` refuses it as an invalid expression. Fail-closed
-        either way; only the message differs.
-        """
-        if sys.version_info >= (3, 11):
-            self.skipTest("this interpreter's `re` supports atomic groups")
-        self.assertIn(
-            "not a valid regular expression",
-            self.only_error({"regex": {"field": "record/sku", "pattern": "(?>a|a)+"}}),
-        )
 
     def test_case_folding_of_leads_is_scoped_to_ignorecase(self):
         """`re` keeps `a` and `A` apart unless a flag says otherwise, and so does this.
@@ -698,9 +678,8 @@ class PrimitiveValidationTests(unittest.TestCase):
             r"([]+]a)+",
             r"(a\|a)+",
             r"(a|A)+c",
+            r"(?>a|a)+",
         ]
-        if sys.version_info >= (3, 11):
-            patterns.append(r"(?>a|a)+")
         for pattern in patterns:
             self.assertEqual([], self.errors_for({"regex": {"field": "record/sku", "pattern": pattern}}))
         payload = json.dumps(

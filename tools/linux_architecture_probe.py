@@ -33,7 +33,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = Path.cwd()
     try:
-        runtime = checked_runtime(runtime_identity(), system="Linux", python=PYTHON_PATCHES["3.12"])
+        runtime = checked_runtime(runtime_identity(), system="Linux", python=PYTHON_PATCHES["3.14"])
         if runtime["architecture"] != args.architecture:
             raise ValueError("native machine differs from the requested probe architecture")
         args.output.mkdir(parents=True, exist_ok=False)

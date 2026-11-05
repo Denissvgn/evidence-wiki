@@ -142,7 +142,7 @@ def test_verifier_refuses_incomplete_or_mixed_results(completed_shards, tmp_path
 def test_verifier_requires_every_expected_platform(completed_shards):
     root, evidence, options, _ = completed_shards
     with pytest.raises(ValueError, match="missing shards"):
-        verify(root, evidence, **dict(options, platforms=[*options["platforms"], "Linux/ARM64/3.12"]))
+        verify(root, evidence, **dict(options, platforms=[*options["platforms"], "Linux/ARM64/3.14"]))
 
 
 def test_verifier_checks_live_sources(completed_shards, tmp_path):

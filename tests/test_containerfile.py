@@ -6,7 +6,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_containerfile_builds_source_into_a_non_root_runtime() -> None:
     text = (REPO_ROOT / "Containerfile").read_text(encoding="utf-8")
 
-    assert text.count("FROM python:3.12-slim-bookworm@sha256:") == 2
+    assert text.count("FROM python:3.14-slim-bookworm@sha256:") == 2
     assert " AS builder" in text
     assert "COPY . ." in text
     assert "/opt/evidence-wiki-venv/bin/python -m pip install --no-cache-dir ." in text

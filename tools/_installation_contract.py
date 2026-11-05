@@ -21,8 +21,7 @@ MAX_MEMBERS = 8192
 MAX_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_EXPANDED_BYTES = 128 * 1024 * 1024
 MAX_METADATA_BYTES = 65536
-DEPENDENCY_MODULES = {"pypdf": "pypdf", "pyyaml": "yaml", "ruamel-yaml": "ruamel.yaml",
-                      "tzdata": "tzdata", "typing-extensions": "typing_extensions"}
+DEPENDENCY_MODULES = {"pypdf": "pypdf", "pyyaml": "yaml", "ruamel-yaml": "ruamel.yaml", "tzdata": "tzdata"}
 
 
 def tar_stream_bounds(path):
@@ -291,9 +290,6 @@ def dependency_rules():
     for name in ("pypdf", "pyyaml", "ruamel-yaml", "tzdata"):
         item = distribution(name)
         result[name] = {"requires_dist": sorted(item.requires or []), "requires_python": item.metadata.get("Requires-Python")}
-    # This reviewed core closure has one conditional Python compatibility
-    # dependency. It is admitted only when a frozen owner edge requires it.
-    result["typing-extensions"] = {"requires_dist": []}
     return result
 
 
@@ -368,8 +364,7 @@ def validate_dependency_origins(resolved, origins, prefix, *, read_files=False):
         path = Path(value["origin"])
         if (value.get("module") != DEPENDENCY_MODULES[name] or not path.is_absolute() or not path.is_relative_to(prefix)
                 or any(part in {".", ".."} for part in path.parts)
-                or name != "typing-extensions" and value.get("version") != resolved[name]["version"]
-                or value.get("version") is not None and value["version"] != resolved[name]["version"]
+                or value.get("version") != resolved[name]["version"]
                 or not isinstance(value.get("sha256"), str) or len(value["sha256"]) != 64
                 or type(value.get("bytes")) is not int or not 0 < value["bytes"] <= MAX_MEMBER_BYTES):
             raise ValueError("imported dependency origin/version differs from selected installation: " + name)

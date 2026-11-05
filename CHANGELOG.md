@@ -10,6 +10,12 @@
   EvidenceWiki in a Linux environment such as WSL2. Release 1.1.2 is the last
   release with native Windows support, and CI no longer runs Windows jobs.
 
+- **Breaking:** Python 3.10 to 3.13 are no longer supported; EvidenceWiki now
+  requires Python 3.14 or newer. Installation on an older interpreter is
+  refused by the package metadata, and `scripts/doctor.py` reports an older
+  interpreter as a required failure. CI and the local gate run Python 3.14.7
+  on Linux and macOS.
+
 ### Added
 
 - Add an explicit 48-hour execution profile and RunPolicy v4 for larger total

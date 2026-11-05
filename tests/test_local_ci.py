@@ -32,7 +32,7 @@ from tools.run_test_groups import source_identity
 from tools.verify_local_ci import verify_signature
 
 
-def runtime(machine="aarch64", python="3.12.14", system="Linux"):
+def runtime(machine="aarch64", python="3.14.7", system="Linux"):
     return {"system": system, "machine": machine, "architecture": architecture(machine),
             "python": python, "implementation": "CPython"}
 
@@ -40,15 +40,13 @@ def runtime(machine="aarch64", python="3.12.14", system="Linux"):
 def receipt():
     profiles = {}
     for name in REQUIRED_LOCAL_PROFILES:
-        minor = name.removeprefix("linux-") if name in {"linux-3.10", "linux-3.14"} else "3.14" if name == "macos-compatibility" else "3.12"
-        selected = runtime(python=PYTHON_PATCHES[minor], system="Darwin" if name.startswith("macos") else "Linux")
+        selected = runtime(python=PYTHON_PATCHES["3.14"], system="Darwin" if name.startswith("macos") else "Linux")
         profiles[name] = {"commit": "a" * 40, "tree": "b" * 40, "runtime": selected, "status": "passed",
                           "compatibility": "passed", "collection_sha256": "c" * 64, "collected": 14,
                           "executed": 14, "groups": 1, "combined_orders": 2, "targets": ["tests"]}
     profiles["linux-native"]["targets"] = list(LINUX_NATIVE_TARGETS)
     profiles["linux-native"]["native_checks"] = dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")
     for key in ("targets", "collected", "executed", "groups", "combined_orders"):
-        profiles["macos-compatibility"].pop(key)
         profiles["packages"].pop(key)
     profiles["packages"].update(installations={"wheel": "passed", "sdist": "passed"},
                                 limits=policy()["installation_limits"], wheel_sha256="d" * 64, sdist_sha256="e" * 64)
@@ -62,7 +60,7 @@ def receipt():
 @pytest.mark.parametrize("machine,expected", [("aarch64", "ARM64"), ("arm64", "ARM64"), ("x86_64", "X64"), ("AMD64", "X64")])
 def test_native_architecture_aliases_are_explicit(machine, expected):
     assert architecture(machine) == expected
-    assert linux_obligation(runtime(machine, "3.10.21")) == "Linux/common/3.10"
+    assert linux_obligation(runtime(machine, "3.14.7")) == "Linux/common/3.14"
 
 
 def test_shared_linux_obligation_does_not_relabel_the_native_machine():
@@ -101,12 +99,16 @@ def test_architecture_pair_requires_both_real_machines_and_equal_probe_coverage(
             linux_native_pair(left, right)
 
 
-@pytest.mark.parametrize("damage", [None, "missing-profile", "wrong-tree", "future-time", "wrong-policy", "partial-suite",
-                                    "missing-order", "missing-installation", "larger-budget", "wrong-runtime", "failed", "extra"])
+@pytest.mark.parametrize("damage", [None, "missing-profile", "retired-profile", "wrong-tree", "future-time", "wrong-policy",
+                                    "partial-suite", "missing-order", "missing-installation", "larger-budget", "wrong-runtime",
+                                    "failed", "extra"])
 def test_signed_receipt_contract_retains_all_required_obligations(damage):
     value = receipt()
     if damage == "missing-profile":
-        value["profiles"].pop("linux-3.10")
+        value["profiles"].pop("macos-3.14")
+    elif damage == "retired-profile":
+        value["profiles"]["linux-3.10"] = {**copy.deepcopy(value["profiles"]["linux-3.14"]),
+                                           "runtime": runtime(python="3.10.21")}
     elif damage == "wrong-tree":
         value["tree"] = "c" * 40
     elif damage == "future-time":
@@ -114,7 +116,7 @@ def test_signed_receipt_contract_retains_all_required_obligations(damage):
     elif damage == "wrong-policy":
         value["policy_sha256"] = "e" * 64
     elif damage == "partial-suite":
-        value["profiles"]["linux-3.10"]["targets"] = ["tests/test_one.py"]
+        value["profiles"]["macos-3.14"]["targets"] = ["tests/test_one.py"]
     elif damage == "missing-order":
         value["profiles"]["linux-3.14"]["combined_orders"] = 1
     elif damage == "missing-installation":
@@ -122,7 +124,7 @@ def test_signed_receipt_contract_retains_all_required_obligations(damage):
     elif damage == "larger-budget":
         value["profiles"]["packages"]["limits"]["command"] += 1
     elif damage == "wrong-runtime":
-        value["profiles"]["macos-3.12"]["runtime"]["python"] = "3.12.11"
+        value["profiles"]["macos-3.14"]["runtime"]["python"] = "3.12.14"
     elif damage == "failed":
         value["profiles"]["linux-3.14"]["status"] = "failed"
     elif damage == "extra":

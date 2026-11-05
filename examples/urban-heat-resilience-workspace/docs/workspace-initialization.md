@@ -179,7 +179,7 @@ before installation so the tested artifact can be identified later.
 
 For every platform:
 
-- use Python 3.10 or newer and record the exact Python, OS, architecture, shell,
+- use Python 3.14 or newer and record the exact Python, OS, architecture, shell,
   and filesystem details;
 - keep the wheel, virtual environment, and target outside the repository and
   outside cloud-synchronized or protected system directories;

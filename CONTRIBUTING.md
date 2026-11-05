@@ -14,7 +14,7 @@ contributions may be reviewed as maintainer time permits.
 
 ## Local setup
 
-EvidenceWiki supports Python 3.10 and newer on Linux and macOS; native Windows
+EvidenceWiki supports Python 3.14 and newer on Linux and macOS; native Windows
 is not supported. Create a virtual environment and install the development
 dependencies:
 
@@ -48,7 +48,7 @@ python3 -m venv .venv
   `wiki/` pages.
 - Do not add hooks, automatic commits, background synchronization, or network
   fetching as defaults.
-- Preserve compatibility with Python 3.10+ on Linux and macOS. Keep the native
+- Preserve compatibility with Python 3.14+ on Linux and macOS. Keep the native
   Windows refusal ahead of any effect at every entry point; a new workspace
   script must reach it through its top-level imports.
 - Avoid broad refactors while implementing a focused change.
@@ -64,12 +64,10 @@ Machine identities are retained separately.
 Run each required profile into a new directory outside the checkout:
 
 ```bash
-.venv/bin/python tools/local_ci.py run --profile linux-3.10 --output /tmp/ci-results/linux-3.10
 .venv/bin/python tools/local_ci.py run --profile linux-3.14 --output /tmp/ci-results/linux-3.14
 .venv/bin/python tools/local_ci.py run --profile linux-native --output /tmp/ci-results/linux-native
 .venv/bin/python tools/local_ci.py run --profile packages --output /tmp/ci-results/packages
-.venv/bin/python tools/local_ci.py run --profile macos-3.12 --python /absolute/path/to/python3.12 --output /tmp/ci-results/macos-3.12
-.venv/bin/python tools/local_ci.py run --profile macos-compatibility --python /absolute/path/to/python3.14 --output /tmp/ci-results/macos-compatibility
+.venv/bin/python tools/local_ci.py run --profile macos-3.14 --python /absolute/path/to/python3.14 --output /tmp/ci-results/macos-3.14
 ```
 
 The interpreters must match the policy's exact patch versions. Profiles execute

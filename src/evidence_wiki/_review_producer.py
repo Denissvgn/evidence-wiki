@@ -263,7 +263,7 @@ def _strict_pair():
         finally:
             os.close(held)
     # The supported source layout is deliberately exact and needs no TOML
-    # dependency during early bootstrap (including Python 3.10).
+    # parser during early bootstrap.
     sections = re.split(r"(?m)^\[([^\]\n]+)\]\s*$", text)
     table = dict(zip(sections[1::2], sections[2::2], strict=True))
     if len(table) != len(sections[1::2]):

@@ -244,7 +244,7 @@ python3 scripts/doctor.py --format json
 The JSON report includes per-check `ok`, `degraded`, or `missing` statuses for
 Python, PyYAML, pypdf, `pdftotext`, git, workspace write permissions, and
 contract metadata. Required failures, such as missing PyYAML, missing pypdf, or
-Python older than 3.10, return a non-zero exit. pypdf is the portable canonical
+Python older than 3.14, return a non-zero exit. pypdf is the portable canonical
 PDF backend installed by pip. The Poppler compatibility backend is optional
 and explicit; its `pdftotext` check includes system-package guidance, and its
 absence does not disable the default pypdf path. If

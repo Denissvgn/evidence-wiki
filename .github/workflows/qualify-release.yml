@@ -46,7 +46,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.14"
+          python-version: "3.14.7"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -69,10 +69,7 @@ jobs:
           import pathlib
           import re
           import subprocess
-          try:
-              import tomllib
-          except ModuleNotFoundError:
-              import tomli as tomllib
+          import tomllib
 
           root = pathlib.Path.cwd()
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
@@ -125,7 +122,7 @@ jobs:
     name: Release tests / shard ${{ matrix.shard }}
     needs: [release-identity, compatibility]
     env:
-      EVIDENCE_WIKI_EXPECTED_PYTHON: "3.12.14"
+      EVIDENCE_WIKI_EXPECTED_PYTHON: "3.14.7"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -143,7 +140,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.14"
+          python-version: "3.14.7"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -204,7 +201,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.14"
+          python-version: "3.14.7"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -280,7 +277,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.14"
+          python-version: "3.14.7"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -330,7 +327,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.14"
+          python-version: "3.14.7"
 
       - name: Create the verification environment
         shell: bash
@@ -352,7 +349,7 @@ jobs:
         run: |
           .venv/bin/python -m tools.verify_test_shards --evidence suite-shards \
             --commit "$SUITE_COMMIT" --run-id "$SUITE_RUN_ID" --shard-count 3 --group-size 48 \
-            --platform Linux/X64/3.12 --python-patch Linux/X64/3.12=3.12.14 > suite-verification.json
+            --platform Linux/X64/3.14 --python-patch Linux/X64/3.14=3.14.7 > suite-verification.json
 
       - name: Download the validated candidate distributions
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
@@ -387,10 +384,7 @@ jobs:
           import hashlib
           import json
           from pathlib import Path
-          try:
-              import tomllib
-          except ModuleNotFoundError:
-              import tomli as tomllib
+          import tomllib
 
           candidate = Path("release-candidate")
           report = json.loads((candidate / "artifact-validation.json").read_text(encoding="utf-8"))
