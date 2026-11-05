@@ -127,8 +127,8 @@ def refresh_provider_plugin_caches() -> None:
     """Drop every cache that could still remember the previous ``sys.path``."""
 
     importlib.invalidate_caches()
-    # Python 3.12+ routes this through PathFinder.invalidate_caches(); 3.10/3.11 do not,
-    # and the repository floor is 3.10, so call it directly as well.
+    # PathFinder.invalidate_caches() already reaches this; the direct call keeps the
+    # reset explicit.
     invalidate_metadata = getattr(importlib.metadata.MetadataPathFinder, "invalidate_caches", None)
     if callable(invalidate_metadata):
         with contextlib.suppress(Exception):

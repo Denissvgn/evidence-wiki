@@ -31,8 +31,6 @@ def installed(tmp_path_factory):
     target = Path(layout.strip())
     # Reuse runtime dependencies, including pypdf's version-selected requirement.
     dependencies = ('PyYAML','pypdf','ruamel.yaml','tzdata')
-    if sys.version_info < (3, 11):
-        dependencies += ('typing_extensions',)
     for name in dependencies:
         distribution=importlib.metadata.distribution(name)
         for relative in distribution.files:

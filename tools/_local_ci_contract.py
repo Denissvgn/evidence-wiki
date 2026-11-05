@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCHEMA = "evidence-local-ci/v1"
 SIGNING_NAMESPACE = "evidence-wiki-local-ci"
-PYTHON_PATCHES = {"3.10": "3.10.21", "3.12": "3.12.14", "3.14": "3.14.7"}
+PYTHON_PATCHES = {"3.14": "3.14.7"}
 GROUP_SIZE = 48
 GROUP_TIMEOUT = 1800
 LINUX_NATIVE_TARGETS = (
@@ -35,9 +35,7 @@ LINUX_NATIVE_REQUIRED = (
     "tests/test_native_filesystem.py::test_metadata_signature_retains_changes_when_size_and_mtime_are_restored",
     "tests/test_handoff_pipe.py::test_delayed_reader_exact_payload_same_thread_and_final_completion",
 )
-REQUIRED_LOCAL_PROFILES = (
-    "linux-3.10", "linux-3.14", "linux-native", "macos-3.12", "macos-compatibility", "packages",
-)
+REQUIRED_LOCAL_PROFILES = ("linux-3.14", "linux-native", "macos-3.14", "packages")
 
 
 def canonical(value):
@@ -145,7 +143,7 @@ def linux_obligation(runtime):
 def linux_native_pair(left, right):
     """Both native architectures must execute the same probe collection."""
     for value in (left, right):
-        checked_runtime(value["runtime"], system="Linux", python=PYTHON_PATCHES["3.12"])
+        checked_runtime(value["runtime"], system="Linux", python=PYTHON_PATCHES["3.14"])
         if (value["targets"] != list(LINUX_NATIVE_TARGETS) or value["status"] != "passed"
                 or value["collected"] <= 0 or value["executed"] != value["collected"]
                 or value.get("native_checks") != dict.fromkeys(LINUX_NATIVE_REQUIRED, "passed")):
@@ -180,24 +178,16 @@ def checked_receipt(value, *, commit, tree, base, repository, now=None):
         raise ValueError("required local profile is missing or duplicated")
     for name, row in profiles.items():
         fields = {"commit", "tree", "runtime", "status", "compatibility", "collection_sha256"}
-        fields |= {"installations", "limits", "wheel_sha256", "sdist_sha256"} if name == "packages" else (
-            {"targets", "collected", "executed", "groups", "combined_orders"} if name != "macos-compatibility" else set())
+        fields |= ({"installations", "limits", "wheel_sha256", "sdist_sha256"} if name == "packages"
+                   else {"targets", "collected", "executed", "groups", "combined_orders"})
         if name == "linux-native":
             fields.add("native_checks")
         if (type(row) is not dict or set(row) != fields or row.get("status") != "passed"
                 or row.get("commit") != commit or row.get("tree") != tree):
             raise ValueError("local profile is failed or bound to another candidate")
-        runtime = checked_runtime(row["runtime"])
-        if name.startswith("linux-"):
-            checked_runtime(runtime, system="Linux", python=PYTHON_PATCHES["3.12"] if name == "linux-native"
-                            else PYTHON_PATCHES[name.removeprefix("linux-")])
-        elif name == "macos-3.12":
-            checked_runtime(runtime, system="Darwin", python=PYTHON_PATCHES["3.12"])
-        elif name == "macos-compatibility":
-            checked_runtime(runtime, system="Darwin", python=PYTHON_PATCHES["3.14"])
-        elif name == "packages":
-            checked_runtime(runtime, system="Linux", python=PYTHON_PATCHES["3.12"])
-        if name in {"linux-3.10", "linux-3.14", "macos-3.12"}:
+        checked_runtime(row["runtime"], system="Darwin" if name.startswith("macos-") else "Linux",
+                        python=PYTHON_PATCHES["3.14"])
+        if name in {"linux-3.14", "macos-3.14"}:
             if (row.get("targets") != ["tests"] or type(row.get("collected")) is not int or row["collected"] < 1
                     or type(row.get("executed")) is not int or type(row.get("groups")) is not int
                     or row.get("executed") != row["collected"] or row.get("groups", 0) < 1
@@ -210,7 +200,7 @@ def checked_receipt(value, *, commit, tree, base, repository, now=None):
               or row.get("limits") != policy()["installation_limits"]
               or any(not re.fullmatch(r"[a-f0-9]{64}", row.get(key, "")) for key in ("wheel_sha256", "sdist_sha256"))):
             raise ValueError("both exact installed distributions are required")
-    common_arches = {profiles[name]["runtime"]["architecture"] for name in ("linux-3.10", "linux-3.14", "linux-native", "packages")}
+    common_arches = {profiles[name]["runtime"]["architecture"] for name in ("linux-3.14", "linux-native", "packages")}
     if len(common_arches) != 1:
         raise ValueError("local Linux profiles use mixed native architectures")
     native = profiles["linux-native"]

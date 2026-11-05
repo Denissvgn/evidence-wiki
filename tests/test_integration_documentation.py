@@ -119,8 +119,6 @@ def installed(request,distributions):
     interpreter=environment/'bin/python'
     site=Path(subprocess.check_output([str(interpreter),'-I','-c','import sysconfig;print(sysconfig.get_path("purelib"))'],text=True).strip())
     dependencies = ('PyYAML','pypdf','ruamel.yaml','tzdata')
-    if sys.version_info < (3, 11):
-        dependencies += ('typing_extensions',)
     for name in dependencies:
         distribution=importlib.metadata.distribution(name)
         for relative in distribution.files:

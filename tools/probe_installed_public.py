@@ -413,7 +413,7 @@ def probe(root, expected, cli, checkout, runner, stage):
     prefix = Path(sys.prefix).resolve()
     require(not root.resolve().is_relative_to(checkout.resolve()) and not prefix.is_relative_to(checkout.resolve()), "Public probe overlaps checkout")
     require(Path(evidence_wiki.__file__).resolve().is_relative_to(prefix), "Package imported outside selected environment")
-    require(platform.python_implementation() == "CPython" and sys.version_info >= (3, 10), "Runtime outside declared Python boundary")
+    require(platform.python_implementation() == "CPython" and sys.version_info >= (3, 14), "Runtime outside declared Python boundary")
     require(sorted(evidence_wiki.__all__) == expected["exports"], "Public export inventory differs")
     for name in evidence_wiki.__all__:
         value = getattr(evidence_wiki, name)
@@ -427,7 +427,7 @@ def probe(root, expected, cli, checkout, runner, stage):
     resolved = {}
     for distribution in importlib.metadata.distributions():
         name = distribution.metadata["Name"].lower().replace("_", "-").replace(".", "-")
-        require(name in CORE_DISTRIBUTIONS + INSTALLER_DISTRIBUTIONS + ("typing-extensions",), "Undeclared installed dependency: " + name)
+        require(name in CORE_DISTRIBUTIONS + INSTALLER_DISTRIBUTIONS, "Undeclared installed dependency: " + name)
         require(Path(distribution.locate_file("")).resolve().is_relative_to(prefix), "Dependency metadata outside selected environment")
         if name not in INSTALLER_DISTRIBUTIONS:
             require(name not in installed, "Duplicate installed dependency: " + name)

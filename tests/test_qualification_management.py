@@ -591,8 +591,6 @@ def installation_reports(tmp_path):
     runtime = runtime_identity()
     resolved={}
     dependencies = ('evidence-wiki','pypdf','pyyaml','ruamel-yaml','tzdata')
-    if sys.version_info < (3, 11):
-        dependencies += ('typing-extensions',)
     for name in dependencies:
         item=distribution(name)
         resolved[name]={'version':item.version,'requires_python':item.metadata.get('Requires-Python'),
@@ -601,8 +599,6 @@ def installation_reports(tmp_path):
     import importlib
     from pathlib import Path
     modules={'pypdf':'pypdf','pyyaml':'yaml','ruamel-yaml':'ruamel.yaml','tzdata':'tzdata'}
-    if sys.version_info < (3, 11):
-        modules['typing-extensions'] = 'typing_extensions'
     origins={}
     for name,module_name in modules.items():
         module=importlib.import_module(module_name); origin=Path(module.__file__).resolve(); data=origin.read_bytes()

@@ -51,7 +51,7 @@ class FakeEnvironment:
     def __init__(
         self,
         *,
-        python_version=(3, 11, 0),
+        python_version=(3, 14, 0),
         yaml_error: Exception | None = None,
         pypdf_error: Exception | None = None,
         ruamel_yaml_error: Exception | None = None,
@@ -309,7 +309,7 @@ class DoctorScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = make_workspace(Path(tmpdir))
             stdout = io.StringIO()
-            env = FakeEnvironment(python_version=(3, 9, 18))
+            env = FakeEnvironment(python_version=(3, 13, 9))
 
             with contextlib.redirect_stdout(stdout):
                 exit_code = self.doctor.main(["--project-root", str(workspace), "--format", "json"], env=env)

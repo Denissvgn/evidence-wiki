@@ -28,8 +28,6 @@ def metadata_basis():
     expected = qualification_expectations()
     resolved = {}
     dependencies = ("evidence-wiki", "pypdf", "pyyaml", "ruamel-yaml", "tzdata")
-    if sys.version_info < (3, 11):
-        dependencies += ("typing-extensions",)
     for name in dependencies:
         item = distribution(name)
         resolved[name] = {"version": item.version, "requires_python": item.metadata.get("Requires-Python"),
@@ -52,23 +50,12 @@ def test_installed_metadata_requires_real_constraints_and_frozen_declarations(me
     elif defect == "extra":
         original["foreign-sdk"] = {"version": "1.0", "requires_dist": [], "requires_python": None}
     elif defect == "markers":
-        runtime["marker_environment"]["python_version"] = "3.14" if sys.version_info < (3, 11) else "3.10"
+        runtime["marker_environment"]["python_version"] = "3.10"
     if defect:
         with pytest.raises(ValueError):
             contract.validate_resolved_metadata(original, expected["project_metadata"], expected["dependency_rules"], runtime)
     else:
         assert contract.validate_resolved_metadata(original, expected["project_metadata"], expected["dependency_rules"], runtime) == set(original)
-
-
-def test_conditional_transitive_dependency_is_required_only_for_selected_python(metadata_basis):
-    expected, resolved, runtime = copy.deepcopy(metadata_basis)
-    runtime["python_version"] = "3.10.21"
-    runtime["marker_environment"].update(python_version="3.10", python_full_version="3.10.21", implementation_version="3.10.21")
-    resolved.pop("typing-extensions", None)
-    with pytest.raises(ValueError, match="typing-extensions"):
-        contract.validate_resolved_metadata(resolved, expected["project_metadata"], expected["dependency_rules"], runtime)
-    resolved["typing-extensions"] = {"version": "4.15.0", "requires_dist": [], "requires_python": ">=3.9"}
-    assert "typing-extensions" in contract.validate_resolved_metadata(resolved, expected["project_metadata"], expected["dependency_rules"], runtime)
 
 
 @pytest.mark.parametrize("defect", [None, "outside", "version", "bytes", "traversal"])

@@ -110,7 +110,7 @@ def audit_profile(directory, *, commit, tree, source):
     if compatibility["collected"] != len(nodes) or compatibility["selected"] != len(expected):
         raise ValueError("compatibility denominators differ")
     name = row["profile"]
-    if name in {"linux-3.10", "linux-3.14", "macos-3.12", "linux-native"}:
+    if name in {"linux-3.14", "macos-3.14", "linux-native"}:
         targets = list(LINUX_NATIVE_TARGETS) if name == "linux-native" else ["tests"]
         actual = suite_result(read_json(directory / "suite/manifest.json"), commit=commit, source=source, targets=targets, runtime=runtime)
         if any(row.get(key) != value for key, value in actual.items()):
@@ -148,13 +148,7 @@ def audit_profile(directory, *, commit, tree, source):
 
 
 def profile_runtime(name):
-    if name in {"linux-3.10", "linux-3.14"}:
-        return "Linux", PYTHON_PATCHES[name.removeprefix("linux-")]
-    if name == "macos-3.12":
-        return "Darwin", PYTHON_PATCHES["3.12"]
-    if name == "macos-compatibility":
-        return "Darwin", PYTHON_PATCHES["3.14"]
-    return "Linux", PYTHON_PATCHES["3.12"]
+    return "Darwin" if name.startswith("macos-") else "Linux", PYTHON_PATCHES["3.14"]
 
 
 def execute_profile(name, output, commit, tree):
@@ -186,7 +180,7 @@ def execute_profile(name, output, commit, tree):
         if compatibility["status"] != "passed" or compatibility["sources_unchanged"] is not True:
             raise ValueError("compatibility did not pass")
         row.update(compatibility="passed", collection_sha256=digest(compatibility["runs"][0]["result"]["collected"]))
-        if name in {"linux-3.10", "linux-3.14", "macos-3.12", "linux-native"}:
+        if name in {"linux-3.14", "macos-3.14", "linux-native"}:
             targets = list(LINUX_NATIVE_TARGETS) if name == "linux-native" else ["tests"]
             stage("suite", ["tools/run_test_groups.py", "--group-size", str(GROUP_SIZE), "--timeout", str(GROUP_TIMEOUT),
                             "--output", str(output / "suite"), *targets])
@@ -269,7 +263,7 @@ def run_profile(args):
             context = scratch / "context"
             context.mkdir()
             shutil.copyfile(bundle, context / "candidate.bundle")
-            poppler = " poppler-utils" if args.profile == "linux-3.10" else ""
+            poppler = " poppler-utils" if args.profile == "linux-3.14" else ""
             upgrade = " && .venv/bin/python -m pip install --upgrade pip"
             (context / "Dockerfile").write_text(
                 "FROM " + base + "\nRUN apt-get update && apt-get install -y --no-install-recommends git openssh-client" + poppler
@@ -322,8 +316,8 @@ def seal(args):
         if name in rows:
             raise ValueError("duplicate local profile")
         fields = {"commit", "tree", "runtime", "status", "compatibility", "collection_sha256"}
-        fields |= {"installations", "limits", "wheel_sha256", "sdist_sha256"} if name == "packages" else (
-            {"targets", "collected", "executed", "groups", "combined_orders"} if name != "macos-compatibility" else set())
+        fields |= ({"installations", "limits", "wheel_sha256", "sdist_sha256"} if name == "packages"
+                   else {"targets", "collected", "executed", "groups", "combined_orders"})
         if name == "linux-native":
             fields.add("native_checks")
         rows[name] = {key: row[key] for key in fields}

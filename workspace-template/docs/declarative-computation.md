@@ -88,7 +88,7 @@ consume the full working value; `formatted` is a separate display value.
 `rounded` permits the declared context's rounding and propagates `rounded: true`
 when information was lost. Rounding modes are the eight standard Decimal modes.
 The context is isolated from the calling process. See the
-[Python Decimal context and signals](https://docs.python.org/3.10/library/decimal.html).
+[Python Decimal context and signals](https://docs.python.org/3.14/library/decimal.html).
 
 The language allows finite numeric and string literals, `True`, `False` and `None`; named
 data fields; `+`, `-`, `*`, `/`, bounded integer `**`; comparisons; Boolean

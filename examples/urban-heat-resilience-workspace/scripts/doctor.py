@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "1.0"
-PYTHON_MINIMUM = (3, 10)
+PYTHON_MINIMUM = (3, 14)
 WORKSPACE_DIRS = {
     "root": ".",
     "raw": "raw",
@@ -156,9 +156,9 @@ def python_check(env: DoctorEnvironment) -> dict[str, Any]:
         "Python runtime",
         "ok" if ok else "missing",
         True,
-        f"Python {version} is available." if ok else f"Python {version} is older than 3.10.",
-        "All workspace scripts require Python 3.10 or newer.",
-        "Run the tools with Python 3.10 or newer.",
+        f"Python {version} is available." if ok else f"Python {version} is older than 3.14.",
+        "All workspace scripts require Python 3.14 or newer.",
+        "Run the tools with Python 3.14 or newer.",
         version=version,
     )
 

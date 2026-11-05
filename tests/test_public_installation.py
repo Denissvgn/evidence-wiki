@@ -203,10 +203,8 @@ def test_frozen_runtime_matrix_requires_both_artifacts_in_every_exact_cell(tmp_p
 
 
 def test_core_requirements_match_project_and_source_commitments_include_configuration():
-    try:
-        import tomllib
-    except ImportError:
-        import tomli as tomllib
+    import tomllib
+
     project = tomllib.loads((artifacts.REPO_ROOT / "pyproject.toml").read_text())
     assert sorted(project["project"]["dependencies"]) == sorted(public.CORE_REQUIREMENTS)
     identity = artifacts.source_identity()

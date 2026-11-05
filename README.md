@@ -19,7 +19,7 @@ it cannot authorize commands or change policy.
 
 ## Start with your agent
 
-Use Python 3.10 or newer and an isolated environment:
+Use Python 3.14 or newer and an isolated environment:
 
 ```sh
 python3 -m venv .research-env
@@ -305,7 +305,7 @@ and [prompt-injection boundaries][prompt-injection].
 
 ## Requirements and Diagnostics
 
-Python 3.10+ is required. Installation includes PyYAML, ruamel.yaml, pypdf and
+Python 3.14+ is required. Installation includes PyYAML, ruamel.yaml, pypdf and
 tzdata; [package metadata][package-metadata] owns their supported version bounds.
 pypdf provides portable PDF extraction. Poppler is optional unless explicitly
 selected as the PDF backend; Git snapshots and managed model CLIs are optional.

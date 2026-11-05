@@ -6,7 +6,6 @@ import os
 import re
 import shlex
 import subprocess
-import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -122,7 +121,7 @@ def test_release_shards_are_complete_and_retries_keep_diagnostics() -> None:
     command = shlex.split(verify["run"].replace("\\\n", " "))
     assert command[command.index("--shard-count") + 1] == "3"
     assert command[command.index("--group-size") + 1] == "48"
-    assert command[command.index("--platform") + 1] == "Linux/X64/3.12"
+    assert command[command.index("--platform") + 1] == "Linux/X64/3.14"
 
 
 def inline_python(job_name: str, step_name: str) -> str:
@@ -136,10 +135,7 @@ def run_inline_python(code: str) -> None:
 
 
 @pytest.mark.parametrize("defect", [None, "commit", "tag", "name", "version", "changelog", "undated", "missing-tag", "rehearsal"])
-@pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
-def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypatch, defect, use_backport):
-    if use_backport:
-        monkeypatch.setitem(sys.modules, "tomllib", None)
+def test_release_identity_checks_run_against_the_event_commit(tmp_path, monkeypatch, defect):
     project = "other-project" if defect == "name" else "evidence-wiki"
     (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "{project}"\nversion = "0.7.1"\n')
     package = tmp_path / "src/evidence_wiki"
@@ -208,10 +204,7 @@ def test_release_artifact_matrix_runs_the_same_bounded_gate_as_ci():
 
 
 @pytest.mark.parametrize("defect", [None, "bytes", "name", "version", "missing", "extra", "duplicate", "partial", "selection", "artifact"])
-@pytest.mark.parametrize("use_backport", [False, True], ids=["default-parser", "tomli-backport"])
-def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkeypatch, defect, use_backport):
-    if use_backport:
-        monkeypatch.setitem(sys.modules, "tomllib", None)
+def test_promoted_distributions_are_exactly_the_validated_bytes(tmp_path, monkeypatch, defect):
     (tmp_path / "pyproject.toml").write_text('[project]\nversion = "0.7.1"\n')
     candidate = tmp_path / "release-candidate"
     dist = candidate / "dist"
@@ -291,10 +284,10 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     matrix = test["strategy"]["matrix"]
     assert set(matrix) == {"platform", "shard"}
     assert matrix["shard"] == [1, 2, 3]
-    expected = {("ubuntu-latest", "3.10.21"), ("ubuntu-latest", "3.14.7"), ("macos-latest", "3.12.10")}
+    expected = {("ubuntu-latest", "3.14.7"), ("macos-latest", "3.14.7")}
     fallback = conditional_matrix(matrix["platform"])
     assert {(cell["os"], cell["python-version"]) for cell in fallback} == expected
-    assert len(list(itertools.product(fallback, matrix["shard"]))) == 9
+    assert len(list(itertools.product(fallback, matrix["shard"]))) == 6
     for job in (test, workflow["jobs"]["compatibility"]):
         assert job["if"] == "vars.LOCAL_CI_ENABLED != 'true' || github.event_name != 'pull_request'"
     assert test["strategy"]["fail-fast"] is False
@@ -330,7 +323,7 @@ def test_ci_shards_cover_every_platform_and_gate_packaging_on_complete_results()
     assert command[command.index("--shard-count") + 1] == "3"
     assert command[command.index("--group-size") + 1] == "48"
     assert {command[i + 1] for i, arg in enumerate(command) if arg == "--platform"} == {
-        "Linux/X64/3.10", "Linux/X64/3.14", "macOS/ARM64/3.12"}
+        "Linux/X64/3.14", "macOS/ARM64/3.14"}
 
 
 def test_local_mode_keeps_required_native_peer_and_authenticated_evidence():
@@ -471,7 +464,7 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
     job = workflow["jobs"]["check"]
     assert job["timeout-minutes"] == 15 and job["strategy"]["fail-fast"] is False
     assert {(cell["os"], cell["python"]) for cell in conditional_matrix(job["strategy"]["matrix"]["include"])} == {
-        ("ubuntu-latest", "3.10"), ("ubuntu-latest", "3.12"), ("ubuntu-latest", "3.14"), ("macos-latest", "3.14")}
+        ("ubuntu-latest", "3.14"), ("macos-latest", "3.14")}
     assert "inputs" not in (workflow["on"]["workflow_call"] or {})
     setup = next(step for step in job["steps"] if "actions/setup-python@" in step.get("uses", ""))
     assert setup["with"]["check-latest"] is True and setup["with"]["allow-prereleases"] is False
@@ -497,11 +490,11 @@ def test_latest_compatibility_is_shared_blocking_and_retains_separate_evidence()
             if name == "test" or "uses" in other:
                 continue
             setups = [step for step in other["steps"] if "actions/setup-python@" in step.get("uses", "")]
-            assert all(step["with"]["python-version"] == "3.12.14" for step in setups)
+            assert all(step["with"]["python-version"] == "3.14.7" for step in setups)
     gate = load_workflow(CI_WORKFLOW_PATH)["jobs"]["package"]
     verification = next(step["run"] for step in gate["steps"] if "tools.verify_test_shards" in step.get("run", ""))
     assert all(f"--python-patch {platform}={version}" in verification for platform, version in (
-        ("Linux/X64/3.10", "3.10.21"), ("Linux/X64/3.14", "3.14.7"), ("macOS/ARM64/3.12", "3.12.10")))
+        ("Linux/X64/3.14", "3.14.7"), ("macOS/ARM64/3.14", "3.14.7")))
     assert "Windows" not in verification
     assert "pull_request" not in load_workflow(QUALIFICATION_PATH)["on"]
 
