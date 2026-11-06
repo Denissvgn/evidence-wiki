@@ -179,12 +179,18 @@ def test_mcp_original_control_stops_blocked_public_call(operation, stopped, tmp_
     from datetime import datetime, timedelta, timezone
 
     from evidence_wiki import OperationControl
+    from evidence_wiki.pack_discovery import owner
+    from tests.test_normalization_control import stepped_clock
 
     route = object.__new__(host.Routes)
     route.root, route.route, route.calls = tmp_path, "scoped_mcp", []
     checkpoints, observed = [], []
     cancellation = threading.Event()
-    borrowed = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+    # A real 0.05 s budget had to cover the before-call checkpoint and the dispatch. The
+    # expired case now moves the native control's clock itself, and only inside the call.
+    clock = stepped_clock(owner("_operation_control"), monkeypatch) if stopped == "expired" else None
+    now = clock.utc if clock is not None else datetime.now(timezone.utc)
+    borrowed = OperationControl(deadline_utc=(now + timedelta(seconds=60)).isoformat(),
         timeout_seconds=0.05 if stopped == "expired" else 60,
         cancel_requested=cancellation.is_set if stopped == "cancelled" else None)
     original_checkpoint = borrowed.checkpoint
@@ -200,7 +206,7 @@ def test_mcp_original_control_stops_blocked_public_call(operation, stopped, tmp_
             observed.append(message["params"]["name"])
             assert operation_control is borrowed
             if stopped == "expired":
-                time.sleep(0.1)
+                clock.advance(0.1)
             else:
                 cancellation.set()
             with pytest.raises(EvidenceWikiError) as failure:

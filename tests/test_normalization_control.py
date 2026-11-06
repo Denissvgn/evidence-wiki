@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,29 @@ def control(normalizer, *, seconds=10, cancel=None):
                                        cancel_requested=cancel)
 
 
+def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0):
+    """Give the real cancellation probe ``seconds`` to answer instead of the product's 0.05 s.
+
+    ``OperationControl._observe_cancellation`` allows 0.05 s, including the time to start
+    its probe thread. On a loaded host that thread can be scheduled later, so a host that
+    did answer is reported as OPERATION_CANCEL_UNKNOWN. The probe stays a real thread that
+    calls the real callback and answers through a real queue; only the queue's timed waits
+    are widened. Returns the timeouts the product asked for, so a test can still check the
+    0.05 s itself. The stalled-probe tests in test_mutation_operation_control.py check that a
+    blocked probe is cut off.
+    """
+    requested = []
+
+    class PatientQueue(queue.Queue):
+        def get(self, block=True, timeout=None):
+            requested.append(timeout)
+            return super().get(block, None if timeout is None else max(timeout, seconds))
+
+    names = normalizer.OperationControl.checkpoint.__globals__
+    monkeypatch.setitem(names, "queue", SimpleNamespace(Queue=PatientQueue, Empty=queue.Empty, Full=queue.Full))
+    return requested
+
+
 @pytest.mark.skipif(os.name != "posix", reason="Native worker control requires POSIX process groups.")
 def test_controlled_native_extraction_publishes_only_through_parent(tmp_path, owners):
     inventory, normalizer = owners
@@ -41,20 +65,28 @@ def test_controlled_native_extraction_publishes_only_through_parent(tmp_path, ow
     assert output.is_file() and "Observed content." in output.read_text()
 
 
-def test_cancel_before_capture_creates_no_normalized_outputs(tmp_path, owners):
+def test_cancel_before_capture_creates_no_normalized_outputs(tmp_path, owners, monkeypatch):
     inventory, normalizer = owners
+    # The clock stands still, so the wait the product asks for is its whole allowance.
+    clock = stepped_clock(normalizer, monkeypatch)
+    requested = patient_cancel_probe(normalizer, monkeypatch)
     root = workspace(tmp_path / "workspace")
     inventory.run_inventory_report(root)
+    deadline = (clock.utc + timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
     with pytest.raises(Exception) as error:
         normalizer.run_normalization_report(root, all_sources=True,
-            operation_control=control(normalizer, cancel=lambda: True))
+            operation_control=normalizer.OperationControl(deadline_utc=deadline, timeout_seconds=10,
+                                                          cancel_requested=lambda: True))
     assert error.value.error_code == "OPERATION_CANCELLED"
     assert not (root / "sources" / "normalized").exists()
+    # The host still had only the product's 0.05 s to answer; the test widened the wait, not the allowance.
+    assert min(requested) == pytest.approx(0.05)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Native worker control requires POSIX process groups.")
-def test_cancel_after_extraction_is_not_swallowed_as_failed_source(tmp_path, owners):
+def test_cancel_after_extraction_is_not_swallowed_as_failed_source(tmp_path, owners, monkeypatch):
     inventory, normalizer = owners
+    patient_cancel_probe(normalizer, monkeypatch)
     root = workspace(tmp_path / "workspace")
     inventory.run_inventory_report(root)
     cancelled = False
@@ -82,20 +114,26 @@ def test_deadline_stops_real_noncooperative_worker(tmp_path, owners):
     worker = tmp_path / "worker.py"
     worker.write_text("import os, pathlib, time\npathlib.Path(" + repr(str(pid))
                       + ").write_text(str(os.getpid()))\ntime.sleep(30)\n")
-    operation = control(normalizer, seconds=0.25)
+    # The deadline has to fall after the child Python has started and written its pid. Under
+    # 36 busy loops with pytest clamped to utility QoS, that took 0.19-0.24 s at the median,
+    # 0.6-0.7 s at p99 and once 2.99 s in 1,100 starts, so 0.25 s lost about half the runs.
+    budget = 5
+    operation = control(normalizer, seconds=budget)
     started = time.monotonic()
     with pytest.raises(Exception) as error:
         operation.run([sys.executable, str(worker)])
     assert error.value.error_code == "OPERATION_DEADLINE_EXCEEDED"
-    assert time.monotonic() - started < 2
+    # The same 1.75 s past the deadline as before: stopping the group is bounded, not the 30 s sleep.
+    assert time.monotonic() - started < budget + 1.75
     assert pid.is_file()
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid.read_text()), 0)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Native worker control requires POSIX process groups.")
-def test_pending_local_cancel_stops_real_worker(tmp_path, owners):
+def test_pending_local_cancel_stops_real_worker(tmp_path, owners, monkeypatch):
     _, normalizer = owners
+    patient_cancel_probe(normalizer, monkeypatch)
     started = time.monotonic()
     operation = control(normalizer, cancel=lambda: time.monotonic() - started >= 0.1)
     worker = tmp_path / "worker.py"

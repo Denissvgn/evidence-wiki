@@ -99,22 +99,36 @@ def test_factory_private_selection_fails_without_disclosing_code(tmp_path, kind)
     assert 'PRIVATE-FACTORY-SECRET' not in str(caught.value)
 
 
-def test_factory_timeout_retains_uncertain_effects_and_does_not_redispatch(tmp_path):
+def test_factory_timeout_retains_uncertain_effects_and_does_not_redispatch(tmp_path, monkeypatch):
     import time
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
 
     from evidence_wiki import OperationControl
+    from evidence_wiki.pack_discovery import owner
+    from tests.test_normalization_control import stepped_clock
+    # The control's clock moves only when the test advances it, so selecting the factory spends
+    # none of the 0.1 s. The factory itself still runs in the real host thread.
+    clock = stepped_clock(owner('_operation_control'), monkeypatch)
     path = tmp_path / 'services.py'
-    completed = tmp_path / 'late-effect'
+    release, completed = tmp_path / 'release', tmp_path / 'late-effect'
+    # The factory outlasts the 0.1 s host wait by waiting for the test, not by a 0.25 s sleep.
     path.write_text('import time\nfrom pathlib import Path\n'
-        'def build_runtime(root):\n    time.sleep(0.25)\n    Path(' + repr(str(completed)) + ').write_text("once")\n    return {}\n')
+        'def build_runtime(root):\n    stop = time.monotonic() + 10\n'
+        '    while not Path(' + repr(str(release)) + ').exists() and time.monotonic() < stop:\n'
+        '        time.sleep(0.01)\n'
+        '    Path(' + repr(str(completed)) + ').write_text("once")\n    return {}\n')
     path.chmod(0o600)
-    control = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=0.1)).isoformat(), timeout_seconds=0.1)
+    control = OperationControl(deadline_utc=(clock.utc + timedelta(seconds=0.1)).isoformat(), timeout_seconds=0.1)
     try:
         with pytest.raises(EvidenceWikiError) as caught:
             HostRuntime.from_factory(path, tmp_path, operation_control=control)
         assert caught.value.details['reason'] == 'factory_execution_uncertain'
-        time.sleep(0.3)
+        assert not completed.exists()
+        release.touch()
+        # The late effect lands once the abandoned factory resumes; wait for it, not a fixed 0.3 s.
+        stop = time.monotonic() + 10
+        while not (completed.exists() and completed.read_text()) and time.monotonic() < stop:
+            time.sleep(0.01)
         assert completed.read_text() == 'once'
     finally:
         control.close()

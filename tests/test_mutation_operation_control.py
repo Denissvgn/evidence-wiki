@@ -18,6 +18,7 @@ from evidence_wiki.host_context import HostContext
 from evidence_wiki.operation_control import OperationControl, native_control
 from tests.test_mutation_operations import host, owner, prepared
 from tests.test_mutation_operations import roots as root_fixture
+from tests.test_normalization_control import stepped_clock
 
 
 @pytest.fixture
@@ -30,18 +31,30 @@ def control(*, seconds=10, cancelled=None):
                             timeout_seconds=seconds, cancel_requested=cancelled)
 
 
-def test_public_native_control_preserves_one_original_allowance_across_module_views():
+def test_public_native_control_preserves_one_original_allowance_across_module_views(monkeypatch):
     normalized, helper = owner("normalize_sources"), owner("_operation_control")
-    value = control(seconds=0.05)
-    first = native_control(value, normalized)
-    second = value._for_owner(helper)
-    assert first.deadline_utc == value.deadline_utc == second.deadline_utc
-    time.sleep(0.06)
-    for operation in (lambda: value.checkpoint("later"), lambda: first.checkpoint("later"),
-                      lambda: second.remaining_seconds()):
-        with pytest.raises(Exception) as error:
-            operation()
-        assert error.value.error_code == "OPERATION_DEADLINE_EXCEEDED"
+    # A real 0.05 s budget raced the scheduler: native_control() checkpoints, and on a loaded
+    # host that checkpoint could already fall past the budget. The clock now moves only here.
+    clock = stepped_clock(helper, monkeypatch)
+    budget, far = 0.05, 3600
+    # Each case puts the other limit an hour away, so only the bound under test can stop the work.
+    for bound in ("timeout", "deadline"):
+        deadline = clock.utc + timedelta(seconds=budget if bound == "deadline" else far)
+        value = OperationControl(deadline_utc=deadline.isoformat(),
+                                 timeout_seconds=far if bound == "deadline" else budget)
+        # Spend part of the allowance before the views exist, so a view that started a fresh
+        # allowance would still be inside it when the original one has run out.
+        clock.advance(0.03)
+        first = native_control(value, normalized)
+        second = value._for_owner(helper)
+        assert first.deadline_utc == value.deadline_utc == second.deadline_utc, bound
+        assert second.remaining_seconds() == pytest.approx(budget - 0.03), bound
+        clock.advance(0.03, monotonic=0.0 if bound == "deadline" else None)
+        for operation, arguments in ((value.checkpoint, ("later",)), (first.checkpoint, ("later",)),
+                                     (second.remaining_seconds, ())):
+            with pytest.raises(Exception) as error:
+                operation(*arguments)
+            assert error.value.error_code == "OPERATION_DEADLINE_EXCEEDED", bound
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Native worker control requires POSIX process groups.")
