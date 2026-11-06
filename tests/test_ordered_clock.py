@@ -1,12 +1,19 @@
 """Small host clock corrections keep execution stamps ordered; real regressions still refuse."""
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from evidence_wiki import _ordered_clock, agent_execution
+from evidence_wiki import execution_accounting as accounting
+from evidence_wiki._review_dependency_json import digest
 from evidence_wiki.agent_execution import ExecutionError
+from evidence_wiki.agent_qualification import QualificationAuthority, QualifiedEvaluators
+from evidence_wiki.research_execution import SCOPE, ResearchExecution
+from evidence_wiki.workflow_contracts import WorkflowContractError
 from tests.test_agent_execution import attempt, executor
+from tests.test_execution_isolation_adversarial import profile, signer
 
 START = datetime(2026, 11, 2, 12, tzinfo=timezone.utc)
 
@@ -61,3 +68,72 @@ def test_step_back_beyond_allowance_still_refuses_as_clock_regression(tmp_path, 
     with pytest.raises(ExecutionError, match="execution_clock_regressed"):
         host.invoke(selected)
     assert host._attempts[selected.attempt_id].finished.wait(2)
+
+
+
+def research_execution():
+    issuer = QualificationAuthority("issuer", b"q" * 32, "generator")
+    return ResearchExecution(SimpleNamespace(profile=profile()), qualifications=QualifiedEvaluators([], issuer),
+        review_signer=signer(), observer_key=b"o" * 32)
+
+
+SESSION = SimpleNamespace(binding={"run_id": "ordered-clock-run"})
+# Frozen here, not read from the module: widening the allowance must fail the boundary tests below.
+SHIPPED_ALLOWANCE = timedelta(seconds=1)
+
+
+def held(monkeypatch, ahead):
+    """The last reading sits ``ahead`` of the raw clock: the host stepped back that far right after it."""
+    last = datetime.now(timezone.utc) + ahead
+    monkeypatch.setattr(_ordered_clock, "_last", last)
+    return last
+
+
+def stamped(execution, at):
+    """A baseline this process signed at ``at``, as its own clock reported it."""
+    baseline = execution.baseline(SESSION)
+    baseline["observed_at"] = at.isoformat()
+    return execution.sign(baseline)
+
+
+def begin(execution, baseline):
+    """Open coverage both directly and through journal replay, as a session does on every step."""
+    plan = accounting.start_coverage(binding={"session_binding_id": digest(SESSION.binding)}, scope_id=SCOPE,
+        baseline=baseline, verifier=execution.verifier())
+    assert execution.ledger(SESSION, records=[{"kind": "execution_begin", "data": {"baseline": baseline}}]) == plan
+    return plan
+
+
+def refused(execution, baseline):
+    with pytest.raises(WorkflowContractError) as caught:
+        accounting.start_coverage(binding={"session_binding_id": digest(SESSION.binding)}, scope_id=SCOPE,
+            baseline=baseline, verifier=execution.verifier())
+    assert caught.value.error_code == "ACCOUNTING_OBSERVATION_UNAUTHENTICATED"
+    with pytest.raises(WorkflowContractError, match="Execution accounting"):
+        execution.ledger(SESSION, records=[{"kind": "execution_begin", "data": {"baseline": baseline}}])
+
+
+@pytest.mark.parametrize("ahead", [timedelta(milliseconds=500), SHIPPED_ALLOWANCE], ids=["500ms", "allowance"])
+def test_held_execution_stamp_authenticates_against_the_clock_that_produced_it(monkeypatch, clock, ahead):
+    execution = research_execution()
+    last = held(monkeypatch, ahead)
+    baseline = execution.baseline(SESSION)
+    # The premise the refusal needs: the stamp is the held reading, ahead of the raw clock.
+    assert datetime.fromisoformat(baseline["observed_at"]) == last > datetime.now(timezone.utc)
+    assert begin(execution, baseline)["opened_at"] == baseline["observed_at"]
+
+
+def test_stamp_from_before_a_step_back_beyond_the_allowance_still_refuses(monkeypatch, clock):
+    execution = research_execution()
+    # This clock last read ``last``, then the host stepped back 250 ms past the allowance.
+    last = held(monkeypatch, SHIPPED_ALLOWANCE + timedelta(milliseconds=250))
+    refused(execution, stamped(execution, last))
+    # The regressed reading passed through, so the refusal came from the real fault, not from a missing hold.
+    assert clock._last < last - SHIPPED_ALLOWANCE
+
+
+def test_future_stamp_the_clock_never_produced_still_refuses(clock):
+    execution = research_execution()
+    ahead = datetime.now(timezone.utc) + timedelta(milliseconds=500)
+    refused(execution, stamped(execution, ahead))
+    assert clock._last < ahead

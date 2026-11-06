@@ -46,6 +46,13 @@
   observation is no longer refused as a clock regression. Larger regressions
   are still refused.
 
+- Compare those held timestamps with the same ordered clock in accounting
+  authentication, continuation and resolution review age, delivery
+  reconciliation, acquisition budgets and service-slot projection. Right
+  after a small clock step, these checks no longer refuse an observation,
+  review or reservation stamped a moment earlier. Larger regressions and
+  timestamps ahead of the clock are still refused.
+
 - Report a provider no installed distribution registers from `evidence-wiki
   init` with its own error code and install or repair remediation, matching
   the starter's initializer script instead of a generic workspace error.
