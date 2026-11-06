@@ -179,6 +179,23 @@ independently provisioned keys; bundled public policy cannot authorize itself.
 The report's `current_use` is always `not_evaluated`. Archived authority can
 establish historical bindings even after a later host revocation.
 
+Each packet qualification records the identity of the offline validator that
+produced it, and verification recomputes it with the installed validator. A
+snapshot whose packet qualifications record an earlier validator generation
+therefore no longer verifies after an upgrade. Releases 0.7.0 through 1.1.2
+record `agent-wiki-cli/1.8.0:offline-validation-closure/v1`. When every other
+binding holds and the qualifications differ only by that recorded identity,
+verification reports `snapshot_packet_validator_superseded` instead of the
+`snapshot_packet_qualifications_mismatch` used for any other difference, and
+`snapshots.check` raises `EVIDENCE_SNAPSHOT_REFUSED` with that reason. A
+registered snapshot is immutable and cannot be upgraded in place. To use the
+evidence again, prepare, register, and export the same selection with the
+current scripts while the host still holds its source revisions under current
+grants; the result is a new snapshot ID. To confirm the old snapshot's historical
+bindings, verify it offline with the release that exported it, installed in a
+separate environment, for example `evidence-wiki==1.1.2` for that release's
+snapshots.
+
 Before each training or export use, the host must call `snapshots.check` against
 current authority and state. A currently revoked source or ancestor returns
 `eligible: false` and `current_use: denied`, even when historical verification

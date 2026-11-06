@@ -21,6 +21,7 @@ from typing import Any
 
 from _evidence_authority import EvidenceInvalid
 from _native_fs import os
+from _qualified_packet import SUPERSEDED_VALIDATORS
 from _script_errors import ScriptRefusal, emit_refusal
 from _snapshot_export import check, export, prepare
 from _snapshot_qualifications import qualify_source
@@ -65,7 +66,8 @@ def run_check(project_root: Path, *, data: bytes) -> dict[str, Any]:
 
 def run_verify(*, data: bytes, trust_policy_bytes: bytes) -> dict[str, Any]:
     """No originating workspace or host-state access occurs in this operation."""
-    return verify_snapshot(data, trust_policy_bytes=trust_policy_bytes, qualify_source=qualify_source)
+    return verify_snapshot(data, trust_policy_bytes=trust_policy_bytes, qualify_source=qualify_source,
+                           superseded_validators=SUPERSEDED_VALIDATORS)
 
 
 def read_trust(path: str) -> bytes:

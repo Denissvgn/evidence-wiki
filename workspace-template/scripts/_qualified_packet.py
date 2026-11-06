@@ -25,6 +25,9 @@ from _workspace_module_loader import load_workspace_module
 
 PROFILE = "qualified_context_packet/v1"
 VALIDATOR = "agent-wiki-cli/4.0.0:offline-validation-closure/v1"
+# Earlier validator generations. Snapshots that record one stay invalid; verification only names
+# the cause once every other binding holds. Add the outgoing identity here when VALIDATOR changes.
+SUPERSEDED_VALIDATORS = frozenset({"agent-wiki-cli/1.8.0:offline-validation-closure/v1"})
 MANIFEST = "artifact-manifest.json"
 MAX_FILES = 128
 MAX_ENTRIES = 512

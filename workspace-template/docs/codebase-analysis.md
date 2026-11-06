@@ -191,7 +191,9 @@ Unsupported native packet schemas return `unsupported-context-packet`.
 Validation reports identify their validator generation. After upgrading workspace
 scripts, rebuild normalized qualification metadata from the retained original
 deliveries before reusing it; earlier reports remain tied to their captured
-generation.
+generation. Evidence snapshots that record an earlier generation are refused
+with `snapshot_packet_validator_superseded` and must be exported again; see the
+evidence snapshot guide.
 The limit is 128 declared files, 512 directory entries, 64 levels, and 16 MiB
 including the manifest; the native validator applies its tighter packet bounds.
 

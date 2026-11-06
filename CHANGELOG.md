@@ -24,6 +24,17 @@
 - Offer an explicit two-hour batch observation window with fresh native closing
   validation, while retaining existing observation profiles and authority limits.
 
+### Changed
+
+- **Breaking:** evidence snapshots whose packet qualifications record the
+  `agent-wiki-cli` 1.8.0 validator, as exported by releases 0.7.0 through
+  1.1.2, no longer verify now that qualifications are recomputed with the
+  4.0.0 validator. When that recorded identity is the only difference and every
+  other binding holds, `verify` and `check` refuse with
+  `snapshot_packet_validator_superseded` instead of the reason used for
+  tampering. Export the same selection again to obtain a new snapshot, or
+  verify the old bytes offline with the release that exported them.
+
 ### Fixed
 
 - Accept implementation-evidence and ordinary-maintenance qualifications in
