@@ -102,6 +102,13 @@ the small authenticated-results verifier. The full hosted fallback
 remains active before activation and on main. Release qualification retains its
 complete release/manual checks instead of duplicating them on every PR.
 
+A draft PR cannot be merged, so its pushes run no hosted CI job. Marking it
+ready for review runs the selected policy on its head, and every later push runs
+it again; converting it back to a draft cancels the run in progress. To check a
+draft branch on hosted runners anyway, dispatch the CI workflow on that branch.
+A re-run shard overwrites only its own successful manifest and stores its
+diagnostics under the attempt number.
+
 A complete selective native review runs for hours, so it stays out of the
 grouped suite. Run it separately with a recipe measured on the current
 candidate:
