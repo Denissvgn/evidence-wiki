@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -159,18 +160,66 @@ def test_worker_environment_excludes_host_credentials(tmp_path, owners, monkeypa
     assert result.read_text() == "None"
 
 
-def test_fixed_timeout_cannot_be_renewed_by_snapshot(tmp_path, owners):
+class SteppedClock:
+    """Monotonic and UTC wall time that move only when the test advances them.
+
+    Real sleeps made the budget race the scheduler: on a loaded host a 0.04 s
+    sleep can overshoot a 0.08 s allowance before the second snapshot runs.
+    """
+
+    def __init__(self):
+        self.utc = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.monotonic_seconds = 1_000.0
+
+    def monotonic(self):
+        return self.monotonic_seconds
+
+    def advance(self, seconds, *, monotonic=None):
+        """Move both clocks by ``seconds``, or the monotonic one by ``monotonic`` instead."""
+        self.utc += timedelta(seconds=seconds)
+        self.monotonic_seconds += seconds if monotonic is None else monotonic
+
+
+def stepped_clock(normalizer, monkeypatch):
+    """Point the ``time`` and ``datetime`` names ``OperationControl`` reads at one clock."""
+    clock = SteppedClock()
+
+    class SteppedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is timezone.utc
+            return clock.utc
+
+    names = normalizer.OperationControl.checkpoint.__globals__
+    monkeypatch.setitem(names, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setitem(names, "datetime", SteppedDatetime)
+    return clock
+
+
+def test_fixed_timeout_cannot_be_renewed_by_snapshot(owners, monkeypatch):
     _, normalizer = owners
-    operation = control(normalizer, seconds=0.08)
-    original = operation.snapshot()
-    time.sleep(0.04)
-    later = operation.snapshot()
-    assert later["deadline_utc"] == original["deadline_utc"]
-    assert later["remaining_seconds"] < original["remaining_seconds"]
-    time.sleep(0.05)
-    with pytest.raises(Exception) as error:
-        operation.snapshot()
-    assert error.value.error_code == "OPERATION_DEADLINE_EXCEEDED"
+    clock = stepped_clock(normalizer, monkeypatch)
+    budget, far = 0.08, 3600
+    # Each case puts the other limit an hour away, so only the bound under test can stop the work.
+    for bound in ("timeout", "deadline"):
+        deadline = clock.utc + timedelta(seconds=budget if bound == "deadline" else far)
+        operation = normalizer.OperationControl(
+            deadline_utc=deadline.isoformat().replace("+00:00", "Z"),
+            timeout_seconds=far if bound == "deadline" else budget)
+        original = operation.snapshot()
+        assert original["remaining_seconds"] == pytest.approx(budget), bound
+        clock.advance(0.04)
+        later = operation.snapshot()
+        assert later["deadline_utc"] == original["deadline_utc"], bound
+        assert later["remaining_seconds"] < original["remaining_seconds"], bound
+        # No fresh allowance: the snapshot spent exactly the elapsed time and refunded none.
+        assert later["remaining_seconds"] == pytest.approx(budget - 0.04), bound
+        # The UTC deadline still binds when the wall clock runs ahead of the monotonic one,
+        # as it does across a host suspend or a forward clock correction.
+        clock.advance(0.05, monotonic=0.0 if bound == "deadline" else None)
+        with pytest.raises(Exception) as error:
+            operation.snapshot()
+        assert error.value.error_code == "OPERATION_DEADLINE_EXCEEDED", bound
 
 
 @pytest.mark.parametrize("cancel", [lambda: None, lambda: (_ for _ in ()).throw(RuntimeError("lost"))])
