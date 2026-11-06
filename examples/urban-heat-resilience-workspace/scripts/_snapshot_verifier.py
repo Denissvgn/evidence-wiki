@@ -610,8 +610,23 @@ def validity_deadline(manifest: dict[str, Any], files_by_revision: dict[str, dic
     return min(expiries)
 
 
+def superseded_generation(recorded: Any, current: list[dict[str, Any]], superseded: frozenset[str]) -> bool:
+    """Whether recorded qualifications differ from recomputed ones only by a superseded validator identity."""
+    if not isinstance(recorded, list) or len(recorded) != len(current):
+        return False
+    differs = False
+    for old, new in zip(recorded, current, strict=True):
+        if canonical(old) == canonical(new):
+            continue
+        if (not isinstance(old, dict) or not isinstance(old.get("validator"), str) or old["validator"] not in superseded
+                or canonical({**old, "validator": new.get("validator")}) != canonical(new)):
+            return False
+        differs = True
+    return differs
+
+
 def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime | None = None,
-                      qualify_source=None) -> dict[str, Any]:
+                      qualify_source=None, superseded_validators: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Verify independent bindings; current_time is reserved for host reconciliation."""
     bundle = fields(document(data), {"schema_version", "snapshot_id", "manifest", "registration", "blobs"})
     profiled = bundle["schema_version"] == PROFILE_SCHEMA
@@ -803,7 +818,10 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
     qualifications = [{"source_revision": revision, **qualification}
                       for revision in sorted(sources)
                       for qualification in qualify_source(sources[revision], files_by_revision[revision])]
-    require(canonical(manifest["qualifications"]) == canonical(qualifications), "snapshot_packet_qualifications_mismatch")
+    superseded = canonical(manifest["qualifications"]) != canonical(qualifications)
+    if superseded:
+        require(superseded_generation(manifest["qualifications"], qualifications, superseded_validators),
+                "snapshot_packet_qualifications_mismatch")
     registration = bundle["registration"]
     payload = fields(registration.get("payload"), {"schema_version", "state_id", "workspace_binding", "request_id", "expected_checkpoint", "action", "body"})
     require(payload == {"schema_version": "evidence-usage-command/v1", "state_id": state["state_id"],
@@ -816,14 +834,18 @@ def validate_snapshot(data: bytes, trust_raw: bytes, *, current_time: datetime |
     authenticate(registration, "usage", policy, registration_clock)
     deadline = validity_deadline(manifest, files_by_revision, registration)
     require(clock < deadline, "snapshot_authority_expired")
+    # Registered snapshots are immutable, so the only remedies are re-export or the recorded generation's verifier.
+    require(not superseded, "snapshot_packet_validator_superseded")
     return {"snapshot_id": bundle["snapshot_id"], "manifest": manifest, "registration": registration,
             "source_revisions": sorted(sources), "selected_revisions": selected, "valid_until": deadline.isoformat()}
 
 
-def verify_snapshot(data: bytes, *, trust_policy_bytes: bytes, qualify_source=None) -> dict[str, Any]:
+def verify_snapshot(data: bytes, *, trust_policy_bytes: bytes, qualify_source=None,
+                    superseded_validators: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Return historical verification only; a host must separately authorize use."""
     try:
-        result = validate_snapshot(data, trust_policy_bytes, qualify_source=qualify_source)
+        result = validate_snapshot(data, trust_policy_bytes, qualify_source=qualify_source,
+                                   superseded_validators=superseded_validators)
         return {"schema_version": "evidence-snapshot-verification/v1", "valid": True, "reason": "snapshot_historical_bindings_valid",
                 "snapshot_id": result["snapshot_id"], "captured_state": result["manifest"]["captured_state"],
                 "coverage": result["manifest"]["coverage"], "current_use": "not_evaluated"}

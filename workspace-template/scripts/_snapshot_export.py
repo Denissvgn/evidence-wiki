@@ -9,6 +9,7 @@ from typing import Any
 
 from _evidence_authority import EvidenceInvalid, read_host_policy
 from _evidence_usage import UsageState, UsageView, current_view
+from _qualified_packet import SUPERSEDED_VALIDATORS
 from _snapshot_qualifications import qualify_source
 from _snapshot_verifier import (
     BOUNDS,
@@ -208,6 +209,11 @@ def prepare(root: Path, config: dict[str, Any], supplied: dict[str, Any]) -> dic
                                      "parents": [example["source_revision"] for example in manifest["examples"]]}}}
 
 
+def verified(root: Path, view, data: bytes) -> dict[str, Any]:
+    return validate_snapshot(data, authority_bytes(root, view), current_time=view.now, qualify_source=qualify_source,
+                             superseded_validators=SUPERSEDED_VALIDATORS)
+
+
 def registered_bundle(root: Path, view: UsageView, request: dict[str, Any], request_id: str) -> tuple[bytes, dict[str, Any]]:
     event = view.state.requests.get(name(request_id))
     require(event is not None and event["command"]["payload"]["action"] == "register"
@@ -220,7 +226,7 @@ def registered_bundle(root: Path, view: UsageView, request: dict[str, Any], requ
               "snapshot_id": identifier(manifest["schema_version"], manifest), "manifest": manifest,
               "registration": event["command"], "blobs": {key: base64.b64encode(raw).decode("ascii") for key, raw in sorted(blobs.items())}}
     data = canonical(bundle)
-    validate_snapshot(data, authority_bytes(root, view), current_time=view.now, qualify_source=qualify_source)
+    verified(root, view, data)
     approved(view, bundle["snapshot_id"], request)
     return data, event
 
@@ -234,7 +240,7 @@ def export(root: Path, config: dict[str, Any], supplied: dict[str, Any], request
 
         def revalidate():
             view.revalidate(root, config)
-            result = validate_snapshot(data, authority_bytes(root, view), current_time=view.now, qualify_source=qualify_source)
+            result = verified(root, view, data)
             view.revalidate(root, config)
             require(view.now < instant(result["valid_until"]), "snapshot_authority_expired")
 
@@ -248,7 +254,7 @@ def export(root: Path, config: dict[str, Any], supplied: dict[str, Any], request
 
 def check(root: Path, config: dict[str, Any], data: bytes) -> dict[str, Any]:
     with current_view(root, config) as view:
-        result = validate_snapshot(data, authority_bytes(root, view), current_time=view.now, qualify_source=qualify_source)
+        result = verified(root, view, data)
         event = view.state.requests.get(result["registration"]["payload"]["request_id"])
         require(event is not None and event["command"] == result["registration"], "snapshot_registration_missing")
         request = result["manifest"]["selection"]

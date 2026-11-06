@@ -129,6 +129,15 @@ fixtures:
     shipped_paths:
       - tests/fixtures/codebase-intake/native-packets/native-v2-maintenance.json
   - <<: *synthetic_defaults
+    stable_id: superseded-packet-validator-snapshot
+    source_work: Project-authored synthetic execution, delivery, and test-only host authority
+    created_at: 2026-11-06
+    transformations: Exported by the workspace scripts at the commit before the agent-wiki-cli 4.0.0 validator upgrade (15f8d48^) with generate.py, embedding the synthetic native-v2-current packet as an execution context-packet artifact and as an ancestor delivery; the authority expiry is fixed at 2099 and the bytes are otherwise unedited.
+    shipped_paths:
+      - tests/fixtures/evidence-snapshots/superseded-packet-validator/authority.json
+      - tests/fixtures/evidence-snapshots/superseded-packet-validator/generate.py
+      - tests/fixtures/evidence-snapshots/superseded-packet-validator/snapshot.json
+  - <<: *synthetic_defaults
     stable_id: codebase-analysis-project
     shipped_paths:
       - tests/fixtures/codebase-analysis-project/**

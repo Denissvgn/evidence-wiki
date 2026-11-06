@@ -13,12 +13,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import yaml
 
-from evidence_wiki import verify_snapshot
+from evidence_wiki import Workspace, verify_snapshot
 from evidence_wiki._filesystem import os
 from evidence_wiki.errors import SourceError
 from tests._execution_fixture import KEYS, authenticate, binding, canonical, identifier
 from tests._snapshot_fixture import SnapshotFixture
+from tests._usage_fixture import UsageFixture
 
 
 @pytest.fixture
@@ -300,6 +302,55 @@ def test_snapshot_preserves_native_packet_limits_without_authority_promotion(hos
     bundle = json.loads(data)
     bundle["manifest"]["qualifications"][0]["live_reconciliation"] = "current"
     assert not verify_snapshot(seal(bundle), trust_policy_bytes=host.policy_path.read_bytes())["valid"]
+
+
+# Exported by the pre-4.0.0 scripts themselves; see generate.py and fixture-provenance.yml.
+SUPERSEDED_VALIDATOR = Path(__file__).parent / "fixtures/evidence-snapshots/superseded-packet-validator"
+OLD_VALIDATOR = "agent-wiki-cli/1.8.0:offline-validation-closure/v1"
+
+
+def superseded_snapshot():
+    return (SUPERSEDED_VALIDATOR / "snapshot.json").read_bytes(), (SUPERSEDED_VALIDATOR / "authority.json").read_bytes()
+
+
+def test_snapshot_from_superseded_packet_validator_is_refused_with_its_own_reason():
+    data, trust = superseded_snapshot()
+    bundle = json.loads(data)
+    assert [item["validator"] for item in bundle["manifest"]["qualifications"]] == [OLD_VALIDATOR, OLD_VALIDATOR]
+    report = verify_snapshot(data, trust_policy_bytes=trust)
+    assert report["valid"] is False
+    assert report["reason"] == "snapshot_packet_validator_superseded"
+
+
+@pytest.mark.parametrize("change", ["other-field", "unknown-validator", "registration"])
+def test_superseded_packet_validator_reason_requires_an_otherwise_valid_snapshot(change):
+    data, trust = superseded_snapshot()
+    bundle = json.loads(data)
+    if change == "other-field":
+        bundle["manifest"]["qualifications"][1]["live_reconciliation"] = "current"
+        expected = "snapshot_packet_qualifications_mismatch"
+    elif change == "unknown-validator":
+        bundle["manifest"]["qualifications"][1]["validator"] = "agent-wiki-cli/0.9.0:offline-validation-closure/v1"
+        expected = "snapshot_packet_qualifications_mismatch"
+    else:
+        bundle["registration"]["authentication"]["signature"] = "0" * 64
+        assert verify_snapshot(canonical(bundle), trust_policy_bytes=trust)["reason"] == "snapshot_signature_mismatch"
+        return
+    assert verify_snapshot(seal(bundle), trust_policy_bytes=trust)["reason"] == expected
+
+
+def test_check_refuses_superseded_packet_validator_with_its_own_reason(tmp_path, monkeypatch):
+    data, trust = superseded_snapshot()
+    host = UsageFixture(tmp_path, monkeypatch)
+    host.policy = json.loads(trust)
+    host.save_policy()
+    assert host.policy_path.read_bytes() == trust
+    (host.root / "research.yml").write_text(yaml.safe_dump(host.config), encoding="utf-8")
+    workspace = Workspace.open(host.root)
+    workspace.usage.transact(host.command("initialize"))
+    with pytest.raises(SourceError) as exc:
+        workspace.snapshots.check(data)
+    assert exc.value.details["reason"] == "snapshot_packet_validator_superseded"
 
 
 @pytest.mark.parametrize("corruption", ["missing-log", "changed-log", "unbound-input", "history-signature"])
