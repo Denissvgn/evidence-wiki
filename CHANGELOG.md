@@ -37,6 +37,11 @@
 
 ### Fixed
 
+- Accept the next attempt on the reference subprocess executor as soon as a
+  poll reports the previous attempt terminal. Completion was marked only after
+  the terminal observation was published, so under CPU contention an
+  immediate next invoke could be refused with `execution_attempt_pending`.
+
 - Accept implementation-evidence and ordinary-maintenance qualifications in
   qualified-context packets produced by `agent-wiki-cli` 4.0.0 while retaining
   offline validation and support for earlier v1 and v2 packets.
