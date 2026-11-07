@@ -30,7 +30,7 @@ def control(normalizer, *, seconds=10, cancel=None):
                                        cancel_requested=cancel)
 
 
-def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0, idle_seconds=None):
+def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0, idle_seconds=None, until=None):
     """Give the real cancellation probe ``seconds`` to answer instead of the product's 0.05 s.
 
     ``OperationControl._observe_cancellation`` allows 0.05 s, including the time to start
@@ -45,6 +45,10 @@ def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0, idle_seconds=Non
     Under ``stepped_clock`` that budget stops moving, so real work between two checkpoints
     can outlast the widened wait and the idle probe exits. ``idle_seconds`` (default
     ``seconds``) widens only that wait; the checkpoint's wait for an answer stays ``seconds``.
+
+    ``until`` is for a test whose callback stalls on purpose. A checkpoint first waits the
+    product's own timeout; after that it keeps waiting only while ``until()`` is false, so
+    once the callback has started to block, the product's refusal path cuts it off again.
     """
     requested = []
     idle = seconds if idle_seconds is None else idle_seconds
@@ -52,8 +56,26 @@ def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0, idle_seconds=Non
     class PatientQueue(queue.Queue):
         def get(self, block=True, timeout=None):
             requested.append(timeout)
-            probe = threading.current_thread().name == "evidence-operation-cancellation"
-            return super().get(block, None if timeout is None else max(timeout, idle if probe else seconds))
+            if timeout is None:
+                return super().get(block, None)
+            if threading.current_thread().name == "evidence-operation-cancellation":
+                return super().get(block, max(timeout, idle))
+            if until is None:
+                return super().get(block, max(timeout, seconds))
+            end = time.monotonic() + max(timeout, seconds)
+            try:
+                return super().get(block, timeout)
+            except queue.Empty:
+                pass
+            while not until():
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    return super().get(block, min(0.01, remaining))
+                except queue.Empty:
+                    pass
+            raise queue.Empty
 
     names = normalizer.OperationControl.checkpoint.__globals__
     monkeypatch.setitem(names, "queue", SimpleNamespace(Queue=PatientQueue, Empty=queue.Empty, Full=queue.Full))
