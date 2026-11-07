@@ -234,15 +234,20 @@ def test_real_cancellation_suppresses_response_and_reconnect_retains_budget(fixt
     root, *_ = fixture
     path = write_runtime(tmp_path, configured(fixture))
     client = Client(root, path, allow=['run-cycle', 'cancel-pending', 'reconcile-recovery'])
+    # Take the cancelled request's id from the client's own counter. A fixed id was reused by the
+    # client's own recovery-status polls once settling took enough of them, and their returned
+    # frames then looked like a response to the cancelled request.
+    client.identifier += 1
+    cancelled = client.identifier
     try:
-        client.send(message(20, 'tools/call', {'name': 'research_run_cycle', 'arguments': {
+        client.send(message(cancelled, 'tools/call', {'name': 'research_run_cycle', 'arguments': {
             'target': str(root), 'run_id': 'cancelled-mcp', 'request_id': 'drive', 'max_steps': 64}}))
         state = owner('run_controller').run_state_path(root, 'cancelled-mcp')
         end = time.monotonic() + 60
         while not state.exists() and time.monotonic() < end:
             time.sleep(0.02)
         assert state.exists()
-        client.send({'jsonrpc': '2.0', 'method': 'notifications/cancelled', 'params': {'requestId': 20, 'reason': 'Stop further work'}})
+        client.send({'jsonrpc': '2.0', 'method': 'notifications/cancelled', 'params': {'requestId': cancelled, 'reason': 'Stop further work'}})
         client.send({'jsonrpc': '1.0', 'id': 900, 'method': 'tools/call', 'params': {'name': 'research_current'}})
         malformed = client.receive()
         assert malformed['error']['code'] == -32600
@@ -256,7 +261,7 @@ def test_real_cancellation_suppresses_response_and_reconnect_retains_budget(fixt
             time.sleep(0.05)
         assert custody['status'] == 'returned', custody
         assert custody['result']['original_deadline_utc'] and custody['result']['status'] == 'reconcilable'
-        assert all(row['id'] != 20 for row in client.frames)
+        assert all(row['id'] != cancelled for row in client.frames)
     finally:
         client.close()
     reconnect = Client(root, path, allow=['cancel-pending', 'reconcile-recovery'])
