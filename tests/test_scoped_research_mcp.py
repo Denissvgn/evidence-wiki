@@ -19,6 +19,7 @@ from evidence_wiki.research_command_contracts import REQUEST
 from evidence_wiki.research_command_definitions import DEFINITIONS, WRITE_OPERATIONS
 from tests.test_autonomous_commands import command, document, write_factory, write_runtime
 from tests.test_execution_session import fixture as fixture
+from tests.test_normalization_control import patient_cancel_probe
 from tests.test_onboarding_mcp import initialize, message
 
 
@@ -270,9 +271,12 @@ def test_real_cancellation_suppresses_response_and_reconnect_retains_budget(fixt
         reconnect.close()
 
 
-def test_public_cancellation_before_effects_is_typed_and_request_data_cannot_select_control(fixture):
+def test_public_cancellation_before_effects_is_typed_and_request_data_cannot_select_control(fixture, monkeypatch):
+    from evidence_wiki.pack_discovery import owner
     root, *_ = fixture
     runtime = HostRuntime.from_document(configured(fixture))
+    # The probe thread had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner('_operation_control'), monkeypatch)
     control = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
         timeout_seconds=60, cancel_requested=lambda: True)
     with Workspace.open(root) as workspace:
@@ -318,7 +322,10 @@ def test_actual_stdio_setup_and_capture_need_no_shell_escape(tmp_path, monkeypat
         client.close()
 
 
-def test_completed_host_controls_release_idle_probes_and_remain_closed():
+def test_completed_host_controls_release_idle_probes_and_remain_closed(monkeypatch):
+    from evidence_wiki.pack_discovery import owner
+    # Each 'ready' checkpoint's probe thread had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner('_operation_control'), monkeypatch)
     before = {thread.ident for thread in threading.enumerate() if thread.name == 'evidence-operation-cancellation'}
     for _ in range(20):
         control = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=600)).isoformat(),
@@ -328,4 +335,13 @@ def test_completed_host_controls_release_idle_probes_and_remain_closed():
         with pytest.raises(EvidenceWikiError) as error:
             control.checkpoint('after_close')
         assert error.value.error_code == 'OPERATION_CONTROL_CLOSED'
-    assert {thread.ident for thread in threading.enumerate() if thread.name == 'evidence-operation-cancellation'} <= before
+
+    def leftover():
+        return {thread.ident for thread in threading.enumerate() if thread.name == 'evidence-operation-cancellation'} - before
+
+    # close() waits only 0.05 s for the woken probe to exit, and on a loaded host the thread can
+    # be scheduled later than that. Each probe must still exit by itself, far inside its 600 s budget.
+    end = time.monotonic() + 10
+    while leftover() and time.monotonic() < end:
+        time.sleep(0.01)
+    assert not leftover()

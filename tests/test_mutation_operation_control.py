@@ -18,7 +18,7 @@ from evidence_wiki.host_context import HostContext
 from evidence_wiki.operation_control import OperationControl, native_control
 from tests.test_mutation_operations import host, owner, prepared
 from tests.test_mutation_operations import roots as root_fixture
-from tests.test_normalization_control import stepped_clock
+from tests.test_normalization_control import patient_cancel_probe, stepped_clock
 
 
 @pytest.fixture
@@ -68,8 +68,10 @@ def test_public_normalization_uses_actual_bounded_native_worker(roots):
     assert next((root / "sources/normalized").glob("*.md")).is_file()
 
 
-def test_public_normalization_cancel_before_capture_preserves_source_bytes(roots):
+def test_public_normalization_cancel_before_capture_preserves_source_bytes(roots, monkeypatch):
     root, _ = roots
+    # The probe thread had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     before = (root / "raw/web/source.html").read_bytes()
     context = HostContext([root], {"workspace.open", "normalize_sources.run_normalization_report"}, "caller", [root])
     with context.activate(), Workspace.open(root) as workspace, pytest.raises(EvidenceWikiError) as error:
@@ -93,6 +95,8 @@ def test_canonical_normalization_forwards_control_and_excludes_callbacks_from_in
 
 def test_canonical_cancellation_before_capture_never_dispatches(roots, monkeypatch):
     root, _ = roots
+    # The probe thread had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     with host(roots).activate():
         request = prepared(root, "normalize.sources", {"all_sources": True})
         monkeypatch.setattr(operations, "_capture", lambda *a, **k: pytest.fail("Capture after cancellation"))
@@ -105,6 +109,9 @@ def test_canonical_cancellation_before_capture_never_dispatches(roots, monkeypat
 @pytest.mark.skipif(os.name != "posix", reason="Native worker control requires POSIX process groups.")
 def test_staged_publisher_cancellation_preserves_partial_effects_without_rollback(roots, monkeypatch):
     root, _ = roots
+    # Every checkpoint's probe thread had 0.05 s to answer (see patient_cancel_probe), and the
+    # real native worker run had to fit 10 s; under load it took longer, so the budget is 60 s.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     stopped = False
     publisher = owner("_usage_materialization")
     original = publisher.publish_file
@@ -118,11 +125,12 @@ def test_staged_publisher_cancellation_preserves_partial_effects_without_rollbac
     monkeypatch.setattr(publisher, "publish_file", publish)
     with host(roots).activate():
         request = prepared(root, "normalize.sources", {"all_sources": True, "append_log": True})
-        receipt = operations.submit(root, request, operation_control=control(cancelled=lambda: stopped))
+        receipt = operations.submit(root, request, operation_control=control(seconds=60, cancelled=lambda: stopped))
         assert receipt["status"] == "commit_unknown" and receipt["error"]["error_code"] == "OPERATION_CANCELLED"
         assert next((root / "sources/normalized").glob("*.md")).is_file()
         assert not (root / "log.md").exists()
-        proof = operations.reconcile(root, "request", operation_control=control())
+        # Reconciliation re-observes the workspace and the owner's outputs inside its budget; under load 10 s ran out.
+        proof = operations.reconcile(root, "request", operation_control=control(seconds=60))
         assert proof["status"] == "partial" and not proof["desired_state_proved"]
         assert "log.md" in proof["owner_observation"]["missing_or_changed_outputs"]
     assert not (root / "log.md").exists()
@@ -131,6 +139,9 @@ def test_staged_publisher_cancellation_preserves_partial_effects_without_rollbac
 @pytest.mark.skipif(os.name != "posix", reason="Native worker control requires POSIX process groups.")
 def test_last_moment_publication_callback_prevents_atomic_replace(roots, monkeypatch):
     root, _ = roots
+    # Every checkpoint's probe thread had 0.05 s to answer (see patient_cancel_probe), and the
+    # real native worker run had to fit 10 s; under load it took longer, so the budget is 60 s.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     stopped = False
     publisher = owner("_usage_materialization")
     original = publisher.publish_file
@@ -144,7 +155,7 @@ def test_last_moment_publication_callback_prevents_atomic_replace(roots, monkeyp
     monkeypatch.setattr(publisher, "publish_file", publish)
     with host(roots).activate():
         request = prepared(root, "normalize.sources", {"all_sources": True})
-        receipt = operations.submit(root, request, operation_control=control(cancelled=lambda: stopped))
+        receipt = operations.submit(root, request, operation_control=control(seconds=60, cancelled=lambda: stopped))
     assert receipt["status"] == "commit_unknown" and receipt["error"]["error_code"] == "OPERATION_CANCELLED"
     assert not list((root / "sources/normalized").glob("*.md"))
 
@@ -182,8 +193,10 @@ def test_historical_completed_replay_precedes_new_control_deadline(roots):
         assert workspace.mutations.reconcile("request", operation_control=expired) == result
 
 
-def test_generic_direct_owner_cancelled_before_any_effect(roots):
+def test_generic_direct_owner_cancelled_before_any_effect(roots, monkeypatch):
     root, _ = roots
+    # The probe thread had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     with host(roots).activate():
         request = prepared(root)
         with pytest.raises(EvidenceWikiError) as error:

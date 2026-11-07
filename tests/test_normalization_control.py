@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -29,7 +30,7 @@ def control(normalizer, *, seconds=10, cancel=None):
                                        cancel_requested=cancel)
 
 
-def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0):
+def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0, idle_seconds=None):
     """Give the real cancellation probe ``seconds`` to answer instead of the product's 0.05 s.
 
     ``OperationControl._observe_cancellation`` allows 0.05 s, including the time to start
@@ -39,13 +40,20 @@ def patient_cancel_probe(normalizer, monkeypatch, seconds=10.0):
     are widened. Returns the timeouts the product asked for, so a test can still check the
     0.05 s itself. The stalled-probe tests in test_mutation_operation_control.py check that a
     blocked probe is cut off.
+
+    The probe thread itself waits for the next request for the control's remaining budget.
+    Under ``stepped_clock`` that budget stops moving, so real work between two checkpoints
+    can outlast the widened wait and the idle probe exits. ``idle_seconds`` (default
+    ``seconds``) widens only that wait; the checkpoint's wait for an answer stays ``seconds``.
     """
     requested = []
+    idle = seconds if idle_seconds is None else idle_seconds
 
     class PatientQueue(queue.Queue):
         def get(self, block=True, timeout=None):
             requested.append(timeout)
-            return super().get(block, None if timeout is None else max(timeout, seconds))
+            probe = threading.current_thread().name == "evidence-operation-cancellation"
+            return super().get(block, None if timeout is None else max(timeout, idle if probe else seconds))
 
     names = normalizer.OperationControl.checkpoint.__globals__
     monkeypatch.setitem(names, "queue", SimpleNamespace(Queue=PatientQueue, Empty=queue.Empty, Full=queue.Full))
