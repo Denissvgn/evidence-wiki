@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+from ._ordered_clock import ordered
 from ._review_dependency_json import detached, digest
 from .agent_execution import _utc
 from .errors import EvidenceWikiError
@@ -85,7 +86,7 @@ def authenticated_gates(session, projection, gates, *, prepared):
     from .execution_session import _verify_review_controller
     gates = detached(gates)
     max_age = prepared["snapshot"]["policy"].get("max_review_age_seconds")
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     references = {row["review_ref"] for row in projection["reviews"]}
     records = session.execution.records(session)
     attempts = {item["data"]["attempt"]["attempt_id"]: item["data"]["attempt"] for item in records

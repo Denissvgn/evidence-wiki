@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from evidence_wiki import execution_session as native
+from evidence_wiki._ordered_clock import ordered
 from evidence_wiki.agent_execution import _utc
 from evidence_wiki.mutation_contracts import digest
 from evidence_wiki.review_service_routing import review_current
@@ -25,7 +26,7 @@ def current_first_passes(session, *, claim_id, prepared, view, records):
     required = {row["profile_ref"]: row for row in session.policy.to_dict()["required_evaluators"]}
     applications = {row["data"]["attempt_id"]: row["data"] for row in records if row["kind"] == "execution_application"}
     max_age = prepared["snapshot"]["policy"]["max_review_age_seconds"]
-    now = datetime.now(timezone.utc)
+    now = ordered(datetime.now(timezone.utc))
     selected = {}
     for record in records:
         if record["kind"] != "execution_applied":

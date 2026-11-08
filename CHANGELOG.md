@@ -46,6 +46,22 @@
   observation is no longer refused as a clock regression. Larger regressions
   are still refused.
 
+- Compare those held timestamps with the same ordered clock in accounting
+  authentication, continuation and resolution review age, delivery
+  reconciliation, acquisition budgets and service-slot projection. Right
+  after a small clock step, these checks no longer refuse an observation,
+  review or reservation stamped a moment earlier. Larger regressions and
+  timestamps ahead of the clock are still refused.
+
+- Wait out a small host clock step back instead of returning the previous
+  timestamp at once, so an execution timestamp is never ahead of the system
+  clock. Workspace scripts, host-implemented executors and other processes
+  check timestamps against their own clock, so right after such a step they
+  no longer refuse a strict review at registration, a job at dispatch or an
+  observation that was stamped a moment earlier. The wait lasts as long as
+  the step, at most one second. Larger regressions still pass through and
+  are refused, and no script check was loosened.
+
 - Report a provider no installed distribution registers from `evidence-wiki
   init` with its own error code and install or repair remediation, matching
   the starter's initializer script instead of a generic workspace error.

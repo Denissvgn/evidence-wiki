@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from . import execution_accounting as accounting
 from . import execution_session as native
+from ._ordered_clock import ordered
 from .artifact_delivery_contracts import RESULT, checked, refuse
 from .artifact_publication import retained_writer
 from .errors import EvidenceWikiError
@@ -128,7 +129,7 @@ def reconcile(session, *, request_id):
         if not any(row["final_usage"] for row in earlier):
             sequence = max([row["sequence"] for row in earlier], default=0) + 1
             issued = datetime.fromisoformat(intent["reservation"]["issued_at"].replace("Z", "+00:00"))
-            elapsed = (datetime.now(timezone.utc) - issued).total_seconds()
+            elapsed = (ordered(datetime.now(timezone.utc)) - issued).total_seconds()
             if elapsed < 0:
                 refuse("delivery_clock_regressed")
             observation = session.execution.native_observation(session, request_id, seconds=elapsed, succeeded=True)

@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from ._ordered_clock import ordered
 from .mutation_contracts import _shape
 from .workflow_contracts import WorkflowContractError
 
@@ -292,7 +293,7 @@ def _authenticate(envelope, verifier, *, now_utc=None):
         verified = validate_document(VERIFICATION, verifier.verify(_clone(request)))
     except (Exception, SystemExit):
         refuse("OBSERVATION_UNAUTHENTICATED")
-    now = datetime.now(timezone.utc) if now_utc is None else _time(now_utc)
+    now = ordered(datetime.now(timezone.utc)) if now_utc is None else _time(now_utc)
     if (verified["envelope_sha256"] != request["envelope_sha256"] or verified["binding"] != envelope["binding"]
             or verified["controller_ref"] != envelope["controller_ref"]
             or not _time(verified["verified_at"]) <= now < _time(verified["expires_at"])):

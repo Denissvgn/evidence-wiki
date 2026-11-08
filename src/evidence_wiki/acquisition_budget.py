@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ._ordered_clock import ordered
 from ._pack_io import json_document, read_file
 from .host_capabilities import scope_allows
 from .mutation_contracts import digest
@@ -144,7 +145,7 @@ def reserve(session, request_id, record, configured, max_bytes):
         if previous:
             started=min([started,*[row["original_budget_started_utc"] for row in previous]],
                 key=lambda value:datetime.fromisoformat(value.replace("Z","+00:00")))
-        if datetime.now(timezone.utc)<datetime.fromisoformat(started.replace("Z","+00:00")):
+        if ordered(datetime.now(timezone.utc))<datetime.fromisoformat(started.replace("Z","+00:00")):
             refuse("original_acquisition_clock_regressed")
         binding["original_budget_started_utc"]=started
         binding["max_bytes"]=allowance

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from evidence_wiki import execution_session as native
+from evidence_wiki._ordered_clock import ordered
 from evidence_wiki.agent_execution import ExecutionError
 from evidence_wiki.pack_discovery import owner
 from evidence_wiki.service_authentication import correlated
@@ -211,7 +212,7 @@ def questions(session, current, records, *, usage_view=None, facts):
                 config = facts.config
                 payload = application["envelope"]["payload"]["body"]["review"]
                 policy = facts.policy
-                age = (datetime.now(timezone.utc) - owner("_evidence_authority").timestamp(payload["reviewed_at"])).total_seconds()
+                age = (ordered(datetime.now(timezone.utc)) - owner("_evidence_authority").timestamp(payload["reviewed_at"])).total_seconds()
                 if (application.get("claim_id") != claim["id"] or payload["claim_id"] != claim["id"]
                         or application.get("strict_basis_id") != basis
                         or payload["basis_id"] != basis or not 0 <= age <= policy["max_review_age_seconds"]):
