@@ -145,25 +145,6 @@ def test_simulated_scoped_examination_has_reachable_current_nonblocking_gate(con
             assert result["semantic_override"] is False
 
 
-@pytest.mark.parametrize("configured, expected", [
-    ({"counter_disposition": "examined_no_unresolved_objection"}, "accepted"),
-    ({"counter_disposition": "opposing"}, "abstained"),
-], indirect=["configured"], ids=["simulated-examined", "simulated-opposing"])
-def test_simulated_automatic_drive_preserves_counter_gate(configured, expected):
-    root, policy, execution, context = configured
-    with context.activate(), Workspace.open(root) as workspace:
-        with workspace.research.session(policy, run_id="examination-drive", execution=execution) as session:
-            result = session.run_cycle(request_id="drive", max_steps=48)
-            assert result["terminal"] and result["outcome"] == expected, result
-            records = execution.records(session)
-            purposes = {row["data"].get("purpose") for row in records if row["kind"] == "execution_attempt"}
-            assert {"coverage", "counterevidence"} <= purposes
-            assert not result["evidence_accepted"]
-            assert all(role.model_ref.startswith("simulated/") for role in execution.profile.roles)
-            replay = session.run_cycle(request_id="drive", max_steps=48)
-            assert replay["historical"] and replay["outcome"] == expected
-
-
 def test_premise_examination_cannot_credit_requested_primary_or_missing_facet():
     """Mechanical subject accounting, without claiming signed execution proof."""
     from evidence_wiki.coverage_examination import examined_subject
