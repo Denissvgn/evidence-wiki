@@ -34,6 +34,15 @@
   `snapshot_packet_validator_superseded` instead of the reason used for
   tampering. Export the same selection again to obtain a new snapshot, or
   verify the old bytes offline with the release that exported them.
+- A selective review-packet preflight under one bound native session now
+  evaluates every claim's dependency state once and lends that evaluation to
+  each packet, instead of evaluating all claims again for every packet. Each
+  packet still re-qualifies the workspace capture against its own lock-held
+  usage view and runs the full dependency closing: capture revision,
+  configuration, basis, producer, usage revalidation, source age and review
+  authentication. If any of these differ or fail, sharing ends and that packet
+  is evaluated afresh as before. The 12-packet workload preflight takes about
+  40 % less time.
 
 ### Fixed
 

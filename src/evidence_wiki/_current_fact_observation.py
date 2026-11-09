@@ -264,6 +264,15 @@ def application_scope(session, attempt, application):
         continuation.token = None
 
 
+def _usage_view_types():
+    # Native strict calls use either private or public owner siblings;
+    # current_view may also borrow the original observation owner's view.
+    # Resolve actual namespaces on every use and retain exact class identity.
+    return (owner('_evidence_usage').UsageView,
+        owner('_strict_evidence').sibling('_evidence_usage').UsageView,
+        owner('strict_evidence').sibling('_evidence_usage').UsageView)
+
+
 def consume(holder, root, config, policy, view):
     from ._review_dependency_inputs import _Inputs
     if sys._getframe(1).f_code is not _Inputs.application_observation.__code__:
@@ -272,14 +281,11 @@ def consume(holder, root, config, policy, view):
     if continuation is None:
         holder.assert_current()
         return None
+    if type(continuation) is _PacketBatch:
+        return continuation.borrow(holder, root, config, policy, view)
     try:
         continuation.check()
-        # Native strict calls use either private or public owner siblings;
-        # current_view may also borrow the original observation owner's view.
-        # Resolve actual namespaces on every use and retain exact class identity.
-        view_types = (owner('_evidence_usage').UsageView,
-            owner('_strict_evidence').sibling('_evidence_usage').UsageView,
-            owner('strict_evidence').sibling('_evidence_usage').UsageView)
+        view_types = _usage_view_types()
         if (holder is not continuation.holder or root != holder._root
                 or config != continuation.config or policy != continuation.policy
                 or continuation.capture.files != continuation.files
@@ -302,6 +308,123 @@ def consume(holder, root, config, policy, view):
         raise
 
 
+_BATCH_MINT = object()
+
+
+class _PacketBatch:
+    """One fresh selective evaluation lent to the packets of one held preflight batch.
+
+    Nothing that depends on a view or on time is lent without being checked again. Each
+    borrow compares the borrower's fresh view state, trust, config, policy and holder with
+    the values frozen at the batch evaluation. It then re-qualifies the capture against
+    that fresh view and runs the full dependency closing: capture revision, configuration,
+    basis, producer, usage revalidation, source age and review authentication. If any
+    comparison or re-check fails, the batch ends and the caller takes today's fresh path.
+    Custody failures (another thread, task or Context) refuse, as for a continuation.
+    """
+
+    def __init__(self, holder, root, config, policy, view, result, observed, mint):
+        from ._review_dependency_inputs import _task
+        if mint is not _BATCH_MINT:
+            refuse('STRICT_OBSERVATION_UNAVAILABLE')
+        capture, producer, currents, reviews = observed
+        if root != holder._root:
+            refuse('STRICT_OBSERVATION_UNAVAILABLE')
+        self.holder = holder
+        self.config, self.policy = deepcopy((config, policy))
+        self.capture, self.producer = capture, producer
+        self.files = dict(capture.files)
+        self.result, self.currents, self.reviews = deepcopy((result, currents, reviews))
+        self.state = deepcopy(vars(view.state))
+        self.trust = deepcopy(view.trust)
+        self.thread, self.task = threading.get_ident(), _task()
+        self.valid, self.token = True, None
+
+    def check(self):
+        from ._review_dependency_inputs import _task, current_inputs
+        if (_ACTIVE.get() is not self or threading.get_ident() != self.thread
+                or _task() is not self.task or current_inputs() is not self.holder):
+            self.valid = False
+            refuse('CURRENT_OWNER_EPOCH_CHANGED')
+        try:
+            # Context tokens, unlike task/thread identity, reject copy_context().
+            _ACTIVE.reset(self.token)
+            self.token = _ACTIVE.set(self)
+            self.holder.assert_current()
+        except BaseException:
+            self.valid = False
+            raise
+
+    def borrow(self, holder, root, config, policy, view):
+        self.check()
+        if (not self.valid or holder is not self.holder or root != holder._root
+                or config != self.config or policy != self.policy
+                or self.capture.files != self.files
+                or vars(view.state) != self.state or view.trust != self.trust
+                or not any(type(view) is expected for expected in _usage_view_types())):
+            self.valid = False
+            return None
+        try:
+            holder._scope(root, config, self.capture, view)
+            qualified = owner('_publication_usage').qualify_capture(self.files,
+                config, view, purpose='qa-export', consumer='evidence-wiki')
+            if qualified.get('complete') is not True:
+                self.valid = False
+                return None
+            owner('_strict_evidence')._dependency_closing(root, config, policy, view,
+                self.capture, self.result['basis_id'], self.producer, self.currents, self.reviews)
+        except Exception:
+            # Drift found by a re-check: the fresh path re-derives and reports it.
+            self.valid = False
+            return None
+        self.check()
+        currents, reviews, result = deepcopy((self.currents, self.reviews, self.result))
+        return result, (self.capture, self.producer, currents, reviews)
+
+
+@contextmanager
+def packet_batch(root):
+    """Evaluate once for a batch of packet reads on one unchanged selective workspace.
+
+    Only a bound native session (an actual dependency-input holder) can lend, and only
+    outside every application continuation. The batch evaluation is an ordinary fresh one
+    under its own lock-held view. If it cannot be made, the batch lends nothing and every
+    packet keeps its fresh path, so refusals surface exactly where they did before.
+    """
+    from pathlib import Path
+
+    from ._review_dependency_inputs import current_inputs
+    holder = current_inputs()
+    if holder is None:
+        yield None
+        return
+    if _ACTIVE.get() is not None:
+        refuse('CURRENT_OWNER_EPOCH_NESTED')
+    batch = None
+    try:
+        selected = Path(root).resolve(strict=True)
+        strict = owner('_strict_evidence')
+        if selected == holder._root:
+            config = strict.configuration(selected)
+            policy = strict.resolve_policy(selected, config)
+            if policy is not None and policy.get('schema_version') == strict.POLICY_SCHEMA_V2:
+                with strict.sibling('_evidence_usage').current_view(selected, config) as view:
+                    result, observed = strict._evaluate_dependency_observations(selected, config, policy, view=view)
+                    batch = _PacketBatch(holder, selected, config, policy, view, result, observed, _BATCH_MINT)
+    except Exception:
+        batch = None
+    if batch is None:
+        yield None
+        return
+    batch.token = _ACTIVE.set(batch)
+    try:
+        yield batch
+    finally:
+        batch.valid = False
+        _ACTIVE.reset(batch.token)
+        batch.token = None
+
+
 def seal(facts):
     from .execution_session import _CurrentFacts
     if sys._getframe(1).f_code is not _CurrentFacts.__init__.__code__:
@@ -315,7 +438,7 @@ def seal(facts):
 
 def source_ids(session):
     continuation = _ACTIVE.get()
-    if continuation is None:
+    if continuation is None or type(continuation) is _PacketBatch:
         return None
     continuation.check()
     if session is not continuation.facts.session:
