@@ -54,6 +54,7 @@ EXAMPLE = ROOT / "examples/unattended-host"
 SUPPORTED_CASES = ("unchanged-baseline", "independent-claim-text", "independent-claim-limitations",
     "premise-transitive-edit", "question-demand-body", "unrelated-source-raw")
 CLAIM_IDS = {"observed-capacity", "effective-capacity", "observed-demand", "adequacy", "margin", "independent-note"}
+COMPACT_CLAIM_IDS = {"observed-capacity", "margin", "independent-note"}
 
 
 _DEADLINES = ContextVar("review_workload_deadlines", default=())
@@ -327,12 +328,12 @@ def question_binding_preflight(root, questions, originals):
         originals.append(("question-binding-preflight-" + question["slug"], observation))
 
 
-def review_packet_preflight(root, profile, source_ids, originals):
+def review_packet_preflight(root, profile, source_ids, originals, *, claim_ids=None):
     """Consume all actual protected pages before any qualification dispatch."""
     from evidence_wiki.review_page_operations import _collect_packet
 
     delivery = profile.review_delivery
-    for claim_id in sorted(CLAIM_IDS):
+    for claim_id in sorted(CLAIM_IDS if claim_ids is None else claim_ids):
         for task_role in ("evaluator", "critic"):
             label = "review-packet-preflight-" + claim_id + "-" + task_role
             try:
@@ -739,8 +740,12 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
     if native_case_plan is not None:
         valid_sources = (required_sources <= source_names and len(source_names) <= 65
             and all(type(name) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name) for name in source_names))
-    if (inventory["schema_version"] != "evidence-strict-claims/v2" or len(inventory["claims"]) != 6
-            or {row["id"] for row in inventory["claims"]} != CLAIM_IDS
+    claim_ids = {row["id"] for row in inventory["claims"]}
+    # The compact three-claim fixture is accepted only for the plain native legacy_full case run.
+    compact = (native_case_plan is not None and not native_extended and review_mode == "legacy_full"
+        and len(inventory["claims"]) == 3 and claim_ids == COMPACT_CLAIM_IDS)
+    if (inventory["schema_version"] != "evidence-strict-claims/v2"
+            or not (compact or len(inventory["claims"]) == 6 and claim_ids == CLAIM_IDS)
             or {(row["slug"], row["original_id"]) for row in inventory["questions"]} != {("capacity", "capacity"), ("demand", "demand")}
             or len(inventory["questions"]) != 2 or not valid_sources):
         raise ValueError("workload_fixture_inventory_invalid")
@@ -891,9 +896,10 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
             for calculation in claim["calculations"]:
                 calculation["result_id"] = computed["result_id"]
         margin = next(claim for claim in claims["claims"] if claim["id"] == "margin")
-        demand_evidence = next(claim for claim in claims["claims"] if claim["id"] == "observed-demand")["evidence"][0]
-        if not any(row["source_id"] == demand_evidence["source_id"] for row in margin["evidence"]):
-            margin["evidence"].append(copy.deepcopy(demand_evidence))
+        if not compact:
+            demand_evidence = next(claim for claim in claims["claims"] if claim["id"] == "observed-demand")["evidence"][0]
+            if not any(row["source_id"] == demand_evidence["source_id"] for row in margin["evidence"]):
+                margin["evidence"].append(copy.deepcopy(demand_evidence))
         if {row["source_id"] for row in margin["evidence"]} != {captured[name]["source_id"] for name in ("shared", "demand")}:
             raise ValueError("workload_fixture_lineage_invalid")
         proposal = {"schema_version": "evidence-draft-proposal/v1", "originals": [
@@ -940,7 +946,8 @@ def provision(base, fixture, originals, *, run_seconds=5220, allocation_binding=
         children.confirm_completed()
     if review_mode != "selective_reuse":
         with context.activate():
-            review_packet_preflight(root, profile, [row["source_id"] for row in captured.values()], originals)
+            review_packet_preflight(root, profile, [row["source_id"] for row in captured.values()], originals,
+                claim_ids=claim_ids)
     if children is not None:
         children.confirm_completed()
     issuer = QualificationAuthority("fixture-only-issuer", keys["qualifier"], "generator-controller")

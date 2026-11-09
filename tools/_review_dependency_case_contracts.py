@@ -60,6 +60,26 @@ CLAIM_IDS = frozenset(
     {"observed-capacity", "effective-capacity", "observed-demand", "adequacy", "margin", "independent-note"}
 )
 
+# Three claims, six review applications: a premise edge into the computed margin plus the
+# independent note. Only the plain legacy_full run of INITIAL_CASES may use it, and it never
+# feeds qualification; every other route keeps the six-claim fixture.
+COMPACT_CLAIM_IDS = frozenset({"observed-capacity", "margin", "independent-note"})
+
+
+def fixture_claim_ids(inventory):
+    """Return the closed claim set an inventory realizes, or refuse any other shape."""
+    identifiers = [row["id"] for row in inventory["claims"]]
+    selected = frozenset(identifiers)
+    _require(len(identifiers) == len(selected) and selected in {CLAIM_IDS, COMPACT_CLAIM_IDS},
+        "native_fixture_claim_set_invalid")
+    return CLAIM_IDS if selected == CLAIM_IDS else COMPACT_CLAIM_IDS
+
+
+def compact_scope_allowed(mode, cases, *, refresh=False, extended=False, bindings=False, journal_collection=False):
+    """The compact fixture serves only the plain legacy_full run of the initial cases."""
+    return (mode == "legacy_full" and bool(cases) and set(cases) <= set(INITIAL_CASES)
+        and refresh is False and not extended and not bindings and journal_collection is False)
+
 _CLAIM_CHANGES = {
     "independent-claim-text": (
         "independent-note",
