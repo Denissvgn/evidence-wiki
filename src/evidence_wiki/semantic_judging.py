@@ -428,14 +428,31 @@ def _public_judge(row, *, content=True):
 
 
 def report(session, *, after_index=0, max_records=16, expected_snapshot_id=None):
-    """Authenticate retained assessments and close current source access after serialization."""
-    from .semantic_contracts import DIMENSIONS
-    from .semantic_reporting import report as project
-    native = _native()
+    """Authenticate retained assessments and close current source access after serialization.
+
+    A report whose qualification changed while it was built is never returned.
+    Qualifications are read at the current time, and a calibration probe expires
+    at most 30 s after it was observed, so on a slow host one report can straddle
+    that expiry. The report is read-only, so one fresh epoch, which then reads the
+    expired state throughout, replaces it. A change in that epoch too refuses.
+    """
     selected = session.execution.profile.semantic_judging
     if selected is not None:
         selected.check_profile(session.execution.profile)
         selected.check_policy(session.policy, session.execution.profile)
+    for _attempt in range(2):
+        result = _report_epoch(session, after_index=after_index, max_records=max_records,
+            expected_snapshot_id=expected_snapshot_id)
+        if result is not None:
+            return result
+    refuse("SEMANTIC_QUALIFICATION_CHANGED")
+
+
+def _report_epoch(session, *, after_index, max_records, expected_snapshot_id):
+    """One epoch's report, or None when its qualification changed before the close."""
+    from .semantic_contracts import DIMENSIONS
+    from .semantic_reporting import report as project
+    native = _native()
     with native._current_facts(session, "semantic_report") as facts:
         view, observed, packets, records = facts.view, facts.observed, facts.packets, facts.records
         rows = _assessments(session, records=records)
@@ -515,5 +532,5 @@ def report(session, *, after_index=0, max_records=16, expected_snapshot_id=None)
             after_index=after_index, max_records=max_records, expected_snapshot_id=expected_snapshot_id)
         facts.require(session)
         if native.current_qualifications(session) != view["qualification"]:
-            refuse("SEMANTIC_QUALIFICATION_CHANGED")
+            return None
         return result
