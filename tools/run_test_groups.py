@@ -19,13 +19,19 @@ COMBINED_MODULES = (
     "tests/test_script_loader.py", "tests/test_script_host.py", "tests/test_library_workspace.py",
     "tests/test_provider_contract.py", "tests/test_provider_plugins.py",
 )
-# Each of these runs a complete native research drive per test, so its runtime alone
-# approaches a group's process limit. Each forms a group of its own.
+# Each of these runs one or more complete native research drives per test, so its runtime
+# alone approaches a group's process limit. Each forms a group of its own.
 ISOLATED_MODULES = frozenset({
+    "tests/test_coverage_session_drive.py",
+    "tests/test_readability_execution.py",
+    "tests/test_readability_execution_material.py",
+    "tests/test_refresh_changed_source_cycles.py",
     "tests/test_repair_continuations_exhaustion_reference.py",
     "tests/test_repair_continuations_reference.py",
     "tests/test_repair_continuations_refusal_reference.py",
     "tests/test_repair_peer_reference.py",
+    "tests/test_semantic_judging.py",
+    "tests/test_semantic_judging_unknown_advisory.py",
 })
 TIMEOUT_GRACE = 30.0
 KILL_CONFIRMATION = 5.0

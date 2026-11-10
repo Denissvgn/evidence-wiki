@@ -329,23 +329,30 @@ def question_binding_preflight(root, questions, originals):
 
 
 def review_packet_preflight(root, profile, source_ids, originals, *, claim_ids=None):
-    """Consume all actual protected pages before any qualification dispatch."""
+    """Consume all actual protected pages before any qualification dispatch.
+
+    Under a bound selective session the packets share one held evaluation. Every packet
+    is still collected for real, and each borrow re-qualifies and closes against its own
+    fresh view (`evidence_wiki._current_fact_observation.packet_batch`).
+    """
+    from evidence_wiki._current_fact_observation import packet_batch
     from evidence_wiki.review_page_operations import _collect_packet
 
     delivery = profile.review_delivery
-    for claim_id in sorted(CLAIM_IDS if claim_ids is None else claim_ids):
-        for task_role in ("evaluator", "critic"):
-            label = "review-packet-preflight-" + claim_id + "-" + task_role
-            try:
-                packet = _collect_packet(root, claim_id=claim_id, context_id=label, task_role=task_role,
-                    page_chars=delivery.page_chars, source_ids=source_ids,
-                    context_version=delivery.context_version, max_packet_bytes=delivery.max_packet_bytes)
-                originals.append((label, {"context_version": delivery.context_version,
-                    "packet_sha256": digest(packet), "packet": packet,
-                    "review_credit": 0, "approval_credit": 0, "worker_consumption": "not_observed"}))
-            except (Exception, SystemExit) as error:
-                originals.append((label + "-failure", failure_document(error)))
-                raise
+    with packet_batch(root):
+        for claim_id in sorted(CLAIM_IDS if claim_ids is None else claim_ids):
+            for task_role in ("evaluator", "critic"):
+                label = "review-packet-preflight-" + claim_id + "-" + task_role
+                try:
+                    packet = _collect_packet(root, claim_id=claim_id, context_id=label, task_role=task_role,
+                        page_chars=delivery.page_chars, source_ids=source_ids,
+                        context_version=delivery.context_version, max_packet_bytes=delivery.max_packet_bytes)
+                    originals.append((label, {"context_version": delivery.context_version,
+                        "packet_sha256": digest(packet), "packet": packet,
+                        "review_credit": 0, "approval_credit": 0, "worker_consumption": "not_observed"}))
+                except (Exception, SystemExit) as error:
+                    originals.append((label + "-failure", failure_document(error)))
+                    raise
 
 
 def host_read_preflight(root, runtime, originals):

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from evidence_wiki import execution_session as native
-from evidence_wiki import research_execution
+from evidence_wiki import research_execution, semantic_judging
 from evidence_wiki._facades._base import _translated
 from evidence_wiki.errors import UsageError
 from evidence_wiki.run_policy import RunPolicy
@@ -48,6 +48,63 @@ def test_same_epoch_reuses_actual_material_but_refreshes_qualification_clock(epo
     with patch.object(native, "current", return_value=monkeypatch_full) as full:
         assert native.current_qualifications(session) == {"full": True}
         full.assert_called_once_with(session)
+
+
+@pytest.fixture
+def report_epoch(epoch, monkeypatch):
+    """Drive semantic_report's opening and closing qualification reads from a fake clock."""
+    session, state = epoch
+    state.update(reads=[], probe_expires=30, on_read=None)
+    session.execution = SimpleNamespace(profile=SimpleNamespace(sha256="a" * 64,
+        semantic_judging=SimpleNamespace(check_profile=lambda *_: None, check_policy=lambda *_: None)))
+    session.policy = SimpleNamespace(policy_id="sha256:" + "b" * 64)
+    def qualifications(*_a, **_k):
+        qualified = state["clock"] < state["probe_expires"]
+        value = {"state": "qualified" if qualified else "unknown",
+            "reason": "qualified_scoped_profiles" if qualified else "qualification_unknown", "profiles": []}
+        state["reads"].append(value["state"])
+        if state["on_read"] is not None:
+            value = state["on_read"](value)
+        return value
+    observed = SimpleNamespace(config={}, controls={"result": {"context_id": "same"}}, finish=lambda: None)
+    def observe(current):
+        state["epochs"] = state.get("epochs", 0) + 1
+        # The actual owner reads the opening qualification here, inside the epoch's construction.
+        view = {"accounting": {"original_outcomes": []}, "qualification": native._qualifications(current, observed)}
+        return view, observed, [], list(state["records"])
+    monkeypatch.setattr(native, "_qualifications", qualifications)
+    monkeypatch.setattr(native, "_observe_current", observe)
+    return session, state
+
+
+def test_semantic_report_rereads_once_when_its_probe_expires_between_reads(report_epoch):
+    session, state = report_epoch
+    state["clock"] = 29
+    def expire_after_the_opening_read(value):
+        state["clock"] = 31
+        return value
+    state["on_read"] = expire_after_the_opening_read
+    report = semantic_judging.report(session)
+    # The first epoch opened qualified and closed unknown, so it was discarded. The fresh
+    # epoch read the expired state throughout and is the one returned.
+    assert state["reads"] == ["qualified", "unknown", "unknown", "unknown"]
+    assert state["epochs"] == 2
+    assert {key: report["qualification"][key] for key in ("state", "reason")} == {
+        "state": "unknown", "reason": "qualification_unknown"}
+
+
+def test_semantic_report_refuses_when_its_qualification_changes_in_both_epochs(report_epoch):
+    session, state = report_epoch
+    def changes_on_every_read(value):
+        if len(state["reads"]) > 8:
+            pytest.fail("semantic_report kept rereading a changing qualification.")
+        return value | {"reason": f"read-{len(state['reads'])}"}
+    state["on_read"] = changes_on_every_read
+    with pytest.raises(UsageError) as caught:
+        semantic_judging.report(session)
+    assert caught.value.error_code == "RESEARCH_SEMANTIC_QUALIFICATION_CHANGED"
+    assert state["reads"] == ["qualified"] * 4
+    assert state["epochs"] == 2
 
 
 @pytest.mark.parametrize("change", ["controls", "records", "material"])

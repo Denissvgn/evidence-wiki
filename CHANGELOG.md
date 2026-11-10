@@ -34,8 +34,29 @@
   `snapshot_packet_validator_superseded` instead of the reason used for
   tampering. Export the same selection again to obtain a new snapshot, or
   verify the old bytes offline with the release that exported them.
+- A selective review-packet preflight under one bound native session now
+  evaluates every claim's dependency state once and lends that evaluation to
+  each packet, instead of evaluating all claims again for every packet. Each
+  packet still re-qualifies the workspace capture against its own lock-held
+  usage view and runs the full dependency closing: capture revision,
+  configuration, basis, producer, usage revalidation, source age and review
+  authentication. If any of these differ or fail, sharing ends and that packet
+  is evaluated afresh as before. The 12-packet workload preflight takes about
+  40 % less time.
 
 ### Fixed
+
+- Accept the next attempt on the reference subprocess executor as soon as a
+  poll reports the previous attempt terminal. Completion was marked only after
+  the terminal observation was published, so under CPU contention an
+  immediate next invoke could be refused with `execution_attempt_pending`.
+
+- Return a consistent semantic report when a calibration probe expires while
+  the report is built. The report compares the qualification it opened with a
+  fresh read at its close. A probe expires at most 30 s after it was observed,
+  so a slow report could straddle that expiry and be refused, not recoverably,
+  with `RESEARCH_SEMANTIC_QUALIFICATION_CHANGED`. The read-only report now runs
+  once more in a fresh epoch. A change in that epoch too still refuses.
 
 - Accept implementation-evidence and ordinary-maintenance qualifications in
   qualified-context packets produced by `agent-wiki-cli` 4.0.0 while retaining
