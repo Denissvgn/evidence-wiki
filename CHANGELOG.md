@@ -37,6 +37,18 @@
 
 ### Fixed
 
+- Accept the next attempt on the reference subprocess executor as soon as a
+  poll reports the previous attempt terminal. Completion was marked only after
+  the terminal observation was published, so under CPU contention an
+  immediate next invoke could be refused with `execution_attempt_pending`.
+
+- Return a consistent semantic report when a calibration probe expires while
+  the report is built. The report compares the qualification it opened with a
+  fresh read at its close. A probe expires at most 30 s after it was observed,
+  so a slow report could straddle that expiry and be refused, not recoverably,
+  with `RESEARCH_SEMANTIC_QUALIFICATION_CHANGED`. The read-only report now runs
+  once more in a fresh epoch. A change in that epoch too still refuses.
+
 - Accept implementation-evidence and ordinary-maintenance qualifications in
   qualified-context packets produced by `agent-wiki-cli` 4.0.0 while retaining
   offline validation and support for earlier v1 and v2 packets.

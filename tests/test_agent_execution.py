@@ -6,12 +6,15 @@ import copy
 import json
 import os
 import sys
+import threading
 import time
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
+from evidence_wiki import agent_execution
 from evidence_wiki.agent_execution import (
     BoundedSubprocessExecutor,
     ExecutionAttempt,
@@ -194,6 +197,30 @@ def test_serial_execution_and_total_attempt_bound(tmp_path):
     final(host, value)
     with pytest.raises(ExecutionError, match="step_limit"):
         host.invoke(attempt(selected, attempt_id="another"))
+
+
+class _DescheduledEvent(threading.Event):
+    """Model a watcher thread that is descheduled as it reaches ``finished.set()``."""
+
+    def set(self):
+        time.sleep(0.3)
+        super().set()
+
+
+def test_terminal_observation_admits_the_next_serial_invoke(tmp_path, monkeypatch):
+    @dataclass
+    class Running(agent_execution._Running):
+        finished: Any = field(default_factory=_DescheduledEvent)
+
+    monkeypatch.setattr(agent_execution, "_Running", Running)
+    selected = profile(total_steps=2)
+    host = executor(tmp_path, "print('{}')", selected)
+    first = attempt(selected)
+    host.invoke(first)
+    assert final(host, first)["state"] == "succeeded"
+    second = attempt(selected, attempt_id="attempt-2", nonce="nonce-2")
+    assert host.invoke(second)["state"] in {"running", "succeeded"}
+    assert final(host, second)["state"] == "succeeded"
 
 
 def test_no_environment_or_receipt_key_inheritance(tmp_path, monkeypatch):

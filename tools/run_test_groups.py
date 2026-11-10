@@ -19,10 +19,11 @@ COMBINED_MODULES = (
     "tests/test_script_loader.py", "tests/test_script_host.py", "tests/test_library_workspace.py",
     "tests/test_provider_contract.py", "tests/test_provider_plugins.py",
 )
-# Each of these runs a complete native research drive per test, so its runtime alone
-# approaches a group's process limit. Each forms a group of its own.
+# Each of these runs one or more complete native research drives per test, so its runtime
+# alone approaches a group's process limit. Each forms a group of its own.
 ISOLATED_MODULES = frozenset({
     "tests/test_coverage_session_drive.py",
+    "tests/test_refresh_changed_source_cycles.py",
     "tests/test_repair_continuations_exhaustion_reference.py",
     "tests/test_repair_continuations_reference.py",
     "tests/test_repair_continuations_refusal_reference.py",

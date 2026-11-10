@@ -2,7 +2,6 @@
 
 import json
 import threading
-import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +17,7 @@ from evidence_wiki.operations_recovery import HostBackupRecovery, recover_upgrad
 from evidence_wiki.pack_discovery import owner
 from tests._operations_fixture import DisposableBackupService
 from tests._usage_fixture import UsageFixture
+from tests.test_normalization_control import patient_cancel_probe, stepped_clock
 
 
 def control(seconds=60):
@@ -120,7 +120,16 @@ def test_upgrade_malformed_retained_journal_is_preserved_with_unknown_count(upgr
 def test_upgrade_closing_capture_cannot_commit_success_after_control_stops(upgrade, monkeypatch, stop):
     root, context, predecessors, original_clock = upgrade
     cancelled = threading.Event()
-    clock = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat(),
+    # The work before the closing capture had to fit a real 2 s budget, and every checkpoint's
+    # probe thread had 0.05 s to answer. The native control's clock now moves only when the
+    # test expires it, and the probe's queue waits are widened (see patient_cancel_probe).
+    # With the clock frozen, the idle probe's own wait no longer tracks real time. Under load the
+    # work between two checkpoints can outlast 10 s (upgrade planning did) and the probe would
+    # exit, so idle_seconds widens that wait too.
+    native = owner("_operation_control")
+    stepped = stepped_clock(native, monkeypatch)
+    patient_cancel_probe(native, monkeypatch, idle_seconds=600)
+    clock = OperationControl(deadline_utc=(stepped.utc + timedelta(seconds=2)).isoformat(),
                              timeout_seconds=2, cancel_requested=cancelled.is_set)
     initializer = owner("init_research_workspace")
     original = initializer.observe_tree
@@ -132,7 +141,7 @@ def test_upgrade_closing_capture_cannot_commit_success_after_control_stops(upgra
             captures += 1
             if captures == 4:
                 if stop == "expiry":
-                    time.sleep(clock.remaining_seconds("closing_capture_probe") + 0.03)
+                    stepped.advance(clock.remaining_seconds("closing_capture_probe") + 0.03)
                 else:
                     cancelled.set()
         return result
@@ -281,8 +290,19 @@ def test_protected_closing_capture_cannot_commit_success_after_control_stops(pro
     from evidence_wiki import operations_recovery
     fixture, body, service, context, original_clock = protected
     cancelled = threading.Event()
-    clock = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat(),
-                             timeout_seconds=2, cancel_requested=cancelled.is_set)
+    # The work before the closing capture had to fit a real 2 s budget, and every checkpoint's
+    # probe thread had 0.05 s to answer. The native control's clock now moves only when the
+    # test expires it, and the probe's queue waits are widened (see patient_cancel_probe).
+    # With the clock frozen, the idle probe's own wait no longer tracks real time. Under load the
+    # work between two checkpoints can outlast 10 s (upgrade planning did) and the probe would
+    # exit, so idle_seconds widens that wait too.
+    # Each backup-service call still runs in a real host thread whose wait is the remaining
+    # budget, so that budget is 10 s rather than 2 s; stepping it to expiry costs nothing.
+    native = owner("_operation_control")
+    stepped = stepped_clock(native, monkeypatch)
+    patient_cancel_probe(native, monkeypatch, idle_seconds=600)
+    clock = OperationControl(deadline_utc=(stepped.utc + timedelta(seconds=10)).isoformat(),
+                             timeout_seconds=10, cancel_requested=cancelled.is_set)
     operation = HostBackupRecovery(fixture.root, context=context, service=service, request_id="closing-backup", operation_control=clock)
     assert operation.backup()["status"] == "prepared"
     (fixture.host / "evidence-state.json").unlink()
@@ -294,7 +314,7 @@ def test_protected_closing_capture_cannot_commit_success_after_control_stops(pro
         captures += 1
         if captures == 2:
             if stop == "expiry":
-                time.sleep(clock.remaining_seconds("closing_capture_probe") + 0.03)
+                stepped.advance(clock.remaining_seconds("closing_capture_probe") + 0.03)
             else:
                 cancelled.set()
         return result
