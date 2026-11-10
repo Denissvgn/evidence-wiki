@@ -34,6 +34,8 @@ from tools._review_dependency_case_contracts import (
     _require,
     case_manifest,
     case_plan,
+    compact_scope_allowed,
+    fixture_claim_ids,
     review_fixture_max_age,
 )
 from tools._review_dependency_case_contracts import validate_case_plan as validate_case_plan
@@ -78,6 +80,9 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
     baseline: dict | None = None
     pending_source: dict | None = field(default=None, repr=False)
     extended_caps: dict | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        self.claim_ids = fixture_claim_ids(self.manifest)
 
     def raw(self, label, data):
         pin = retain(self.originals.directory / (str(len(self.originals.pins)) + "-" + label + ".bin"), data, raw=True)
@@ -200,7 +205,7 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
         from evidence_wiki.review_packet_execution import context_parameters, reserve_evaluator
 
         claim_ids = set(claim_ids)
-        _require(claim_ids <= CLAIM_IDS, "unknown_native_claim_selection")
+        _require(claim_ids <= self.claim_ids, "unknown_native_claim_selection")
         _require(
             verdict in {"pass", "fail", "unknown"} and set(configs) <= {"evidence", "critic"},
             "native_service_selection_invalid",
@@ -311,16 +316,16 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
     def establish(self):
         from evidence_wiki import execution_session as native
 
-        self.drive(CLAIM_IDS, cycle="baseline")
+        self.drive(self.claim_ids, cycle="baseline")
         run_id = next(iter(self.applications.values()))["run_id"]
         with self.session(run_id) as (_workspace, session):
             for original in self.runtime.policy.to_dict()["scope"]["question_ids"]:
                 native._resolve(session, original)
             self.originals.append_records("baseline-resolution", self.runtime.execution.records(session))
         self.baseline = self.observe("baseline")
-        _require(_accepted(self.baseline["strict"]) == CLAIM_IDS, "native_baseline_not_accepted")
+        _require(_accepted(self.baseline["strict"]) == self.claim_ids, "native_baseline_not_accepted")
         _require(self.baseline["publication"]["verdict"] == "ship", "native_baseline_not_publishable")
-        _require(len(self.applications) == 12, "native_baseline_service_cohort_incomplete")
+        _require(len(self.applications) == 2 * len(self.claim_ids), "native_baseline_service_cohort_incomplete")
         return self.baseline
 
     def retained(self, claim_id, config_ref, label):
@@ -366,7 +371,7 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
         for key in coordinate[:-1]:
             parent = parent[key]
         parent[coordinate[-1]] = copy.deepcopy(value)
-        expected_changed = _dependants(self.manifest, identifier) if self.mode == "selective_reuse" else set(CLAIM_IDS)
+        expected_changed = _dependants(self.manifest, identifier) if self.mode == "selective_reuse" else set(self.claim_ids)
         assertions, evidence = [], []
         try:
             path.write_bytes(canonical(manifest))
@@ -382,7 +387,7 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
             current = self.observe(case_id)
             baseline, strict = self.baseline["strict"], current["strict"]
             _require(strict["basis_id"] != baseline["basis_id"], "workspace_basis_did_not_change")
-            _require(_accepted(strict) == CLAIM_IDS - expected_changed, "native_acceptance_set_changed")
+            _require(_accepted(strict) == self.claim_ids - expected_changed, "native_acceptance_set_changed")
             if case_id == "claim-mechanical-material":
                 selected = next(row for row in strict["claims"] if row["claim"]["id"] == identifier)
                 _require(
@@ -391,10 +396,10 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
             if self.mode == "selective_reuse":
                 old_bases, new_bases = _basis(baseline), _basis(strict)
                 _require(
-                    {claim for claim in CLAIM_IDS if old_bases[claim] != new_bases[claim]} == expected_changed,
+                    {claim for claim in self.claim_ids if old_bases[claim] != new_bases[claim]} == expected_changed,
                     "native_claim_basis_set_changed",
                 )
-                for claim_id in sorted(CLAIM_IDS - expected_changed):
+                for claim_id in sorted(self.claim_ids - expected_changed):
                     for config_ref in ("evidence", "critic"):
                         facts = self.retained(claim_id, config_ref, case_id)
                         _require(facts["state"] == "eligible", "retained_service_not_eligible")
@@ -427,7 +432,7 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
             if refresh:
                 self.drive(expected_changed, cycle=case_id)
                 refreshed = self.observe(case_id + "-refreshed")
-                _require(_accepted(refreshed["strict"]) == CLAIM_IDS, "native_refresh_not_accepted")
+                _require(_accepted(refreshed["strict"]) == self.claim_ids, "native_refresh_not_accepted")
                 _require(refreshed["publication"]["verdict"] == "ship", "native_refresh_not_publishable")
                 assertions.extend(["actual_authenticated_refresh_cohort", "final_native_acceptance_and_publication"])
             return {
@@ -451,19 +456,21 @@ class NativeCases(NativeCaseServices, NativeCaseInputs):
                     "refresh_changed_protected_owner",
                 )
             restored = self.observe(case_id + "-restored")
-            _require(_accepted(restored["strict"]) == CLAIM_IDS, "restored_baseline_not_accepted")
+            _require(_accepted(restored["strict"]) == self.claim_ids, "restored_baseline_not_accepted")
 
     def run_case(self, case_id, *, refresh=False):
         """Dispatch each closed case coordinate to its actual native owner."""
         if case_id not in _FAMILY:
             raise ValueError("native_case_unknown")
+        _require(self.claim_ids == CLAIM_IDS or case_id in INITIAL_CASES, "native_compact_fixture_scope_invalid")
         if case_id == "unchanged-baseline":
             observed = self.observe(case_id)
-            _require(_accepted(observed["strict"]) == CLAIM_IDS, "native_baseline_not_accepted")
+            _require(_accepted(observed["strict"]) == self.claim_ids, "native_baseline_not_accepted")
             return {
                 "status": "passed",
                 "assertions": [
-                    "twelve_actual_review_applications",
+                    "twelve_actual_review_applications" if self.claim_ids == CLAIM_IDS
+                    else "compact_six_actual_review_applications",
                     "all_native_claims_accepted",
                     "final_native_publication",
                     "read_only_closing_custody",
@@ -895,6 +902,9 @@ def run_cases(directory, fixture, *, mode="selective_reuse", cases=INITIAL_CASES
     _require(mode in {"selective_reuse", "legacy_full"}, "native_mode_unknown")
     cases = tuple(cases)
     _require(len(cases) == len(set(cases)) and bool(cases) and set(cases) <= set(CASE_IDS), "native_case_selection_invalid")
+    _require(fixture_claim_ids(fixture["inventory"]) == CLAIM_IDS or compact_scope_allowed(
+        mode, cases, refresh=refresh, extended=extended_recipe_pin is not None or extended_selection is not None,
+        bindings=bool(evidence_bindings), journal_collection=journal_collection), "native_compact_fixture_scope_invalid")
     from tools._review_dependency_case_evidence import freeze_bindings, source_identity
     evidence_bindings = freeze_bindings(evidence_bindings)
     source_before = source_identity()

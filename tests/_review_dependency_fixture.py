@@ -13,8 +13,13 @@ from evidence_wiki._process_groups import ProcessGroupOwnership
 from tools._integration_owner_pass import _group_alive
 
 
-def fixture_document():
-    """Construct inert synthetic inputs; native provisioning owns realized IDs."""
+def fixture_document(*, compact=False):
+    """Construct inert synthetic inputs; native provisioning owns realized IDs.
+
+    The compact variant keeps three claims (six review applications): observed capacity, the computed
+    margin with that one premise, and the independent note. Only the plain legacy_full native run of the
+    initial cases accepts it.
+    """
     questions = [
         {"slug": "capacity", "original_id": "capacity", "question": "Does retained capacity cover retained demand?"},
         {
@@ -36,7 +41,7 @@ def fixture_document():
         }
 
     claims = []
-    for identifier, slug, text, premises in (
+    rows = (
         ("observed-capacity", "capacity", "Retained capacity is six units.", []),
         ("effective-capacity", "capacity", "Effective capacity equals retained capacity.", ["observed-capacity"]),
         ("observed-demand", "demand", "Retained demand is four units.", []),
@@ -48,7 +53,14 @@ def fixture_document():
         ),
         ("margin", "capacity", "The retained margin is two units.", ["effective-capacity", "observed-demand"]),
         ("independent-note", "demand", "The service note says scheduled maintenance.", []),
-    ):
+    )
+    if compact:
+        rows = (
+            rows[0],
+            ("margin", "capacity", "The retained margin is two units.", ["observed-capacity"]),
+            rows[-1],
+        )
+    for identifier, slug, text, premises in rows:
         source = "demand" if identifier == "observed-demand" else "shared"
         quote = (
             "Demand: 4 units."
@@ -132,17 +144,18 @@ def fixture_document():
     }
 
 
-def execute(directory, *, mode, cases=None, refresh=False, route=(), wait_seconds=None):
+def execute(directory, *, mode, cases=None, refresh=False, route=(), wait_seconds=None, compact=False):
     """An isolated child owns every native worker and its closed launch guard.
 
     Selective reuse outgrows the plain route's job window and record bound, so it needs the extended route.
+    `compact` supplies the three-claim fixture, which only the plain legacy_full initial-case run accepts.
     """
     if mode == "selective_reuse" and not route:
         raise ValueError("selective_reuse_requires_extended_route")
     directory = Path(directory)
     directory.mkdir(mode=0o700)
     supplied = directory / "fixture.json"
-    supplied.write_text(json.dumps(fixture_document(), allow_nan=False))
+    supplied.write_text(json.dumps(fixture_document(compact=compact), allow_nan=False))
     output = directory / "native"
     command = [
         sys.executable,
