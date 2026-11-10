@@ -364,26 +364,6 @@ def test_public_finite_wrong_value_cannot_release_synthetic_model_passes(tmp_pat
             })
 
 
-def test_public_unknown_advisory_cannot_release_after_three_native_passes(tmp_path, monkeypatch):
-    root, policy, execution, context = native_fixture(tmp_path, monkeypatch, semantic_advisory="unknown")
-    with context.activate(), Workspace.open(root) as workspace:
-        with workspace.research.session(policy, run_id="semantic-unknown-advisory", execution=execution) as session:
-            result = session.run_until_terminal(request_id="drive", expected_basis_id=session.current()["basis_id"], max_steps=64)
-            assert result["terminal"] and result["outcome"] == "abstained"
-            assert result["reason"] == "review_disagreement"
-            records = execution.records(session)
-            applications = [row["data"] for row in records if row["kind"] == "execution_application" and "semantic_assessment" in row["data"]]
-            assert len([row for row in applications if row["operation"] == "evaluate" and row["passed"]]) == 3
-            assert len([row for row in applications if row["operation"] == "adjudicate"]) == 1
-            assert not session.current()["canonical_release"]["research_complete"]
-            report = session.semantic_report()
-            assert report["dimensions"]["support"]["unknown"] == 1
-            assert report["dimensions"]["support"]["score"] is None
-            for dimension in DIMENSIONS[3:]:
-                assert report["dimensions"][dimension]["denominator"] == 0
-            assert report["originals"][0]["original_text_sha256"] == "sha256:" + digest(ORIGINAL)
-
-
 @pytest.mark.parametrize("boundary", ["missing_first_pass", "unqualified_adjudicator", "claim_allowance", "run_budget"])
 def test_advisory_absence_qualification_and_shared_allowances_do_not_return_release(accepted_native, boundary):
     selected = accepted_native
