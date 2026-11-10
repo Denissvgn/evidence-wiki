@@ -176,15 +176,23 @@ def test_review_burden_includes_applied_adjudication_and_preserves_dispatch_scop
 @pytest.mark.parametrize("stopped", ["expired", "cancelled"])
 def test_mcp_original_control_stops_blocked_public_call(operation, stopped, tmp_path, monkeypatch):
     import threading
-    from datetime import datetime, timedelta, timezone
+    from datetime import timedelta
 
     from evidence_wiki import OperationControl
+    from evidence_wiki.pack_discovery import owner
+    from tests.test_normalization_control import patient_cancel_probe, stepped_clock
 
     route = object.__new__(host.Routes)
     route.root, route.route, route.calls = tmp_path, "scoped_mcp", []
     checkpoints, observed = [], []
     cancellation = threading.Event()
-    borrowed = OperationControl(deadline_utc=(datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
+    # A real 0.05 s budget had to cover the before-call checkpoint and the dispatch, and the
+    # cancelled case's probe thread had 0.05 s to answer each checkpoint. The native control's
+    # clock now moves only inside the call, and the probe's queue waits are widened.
+    native = owner("_operation_control")
+    clock = stepped_clock(native, monkeypatch)
+    requested = patient_cancel_probe(native, monkeypatch)
+    borrowed = OperationControl(deadline_utc=(clock.utc + timedelta(seconds=60)).isoformat(),
         timeout_seconds=0.05 if stopped == "expired" else 60,
         cancel_requested=cancellation.is_set if stopped == "cancelled" else None)
     original_checkpoint = borrowed.checkpoint
@@ -200,7 +208,7 @@ def test_mcp_original_control_stops_blocked_public_call(operation, stopped, tmp_
             observed.append(message["params"]["name"])
             assert operation_control is borrowed
             if stopped == "expired":
-                time.sleep(0.1)
+                clock.advance(0.1)
             else:
                 cancellation.set()
             with pytest.raises(EvidenceWikiError) as failure:
@@ -217,6 +225,9 @@ def test_mcp_original_control_stops_blocked_public_call(operation, stopped, tmp_
         assert observed == ["research_" + operation.replace("-", "_")]
         assert checkpoints == ["reference_route_before_call", "blocked_public_call", "reference_route_after_call"]
         assert route.calls[0]["state"] == "refused"
+        if stopped == "cancelled":
+            # With the clock frozen, the product's own wait is exactly its 0.05 s allowance.
+            assert min(requested) == pytest.approx(0.05)
     finally:
         borrowed.close()
 

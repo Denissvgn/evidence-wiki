@@ -11,6 +11,8 @@ import pytest
 from evidence_wiki import OperationControl
 from evidence_wiki.errors import ConfigError, EvidenceWikiError
 from evidence_wiki.onboarding_mcp import OnboardingMcpServer
+from evidence_wiki.pack_discovery import owner
+from tests.test_normalization_control import patient_cancel_probe
 from tests.test_onboarding_mcp import initialize, message
 
 
@@ -100,6 +102,8 @@ def test_unusable_control_refuses_before_tool_effects(server, tmp_path, monkeypa
         pytest.fail("tool ran before control refusal")
 
     monkeypatch.setattr(server, "call_tool", call_tool)
+    # The cancelled case's probe thread had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     borrowed = control(-1 if state == "expired" else 1300,
                        cancel_requested=(lambda: True) if state == "cancelled" else None)
     supplied = borrowed
@@ -127,6 +131,8 @@ def test_unusable_control_refuses_before_tool_effects(server, tmp_path, monkeypa
 @pytest.mark.parametrize("refused", [False, True])
 def test_default_cancellation_control_keeps_bound_and_closes(server, tmp_path, monkeypatch,
                                                            runtime_seconds, expected_seconds, refused):
+    # The probe thread of the control the server creates had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     created, closed = [], []
     original_init, original_close = OperationControl.__init__, OperationControl.close
 
@@ -165,6 +171,8 @@ def test_default_cancellation_control_keeps_bound_and_closes(server, tmp_path, m
 
 
 def test_default_cancelled_control_refuses_before_effects_and_closes(server, tmp_path, monkeypatch):
+    # The probe thread of the control the server creates had 0.05 s to answer; see patient_cancel_probe.
+    patient_cancel_probe(owner("_operation_control"), monkeypatch)
     created = []
     original_init = OperationControl.__init__
 

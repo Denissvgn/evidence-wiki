@@ -1030,6 +1030,9 @@ class BoundedSubprocessExecutor:
                 running.snapshot = {"state": state, "reason": reason, "completed_utc": completed,
                                     "output": output, "observed_usage": usage, "final_accounting": final,
                                     "cancellation_confirmed": state == "cancelled"}
+                # Publish completion with the snapshot: a caller that observes a
+                # terminal state must find the serial host ready for its next invoke.
+                running.finished.set()
         except Exception:
             with running.lock:
                 try:
@@ -1041,6 +1044,7 @@ class BoundedSubprocessExecutor:
                                     "observed_usage": {"seconds": None, "model_calls": None, "tool_calls": None,
                                                        "tokens": None, "cost": None},
                                     "final_accounting": False, "cancellation_confirmed": False}
+                running.finished.set()
         finally:
             running.finished.set()
 
